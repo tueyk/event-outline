@@ -29,6 +29,15 @@
 - 改动 `/opt/tavern` 下扩展目录以外的任何东西
 - 改动用户已有扩展（Pathweaver 汉化、shujuku、酒馆助手脚本）
 
+## 远程仓库：交给赫尔墨斯（2026-10-29 危晓定）
+
+- 本地仓库归我：`git add` / `commit` / 本地 tag / `status` / `log` / `diff`。
+- 远程一律交赫尔墨斯（Hermes 侧）：`push` / `fetch` / `pull` / 远端 tag / 远端回滚，不要自己动。
+- 原因：dsh 的 Windows 沙箱里 MSYS bash 无法 fork，git 的联网命令在里面起不来；Hermes 侧原生 git 可用。
+- 通道（2026-10-29 定稿）：本地推 VPS 裸库 `ssh://tavern/home/ubuntu/git/tavern-ext.git`，VPS 的 post-receive 钩子再走 **SSH 443**（ssh.github.com）推 GitHub。原因：本机到 github.com:443 与 VPS 到 github.com:443 都是间歇性阻断，只有 VPS 到 ssh.github.com:443 实测稳定。
+- 远端 sha 与本地一致（真 git push，不是 API 重建），可以正常 fetch / pull。`.deploy/push-via-api.mjs` 只作兜底。
+- 凭证不进仓库：VPS 上只有一把专用 ed25519 部署密钥（`~/.ssh/id_ed25519_github`），本机的 GitHub token 放在 `D:\dsh-home\secrets\tavern-ext.env`。
+
 ## 永不触碰
 
 - GitHub 账号密码、token、SSH 私钥
