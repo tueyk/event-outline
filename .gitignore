@@ -1,0 +1,24 @@
+# 构建产物与依赖
+node_modules/
+dist/
+*.tar.gz
+
+# 部署临时件
+.deploy/
+*.tmp
+
+# 本地调试副本
+local/
+
+# 编辑器与系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# 凭证，永不入库
+*.pem
+*.key
+secrets*.json
+.env
+.env.*
