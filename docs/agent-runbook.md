@@ -49,7 +49,7 @@ bash scripts/remote-sync.sh push-log       # 看转推 GitHub 的日志
   因为直接写裸库对象、不走 `receive-pack`，钩子不会自动跑，所以脚本里显式调用一次。
 - 推送成功后必须看日志里有 `exit=0` 才算真的到了 GitHub；脚本会自查，失败时以非零退出。
 - 远端 sha 与本地一致（真 git 对象，不是 API 重建）。`.deploy/push-via-api.mjs` 只作兜底。
-- 凭证不进仓库：VPS 上只有一把专用 ed25519 部署密钥（`~/.ssh/id_ed25519_github`），本机的 GitHub token 放在 `D:\dsh-home\secrets\tavern-ext.env`（现在用不到）。
+- 凭证不进仓库：VPS 上只有一把专用 ed25519 部署密钥（`~/.ssh/id_ed25519_github`）。本机若存在 GitHub token，放在 DSH_HOME 下的 secrets 目录，不入库（当前中继方案用不到它）。
 
 ### 沙箱哪些 git 子命令能跑（2026-10-30 实测）
 
