@@ -12,6 +12,11 @@ function check(name, cond, extra) {
 
 const sandbox = {};
 const runner = new Function('exports', `
+// 日志函数在扩展里是模块级函数，测试沙箱里补成空实现（这里只测解析逻辑）
+function log() {}
+function warn() {}
+function error() {}
+function debug() {}
 ${src.match(/function extractCodeBlock[\s\S]*?\n    }/)[0]}
 ${src.match(/function parseSimpleYaml[\s\S]*?\n    }\n\n    function parseOutline/)[0].replace(/\n\n    function parseOutline[\s\S]*$/, '')}
 ${src.match(/function parseOutline[\s\S]*?\n    }/)[0]}

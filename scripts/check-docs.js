@@ -15,7 +15,7 @@ const expected = [
     'docs/需求.md',
     'docs/设计.md',
     'docs/决策记录.md',
-    'docs/设计-记忆读取-shujuku纪要.md',
+    'docs/设计-记忆插件适配-shujuku.md',
     'docs/规范.md',
     'scripts/deploy.sh',
     'scripts/remote-sync.sh',
@@ -86,7 +86,7 @@ function checkSections(file) {
 checkSections('docs/需求.md');
 checkSections('docs/设计.md');
 checkSections('docs/决策记录.md');
-checkSections('docs/设计-记忆读取-shujuku纪要.md');
+checkSections('docs/设计-记忆插件适配-shujuku.md');
 checkSections('docs/规范.md');
 
 // ---- 5. 版本号一致性 ----
@@ -110,7 +110,71 @@ for (const ph of needPhrases) {
     else fail('OOC 词缺「' + ph + '」');
 }
 
-// ---- 7. 文档规模合理性（防截断）----
+// ---- 7. 渲染函数里引用了未定义的局部变量（防「按钮不出现」这类运行时崩溃）----
+// 2026-10-30 实测踩到：改「偏好不折叠」时留下 page.appendChild(det)，det 在那个分支不存在，
+// 整个 renderGenPage 抛 ReferenceError，生成按钮永远渲染不出来，而单元测试抓不到。
+// 这里对每个 render* / build* 函数做一次粗略的「使用前是否在当前函数内声明」检查。
+{
+    const lines = idx.split('\n');
+    // 收集所有函数体范围（简单括号配平，够用）
+    const funcs = [];
+    for (let i = 0; i < lines.length; i++) {
+        const m = lines[i].match(/^\s{0,8}(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/);
+        if (!m) continue;
+        let depth = 0, started = false, end = i;
+        for (let j = i; j < lines.length; j++) {
+            for (const ch of lines[j]) {
+                if (ch === '{') { depth++; started = true; }
+                else if (ch === '}') depth--;
+            }
+            if (started && depth === 0) { end = j; break; }
+        }
+        funcs.push({ name: m[1], start: i, end });
+    }
+    const watched = funcs.filter(f => /^(render|build|draw|mount)/.test(f.name));
+    let reported = 0;
+    for (const f of watched) {
+        const body = lines.slice(f.start, f.end + 1).join('\n');
+        // 收集本函数内声明过的名字：const/let/var 声明、参数、for-of 循环变量、catch 参数
+        const declared = new Set();
+        const addAll = (str) => {
+            const re = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g;
+            let m;
+            while ((m = re.exec(str))) declared.add(m[1]);
+            const re2 = /\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g;
+            while ((m = re2.exec(str))) declared.add(m[1]);
+            const re3 = /\bcatch\s*\(\s*([A-Za-z_$][\w$]*)/g;
+            while ((m = re3.exec(str))) declared.add(m[1]);
+        };
+        addAll(body);
+        // 函数参数
+        const head = lines[f.start];
+        const pm = head.match(/\(([^)]*)\)/);
+        if (pm) for (const p of pm[1].split(',')) {
+            const n = p.trim().split(/[=\s]/)[0];
+            if (n && /^[A-Za-z_$][\w$]*$/.test(n)) declared.add(n);
+        }
+        // 找本函数里对形如 xxx.appendChild / xxx.textContent 的调用，取 xxx
+        const used = new Set();
+        const reUse = /\b([a-z][\w$]*)\.(?:appendChild|addEventListener|textContent|className|classList|style|value)\b/g;
+        let m;
+        while ((m = reUse.exec(body))) used.add(m[1]);
+        for (const u of used) {
+            if (declared.has(u)) continue;
+            // 排除模块级与全局常见对象
+            if (/^(document|window|console|Math|JSON|Object|Array|String|Number|Promise|Date|Set|Map|localStorage|sessionStorage|element|this|context|globalThis|navigator|location|setTimeout|clearTimeout|alert|confirm|prompt|encodeURIComponent|decodeURIComponent)$/.test(u)) continue;
+            // 模块级声明（在函数外的 const/let/var/function）
+            const moduleLevel = new RegExp(`^(?:\\s*)(?:const|let|var|function)\\s+${u}\\b`, 'm');
+            const outside = lines.slice(0, f.start).join('\n') + '\n' + lines.slice(f.end + 1).join('\n');
+            if (moduleLevel.test(outside)) continue;
+            fail(`${f.name}() 里用了未声明的局部变量 ${u}（疑似删掉分支后留下的残引用，运行时会让整个页面渲染崩溃）`);
+            reported++;
+        }
+    }
+    if (!reported) ok(`渲染函数未发现未声明局部变量（检查 ${watched.length} 个）`);
+}
+
+// ---- 8. 文档规模合理性（防截断）----
 for (const f of mdFiles) {
     const n = fs.readFileSync(path.join(root, f), 'utf8').split('\n').length;
     if (n < 15) fail(`${f} 只有 ${n} 行，疑似被截断`);

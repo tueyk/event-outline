@@ -6,7 +6,7 @@
     'use strict';
 
     const MODULE = 'event_outline';
-    const VERSION = '0.1.0';
+    const VERSION = '0.1.1';
     const ENTRY_PREFIX = '▸事件｜';
     const LOG_PREFIX = '[事件大纲]';
 
@@ -14,6 +14,12 @@
 
     const DEFAULT_SETTINGS = {
         version: 1,
+        // 打开后 debug 级日志才会被收集（默认关，避免刷屏）
+        debug: false,
+        // 模型 API 配置档。三种 mode：
+        //   main   = 跟随酒馆主连接（generateRaw 不带 api 参数）
+        //   tavern = 走酒馆已配好的连接源，可指定连接源类型与模型名
+        //   direct = 扩展自己直连 OpenAI 兼容接口，自带 base URL / 密钥 / 模型
         apiProfiles: [
             { id: 'main', name: '跟随酒馆主连接', mode: 'main' },
         ],
@@ -22,7 +28,11 @@
             floatingEnabled: true,
             floatingPos: { anchor: { x: 4, y: 40 }, dock: 'left' },
         },
-        tracker: { mode: 'auto' },
+        tracker: {
+            mode: 'auto',
+            // 自动模式下，每积累多少层楼（玩家楼 + AI 楼）触发一次自动盘点；0 = 关闭
+            autoEveryFloors: 10,
+        },
         retention: { completed: 20, abandoned: 3 },
         memory: {
             source: 'auto',
@@ -68,7 +78,21 @@
     const RUNTIME_LOG_MAX = 500;
     const runtimeLog = [];
 
+    // 日志级别：info / warn / error 默认都收；debug 只在设置里打开开关后才收
+    const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
+    const LOG_LEVEL_LABEL = { debug: '调试', info: '信息', warn: '警告', error: '错误' };
+
+    function debugEnabled() {
+        try {
+            const s = getSettings();
+            return !!(s && s.debug);
+        } catch (e) {
+            return false;
+        }
+    }
+
     function pushRuntimeLog(level, args) {
+        if (level === 'debug' && !debugEnabled()) return;
         let text;
         try {
             text = args.map(a => {
@@ -97,6 +121,16 @@
         console.warn(LOG_PREFIX, ...args);
     }
 
+    function error(...args) {
+        pushRuntimeLog('error', args);
+        console.error(LOG_PREFIX, ...args);
+    }
+
+    function debug(...args) {
+        pushRuntimeLog('debug', args);
+        if (debugEnabled()) console.debug(LOG_PREFIX, ...args);
+    }
+
     // ==================== 2. 存储 ====================
 
     function getSettings() {
@@ -108,6 +142,16 @@
         const s = context.extensionSettings[MODULE];
         // 补默认值（升级时新字段缺失）
         s.apiProfiles = s.apiProfiles || structuredClone(DEFAULT_SETTINGS.apiProfiles);
+        // 至少保住「跟随酒馆主连接」这一档，否则选不到任何配置
+        if (!Array.isArray(s.apiProfiles) || !s.apiProfiles.length) {
+            s.apiProfiles = structuredClone(DEFAULT_SETTINGS.apiProfiles);
+        }
+        if (!s.apiProfiles.some(p => p && p.id === 'main')) {
+            s.apiProfiles.unshift(structuredClone(DEFAULT_SETTINGS.apiProfiles[0]));
+        }
+        if (!s.activeProfileId || !s.apiProfiles.some(p => p && p.id === s.activeProfileId)) {
+            s.activeProfileId = 'main';
+        }
         s.ui = Object.assign(structuredClone(DEFAULT_SETTINGS.ui), s.ui || {});
         s.tracker = Object.assign({}, DEFAULT_SETTINGS.tracker, s.tracker || {});
         s.retention = Object.assign({}, DEFAULT_SETTINGS.retention, s.retention || {});
@@ -329,16 +373,21 @@
             }
 
             await writeWorldBook(bookName, data);
+            log(`世界书已写入「${bookName}」：${existingUid != null ? '更新' : '新增'}条目 uid=${uid}，正文 ${String(content).length} 字`);
+            debug(`世界书写入明细：条目总数 ${Object.keys(data.entries).length}，本次改动 uid=${uid}，快照键 ${snapshotKey}`);
 
             // 回读校验
             const after = await readWorldBook(bookName);
             const check = verifyForeignEntriesUnchanged(foreignBefore, after);
             if (!check.ok) {
+                error(`世界书写后校验失败：${check.reason}`);
                 throw new Error(`世界书写后校验失败：${check.reason}`);
             }
             if (!after.entries[uid] || String(after.entries[uid].content || '') !== String(content)) {
+                error(`世界书回读内容不一致：uid=${uid}，期望 ${String(content).length} 字，实际 ${String((after.entries[uid] || {}).content || '').length} 字`);
                 throw new Error('世界书写后回读内容不一致');
             }
+            debug(`世界书写后校验通过：uid=${uid}，其余 ${Object.keys(foreignBefore).length} 条外部条目零变化`);
 
             return { uid, snapshotKey };
         });
@@ -349,8 +398,12 @@
             const data = await readWorldBook(bookName);
             if (!data || !data.entries) throw new Error('世界书数据无效');
             const entry = data.entries[uid];
-            if (!entry) return { deleted: false, reason: '条目不存在' };
+            if (!entry) {
+                warn(`删除条目 uid=${uid} 时发现它已不存在，可能已被别处删过`);
+                return { deleted: false, reason: '条目不存在' };
+            }
             if (!String(entry.comment || '').startsWith(ENTRY_PREFIX)) {
+                error(`拒绝删除 uid=${uid}：注释「${entry.comment}」不是本扩展创建的条目`);
                 throw new Error('拒绝删除：该条目不是本扩展创建的');
             }
             const foreignBefore = snapshotForeignEntries(data);
@@ -358,7 +411,11 @@
             await writeWorldBook(bookName, data);
             const after = await readWorldBook(bookName);
             const check = verifyForeignEntriesUnchanged(foreignBefore, after);
-            if (!check.ok) throw new Error(`删除后校验失败：${check.reason}`);
+            if (!check.ok) {
+                error(`删除后校验失败：${check.reason}`);
+                throw new Error(`删除后校验失败：${check.reason}`);
+            }
+            log(`世界书已删除事件条目 uid=${uid}，退回 ${Object.keys(foreignBefore).length} 条外部条目`);
             return { deleted: true };
         });
     }
@@ -586,23 +643,39 @@
         return out;
     }
 
+    // 上次判定结果，用于去重：设置页每渲染一次都会探测一次，
+    // 结果没变就不该再记一条日志
+    let lastAdapterSig = null;
+
     function resolveAdapter() {
         const s = getSettings();
         const wanted = s.memory.source || 'auto';
-        if (wanted !== 'auto') {
-            const a = ADAPTERS.find(x => x.id === wanted);
-            if (a && a.detect()) {
-                log(`记忆来源：按设置使用「${a.label}」，${a.describe()}`);
-                return { adapter: a, degraded: false };
+        const decided = (() => {
+            if (wanted !== 'auto') {
+                const a = ADAPTERS.find(x => x.id === wanted);
+                if (a && a.detect()) return { adapter: a, degraded: false };
+                const fallback = ADAPTERS.find(x => x.id === 'recent-floors');
+                return { adapter: fallback, degraded: true, wanted };
             }
-            const fallback = ADAPTERS.find(x => x.id === 'recent-floors');
-            warn(`记忆来源：设置要「${a ? a.label : wanted}」但检测不到数据，已降级为「${fallback.label}」（${fallback.describe()}）`);
-            return { adapter: fallback, degraded: true, wanted };
+            const hits = ADAPTERS.filter(a => a.detect()).sort((x, y) => x.priority - y.priority);
+            const picked = hits[0] || ADAPTERS[ADAPTERS.length - 1];
+            return { adapter: picked, degraded: false };
+        })();
+
+        // 只有判定结果（适配器 + 是否降级 + 数据量描述）真的变了才记日志
+        const sig = decided.adapter.id + '|' + (decided.degraded ? 'degraded' : 'ok') + '|' + decided.adapter.describe();
+        if (sig !== lastAdapterSig) {
+            lastAdapterSig = sig;
+            if (decided.degraded) {
+                warn(`记忆来源：设置要「${ADAPTERS.find(x => x.id === wanted)?.label || wanted}」但检测不到数据，已降级为「${decided.adapter.label}」（${decided.adapter.describe()}）`);
+            } else if (wanted === 'auto') {
+                log(`记忆来源：自动选择「${decided.adapter.label}」，${decided.adapter.describe()}`);
+            } else {
+                // 首次判定和之后切换来源、数据量变化都报，方便一进来就确认用的是什么
+                log(`记忆来源：按设置使用「${decided.adapter.label}」，${decided.adapter.describe()}`);
+            }
         }
-        const hits = ADAPTERS.filter(a => a.detect()).sort((x, y) => x.priority - y.priority);
-        const picked = hits[0] || ADAPTERS[ADAPTERS.length - 1];
-        log(`记忆来源：自动选择「${picked.label}」，${picked.describe()}`);
-        return { adapter: picked, degraded: false };
+        return decided;
     }
 
     // ==================== 8. OOC 词与偏好 ====================
@@ -611,105 +684,258 @@
     // 第 12-45 行 = 大纲词，51-63 行 = 盘点词。此处为改良版，差异见设计文档。
 
     const PREF_AUTO_NEW = '根据当前情况自行设定';
+    // 子项的「交还给上层」选项：委托等级没选时按当前剧情判断，
+    // 选了委托等级就改成按那个等级推导
+    const PREF_AUTO_BY_LEVEL = '根据委托等级自行设定';
+    const PREF_AUTO_BY_NONE = '根据当前情况自行设定';
+
+    /** 某个子项此刻该用哪句「自行设定」文案 */
+    function autoByText(prefs) {
+        const lv = String((prefs && prefs.commissionLevel) || '').trim();
+        const hasLevel = lv && lv !== PREF_AUTO_NEW;
+        return hasLevel ? PREF_AUTO_BY_LEVEL : PREF_AUTO_BY_NONE;
+    }
+
+    /** 生成子项选项：两个「自行设定」合并成一个动态文案 */
+    function subOptions(base) {
+        // base 里已经含两句固定文案，去掉后由调用方按当前状态动态插入
+        return base.filter(o => o !== PREF_AUTO_BY_NONE && o !== PREF_AUTO_BY_LEVEL);
+    }
+
+    // 子项选项的分隔标记：渲染时替换成当前的「自行设定」文案
+    const SUB_AUTO = '__eo_sub_auto__';
+
+    // 事件类型：主类型单选，次类型最多三个，都可以不选
+    const EVENT_TYPE_DEFAULT = '根据当前情况自行设定';
+    const EVENT_MAIN_TYPES = [
+        '案件推理', '谈判交涉', '探险探索', '生存危机',
+        '社交博弈', '战斗冲突', '日常委托', '禁忌秘辛',
+    ];
+    const EVENT_SUB_TYPES = [
+        '悬疑', '复仇', '背叛', '失踪', '盗窃', '走私',
+        '政治阴谋', '超自然', '瘟疫', '营救', '交易', '追捕',
+        '守护', '潜入', '解谜', '人情',
+    ];
+    const MAX_SUB_TYPES = 3;
 
     const PREF_GROUPS = [
         {
             key: 'commissionLevel',
             label: '委托等级',
-            options: [PREF_AUTO_NEW, '按照具体事件难度自行设定', '村中琐事', '城镇委托', '王国要务', '禁忌事件'],
+            options: [PREF_AUTO_NEW, '村中琐事', '城镇委托', '王国要务', '禁忌事件'],
         },
         {
             key: 'clueSufficiency',
             label: '线索充足度',
             group: '推理难度',
-            options: [PREF_AUTO_NEW, '按照委托等级或具体事件难度自行设定', '充足（信息基本给全）', '够用（需主动串联）', '稀缺（有缺漏，需验证或外部求助）'],
+            options: [SUB_AUTO, '充足', '够用', '稀缺'],
         },
         {
             key: 'misleadingStrength',
             label: '误导强度',
             group: '推理难度',
-            options: [PREF_AUTO_NEW, '按照委托等级或具体事件难度自行设定', '无', '轻度（1 个可排除的误导）', '中度（1-2 个需排除法的误导）', '重度（误导与真线索混杂，需交叉验证）'],
+            options: [SUB_AUTO, '无', '轻度', '中度', '重度'],
         },
         {
             key: 'hiddenSegments',
             label: '隐藏环节',
             group: '推理难度',
-            options: [PREF_AUTO_NEW, '按照委托等级或具体事件难度自行设定', '无（线性可解）', '1 个需推理补全的环节', '2 个需推理补全的环节', '需玩家自行提出关键假设才能推进'],
+            options: [SUB_AUTO, '无', '1 个', '2 个', '需玩家自行提出关键假设'],
         },
         {
             key: 'infoPresentation',
             label: '信息呈现',
             group: '推理难度',
-            options: [PREF_AUTO_NEW, '按照委托等级或具体事件难度自行设定', '直给（NPC/物证直接说明）', '间接（需从对话或环境推断）', '隐晦（需组合多条信息才能得出）'],
+            options: [SUB_AUTO, '直给', '间接', '隐晦'],
         },
         {
             key: 'lethality',
             label: '致死性',
             group: '危险程度',
-            options: [PREF_AUTO_NEW, '按照委托等级或具体事件难度自行设定', '无', '低（极端错误才可能死）', '中（部分节点可致死）', '高（多处节点可致死）'],
+            options: [SUB_AUTO, '无', '低', '中', '高'],
         },
         {
             key: 'failureConsequence',
             label: '失败后果',
             group: '危险程度',
-            options: [PREF_AUTO_NEW, '按照委托等级或具体事件难度自行设定', '仅损失机会', '受伤或被俘', '失去关键物品或盟友', '不可逆的惨重损失'],
+            options: [SUB_AUTO, '仅损失机会', '受伤或被俘', '失去关键物品或盟友', '不可逆的惨重损失'],
         },
         {
             key: 'tolerance',
             label: '容错率',
             group: '危险程度',
-            options: [PREF_AUTO_NEW, '按照委托等级或具体事件难度自行设定', '高（可反复试错）', '中（有限次试错）', '低（一次关键失误即走向坏结局）'],
+            options: [SUB_AUTO, '高', '中', '低'],
         },
         {
             key: 'threatSource',
             label: '威胁来源',
             group: '危险程度',
-            options: [PREF_AUTO_NEW, '按照委托等级或具体事件难度自行设定', '环境', '敌对角色', '时间', '自身状态（如中毒、受伤）', '多重叠加'],
+            options: [SUB_AUTO, '环境', '敌对角色', '时间', '自身状态', '多重叠加'],
         },
         {
             key: 'timePressure',
             label: '倒计时',
             group: '时间压力',
-            options: [PREF_AUTO_NEW, '按照委托等级或具体事件难度自行设定', '无', '隐藏（存在但玩家不直接看到剩余时间）', '可见（明确显示剩余时间）'],
+            options: [SUB_AUTO, '无', '隐藏', '可见'],
         },
         {
             key: 'timeDuration',
             label: '时长',
             group: '时间压力',
-            options: [PREF_AUTO_NEW, '按照委托等级或具体事件难度自行设定', '宽松（远超所需）', '适中（需规划但有余量）', '紧张（几乎不容浪费）'],
+            options: [SUB_AUTO, '宽松', '适中', '紧张'],
         },
         {
             key: 'timeoutConsequence',
             label: '超时后果',
             group: '时间压力',
-            options: [PREF_AUTO_NEW, '按照委托等级或具体事件难度自行设定', '无', '损失机会或信息', '事件走向坏结局', '角色死亡或不可逆损失'],
+            options: [SUB_AUTO, '无', '损失机会或信息', '事件走向坏结局', '角色死亡或不可逆损失'],
         },
         {
             key: 'procrastinationCost',
             label: '拖延代价',
             group: '时间压力',
-            options: [PREF_AUTO_NEW, '按照委托等级或具体事件难度自行设定', '无', '持续损耗（如资源、体力、NPC 耐心）', '阶段性恶化（每过一段触发一次恶化事件）'],
+            options: [SUB_AUTO, '无', '持续损耗', '阶段性恶化'],
         },
     ];
+
+    /**
+     * 三个可折叠分组的档位定义（大致模式用）。
+     * 每个档位把该组下所有子项一次性定好，用户只选一个粗粒度档位。
+     * 详细模式则逐项挑，能拼出档位覆盖不了的组合。
+     */
+    /** 每组档位都先有这一项：全子项回到「根据当前情况自行设定」 */
+    function autoPreset(groupName, prefs) {
+        const items = PREF_GROUPS.filter(x => x.group === groupName);
+        const values = {};
+        // 值用当前正确的「自行设定」文案（委托等级定了就是「根据委托等级自行设定」）
+        const text = autoByText(prefs);
+        for (const g of items) values[g.key] = text;
+        return { key: 'auto', label: text, desc: '这一组交给模型自行配一套合理的，你不用逐项挑', values };
+    }
+
+    const PREF_PRESETS = {
+        '推理难度': {
+            options: [
+                { key: 'easy', label: '大致·轻松', desc: '线索给足、几乎不设误导，重在剧情推进',
+                  values: { clueSufficiency: '充足', misleadingStrength: '无', hiddenSegments: '无', infoPresentation: '直给' } },
+                { key: 'normal', label: '大致·常规', desc: '线索够用，少量误导，需要主动串联',
+                  values: { clueSufficiency: '够用', misleadingStrength: '轻度', hiddenSegments: '1 个', infoPresentation: '间接' } },
+                { key: 'hard', label: '大致·硬核', desc: '线索稀缺、误导与真线索混杂，还要自己补环节',
+                  values: { clueSufficiency: '稀缺', misleadingStrength: '中度', hiddenSegments: '2 个', infoPresentation: '隐晦' } },
+                { key: 'brutal', label: '大致·极端', desc: '误导重度叠加，关键假设要玩家自己提出来',
+                  values: { clueSufficiency: '稀缺', misleadingStrength: '重度', hiddenSegments: '需玩家自行提出关键假设', infoPresentation: '隐晦' } },
+            ],
+        },
+        '危险程度': {
+            options: [
+                { key: 'easy', label: '大致·安全', desc: '不致死，错了只损失机会',
+                  values: { lethality: '无', failureConsequence: '仅损失机会', tolerance: '高', threatSource: '环境' } },
+                { key: 'normal', label: '大致·常规', desc: '部分节点可致死，错了要受伤或被俘',
+                  values: { lethality: '低', failureConsequence: '受伤或被俘', tolerance: '中', threatSource: '敌对角色' } },
+                { key: 'hard', label: '大致·凶险', desc: '多处节点可致死，容错低，威胁多重叠加',
+                  values: { lethality: '高', failureConsequence: '失去关键物品或盟友', tolerance: '低', threatSource: '多重叠加' } },
+                { key: 'brutal', label: '大致·致命', desc: '一次关键失误就走向坏结局，损失不可逆',
+                  values: { lethality: '高', failureConsequence: '不可逆的惨重损失', tolerance: '低', threatSource: '多重叠加' } },
+            ],
+        },
+        '时间压力': {
+            options: [
+                { key: 'easy', label: '大致·宽松', desc: '没有硬倒计时，拖一拖也无妨',
+                  values: { timePressure: '无', timeDuration: '宽松', timeoutConsequence: '无', procrastinationCost: '无' } },
+                { key: 'normal', label: '大致·常规', desc: '有倒计时但看得见，时间够规划，拖延有持续损耗',
+                  values: { timePressure: '可见', timeDuration: '适中', timeoutConsequence: '损失机会或信息', procrastinationCost: '持续损耗' } },
+                { key: 'hard', label: '大致·紧迫', desc: '倒计时隐藏，时间紧张，超时事件走向坏结局',
+                  values: { timePressure: '隐藏', timeDuration: '紧张', timeoutConsequence: '事件走向坏结局', procrastinationCost: '阶段性恶化' } },
+                { key: 'brutal', label: '大致·绝命', desc: '隐藏倒计时叠加极度紧张，超时即角色死亡或不可逆损失',
+                  values: { timePressure: '隐藏', timeDuration: '紧张', timeoutConsequence: '角色死亡或不可逆损失', procrastinationCost: '阶段性恶化' } },
+            ],
+        },
+    };
+
+    /** 某个分组当前是否所有子项都落在同一个档位上 */
+    function matchPreset(groupName, prefs) {
+        const def = PREF_PRESETS[groupName];
+        if (!def) return null;
+        for (const opt of def.options) {
+            const ok = Object.keys(opt.values).every(k => (prefs[k] || PREF_AUTO_NEW) === opt.values[k]);
+            if (ok) return opt.key;
+        }
+        return null;
+    }
+
+    /** 档位列表 = 自行设定 + 四个粗档 */
+    function presetOptions(groupName, prefs) {
+        return [autoPreset(groupName, prefs)].concat((PREF_PRESETS[groupName] || {}).options || []);
+    }
 
     function defaultPrefs() {
         const p = {};
         for (const g of PREF_GROUPS) p[g.key] = PREF_AUTO_NEW;
+        p.eventMainType = EVENT_TYPE_DEFAULT;
+        p.eventSubTypes = [];
         p.extra = '无';
         return p;
     }
 
+    // 生成页的草稿偏好与分组模式：跨重渲染保留，点了「开始生成」才用掉
+    let draftPrefs = null;
+    let draftGroupModes = null;
+
+    function getDraftPrefs() {
+        if (!draftPrefs) draftPrefs = defaultPrefs();
+        return draftPrefs;
+    }
+
+    function getGroupModes() {
+        if (!draftGroupModes) {
+            draftGroupModes = {};
+            for (const name of Object.keys(PREF_PRESETS)) draftGroupModes[name] = 'rough';
+        }
+        return draftGroupModes;
+    }
+
+    /** 生成成功后清掉草稿，下次进来是全新的一份 */
+    function resetDraftPrefs() {
+        draftPrefs = null;
+        draftGroupModes = null;
+    }
+
     function buildPrefsBlock(prefs) {
         const lines = ['【体验偏好（已在界面选定，直接采用，不要再询问）】'];
+        // 事件类型：主类型单选，次类型最多三个
+        const main = String(prefs.eventMainType || '').trim();
+        const subs = Array.isArray(prefs.eventSubTypes) ? prefs.eventSubTypes.filter(Boolean) : [];
+        const hasMain = main && main !== EVENT_TYPE_DEFAULT;
+        lines.push(`- 主类型：${hasMain ? main : '未指定，请根据当前剧情判断该事件属于哪一类'}`);
+        // 「自行设定」在提示词里要写清楚是按什么推导，避免模型理解成「随便来」
+        const autoText = autoByText(prefs);
+        const lv = String(prefs.commissionLevel || '').trim();
+        const useByLevel = autoText === PREF_AUTO_BY_LEVEL;
         let curGroup = null;
         for (const g of PREF_GROUPS) {
             if (g.group && g.group !== curGroup) {
                 curGroup = g.group;
                 lines.push(`- ${g.group}：`);
             }
-            const v = prefs[g.key] || PREF_AUTO_NEW;
+            let v = prefs[g.key] || PREF_AUTO_NEW;
+            // 残留的旧文案统一归一化
+            if (v === PREF_AUTO_BY_NONE || v === PREF_AUTO_BY_LEVEL || v === SUB_AUTO) v = autoText;
+            if (g.group && useByLevel && v === PREF_AUTO_BY_LEVEL) {
+                v = `根据委托等级「${lv}」自行设定`;
+            }
             const indent = g.group ? '  · ' : '- ';
             lines.push(`${indent}${g.label}：${v}`);
+        }
+        if (useByLevel) {
+            lines.push(`说明：委托等级已定为「${lv}」，凡写「根据委托等级自行设定」的子项，请按该等级应有的难度、危险程度与时间压力成套推导，同一组内要互相匹配。`);
+        } else {
+            lines.push('说明：委托等级未指定，凡写「根据当前情况自行设定」的子项，请结合当前剧情阶段与该角色所处处境，自己配一套合理的取值。');
+        }
+        // 次类型：没选就让模型自己配
+        if (subs.length) {
+            lines.push(`- 次类型：${subs.join('、')}（次要性质可以混入，但要围绕主类型展开，不要喧宾夺主）`);
+        } else {
+            lines.push('- 次类型：未指定，请按主类型与当前剧情自行搭配 1-3 个次要性质');
         }
         lines.push(`- 额外要求：${prefs.extra || '无'}`);
         return lines.join('\n');
@@ -724,8 +950,17 @@
     }
 
     function buildOutlinePrompt(eventName, prefs) {
+        const named = String(eventName || '').trim();
+        const head = named
+            ? `OOC: 暂停扮演。为即将开始的【${named}】生成完整结构大纲，用 YAML 输出，包含：`
+            : 'OOC: 暂停扮演。为即将开始的事件生成完整结构大纲，用 YAML 输出，包含：';
+        const nameLine = named
+            ? '   a. 事件名直接用上面给定的名字'
+            : '   a. 事件名：你没有收到指定的名字，请根据当前剧情、角色处境和即将发生的事，起一个简洁的中文事件名（4-12 字，如「开膛手杰克案」「石桥镇失踪案」），写进 event_name 键';
         return [
-            `OOC: 暂停扮演。为即将开始的【${eventName}】生成完整结构大纲，用 YAML 输出，包含：`,
+            head,
+            '0. 事件名（event_name）与事件简介（event_brief，一句话说清这事件要解决什么）',
+            nameLine,
             '1. 事件类型与核心真相：判断本事件属于哪类（案件/谈判/探险/危机/社交博弈/其他），写出核心真相或隐情（仅记录，后续不得直接透露）',
             '2. 信息节点清单：按发现顺序列 5-8 条，每条含编号（从 1 开始）、类型（物证/证言/环境/时间线/关系）、触发关键词、指向的信息或后果',
             '   另外单独输出「推进所需最少信息节点编号」：只列出推理必需的最少节点编号',
@@ -744,7 +979,7 @@
             '- 误导：允许 1-2 个误导性信息，但每个误导信息必须有一条可推翻它的反向证据，且该证据必须是信息节点清单中的条目，须注明 refute_by 节点编号',
             '- 允许根据当前情况设计大纲之外的合理路径，但每条必须标注「【大纲外】」并说明为什么现在会出现这条路径',
             '',
-            '输出格式：只输出一个 YAML 代码块，顶层键为 event_type / core_truth / nodes / min_nodes_for_deduction / characters / paths / forbidden。',
+            '输出格式：只输出一个 YAML 代码块，顶层键为 event_name / event_brief / event_type / core_truth / nodes / min_nodes_for_deduction / characters / paths / forbidden。',
         ].join('\n');
     }
 
@@ -808,6 +1043,34 @@
         return chat.filter(m => m && !m.is_system && String(m.mes || '').trim());
     }
 
+    /** 楼层总数（玩家楼 + AI 楼，不含系统消息），用于自动盘点的计数 */
+    function countFloors() {
+        return getChatMessages().length;
+    }
+
+    /**
+     * 自动盘点是否该跑：自上次盘点以来，新积累的楼层数（玩家楼 + AI 楼）达到设置值就返回。
+     * autoEveryFloors = 0 关闭自动盘点；没有进行中事件时不跑。
+     */
+    function shouldAutoInventory() {
+        const s = getSettings();
+        if (s.tracker.mode !== 'auto') return false;
+        const every = Math.max(0, Number(s.tracker.autoEveryFloors) || 0);
+        if (every <= 0) return false;
+        const ev = getCurrentEvent();
+        if (!ev || ev.status !== 'active') return false;
+        const cur = countFloors();
+        // 老事件没有 floorBase：以当前楼层为基线，从现在开始累计
+        if (!Number.isFinite(Number(ev.floorBase))) {
+            ev.floorBase = cur;
+            saveMeta();
+            return false;
+        }
+        const since = cur - Number(ev.floorBase);
+        if (since < every) return false;
+        return { cur, since, every };
+    }
+
     /** 按 token 预算从最新往前累加楼层 */
     async function collectRecentFloors(limit) {
         const context = ctx();
@@ -858,6 +1121,7 @@
     async function gatherContext(event) {
         const s = getSettings();
         const resolved = resolveAdapter();
+        debug(`拼装上下文：适配器=${resolved.adapter.id}，降级=${!!resolved.degraded}`);
         const out = {
             stateCard: buildStateCard(event),
             jiyaoList: '',
@@ -892,23 +1156,125 @@
         // 第三层：最近楼层
         const floors = Math.max(1, Number(s.memory.recentFloors) || 15);
         out.recentChat = await collectRecentFloors(floors);
+        debug(`上下文规模：纪要概览 ${out.jiyaoList.length} 字、纪要正文 ${out.jiyaoDetail.length} 字、最近楼层 ${floors} 楼共 ${out.recentChat.length} 字`);
         return out;
     }
 
     // ==================== 10. 生成与解析 ====================
 
-    async function callModel(systemPrompt, prompt) {
+    // 酒馆 generateRaw 支持的连接源类型（api 参数取值）
+    const TAVERN_APIS = [
+        ['openai', 'OpenAI / 兼容接口（openai）'],
+        ['claude', 'Claude（claude）'],
+        ['makersuite', 'Google AI Studio（makersuite）'],
+        ['vertexai', 'Vertex AI（vertexai）'],
+        ['mistralai', 'Mistral（mistralai）'],
+        ['custom', '自定义 OpenAI 兼容（custom）'],
+        ['cohere', 'Cohere（cohere）'],
+        ['deepseek', 'DeepSeek（deepseek）'],
+        ['perplexity', 'Perplexity（perplexity）'],
+        ['groq', 'Groq（groq）'],
+        ['01ai', '01.AI（01ai）'],
+        ['openrouter', 'OpenRouter（openrouter）'],
+    ];
+
+    function callModel(systemPrompt, prompt) {
         const context = ctx();
-        if (!context || !context.generateRaw) throw new Error('generateRaw 不可用');
+        if (!context) {
+            error('调用模型失败：取不到酒馆上下文');
+            return Promise.reject(new Error('未取到酒馆上下文'));
+        }
         const s = getSettings();
-        const profile = (s.apiProfiles || []).find(p => p.id === s.activeProfileId) || { mode: 'main' };
-        const params = {
-            prompt,
-            systemPrompt,
-            api: profile.mode === 'custom' ? (profile.api || 'openai') : null,
+        const profile = (s.apiProfiles || []).find(p => p.id === s.activeProfileId)
+            || { id: 'main', name: '跟随酒馆主连接', mode: 'main' };
+        const t0 = Date.now();
+        debug(`调用模型：配置「${profile.name || profile.id}」（mode=${profile.mode || 'main'}），system ${String(systemPrompt).length} 字，prompt ${String(prompt).length} 字`);
+
+        const finish = (out) => {
+            log(`模型返回：${String(out || '').length} 字，耗时 ${((Date.now() - t0) / 1000).toFixed(1)} 秒`);
+            return out;
         };
-        if (profile.mode === 'custom' && profile.model) params.model = profile.model;
-        return await context.generateRaw(params);
+        const failed = (e) => {
+            error(`调用模型失败（耗时 ${((Date.now() - t0) / 1000).toFixed(1)} 秒）：${e && e.message || e}`);
+            throw e;
+        };
+
+        // 直连模式：自己发 HTTP，不经过酒馆
+        if (profile.mode === 'direct') {
+            return callDirectApi(profile, systemPrompt, prompt).then(finish, failed);
+        }
+
+        // 走酒馆 generateRaw 的两种模式
+        if (!context.generateRaw) {
+            error('调用模型失败：当前酒馆上下文没有 generateRaw，无法发起生成');
+            return Promise.reject(new Error('generateRaw 不可用'));
+        }
+        const params = { prompt, systemPrompt };
+        if (profile.mode === 'tavern') {
+            if (profile.api) params.api = profile.api;
+            if (profile.model) params.model = profile.model;
+            if (Number(profile.responseLength) > 0) params.responseLength = Number(profile.responseLength);
+            debug(`走酒馆连接源：api=${profile.api || '（跟随）'}，model=${profile.model || '（跟随）'}`);
+        }
+        return Promise.resolve(context.generateRaw(params)).then(finish, failed);
+    }
+
+    /** 直接调用 OpenAI 兼容的 /chat/completions，不经过酒馆连接源 */
+    async function callDirectApi(profile, systemPrompt, prompt) {
+        const base = String(profile.baseUrl || '').trim().replace(/\/+$/, '');
+        if (!base) throw new Error('直连配置缺少 base URL');
+        if (!profile.model) throw new Error('直连配置缺少模型名');
+        if (!profile.apiKey) throw new Error('直连配置缺少 API 密钥');
+
+        const url = /\/chat\/completions$/.test(base) ? base : base + '/chat/completions';
+        const body = {
+            model: profile.model,
+            messages: [
+                { role: 'system', content: String(systemPrompt || '') },
+                { role: 'user', content: String(prompt || '') },
+            ],
+            temperature: Number.isFinite(Number(profile.temperature)) ? Number(profile.temperature) : 1,
+            stream: false,
+        };
+        if (Number(profile.maxTokens) > 0) body.max_tokens = Number(profile.maxTokens);
+
+        let resp;
+        try {
+            resp = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + profile.apiKey,
+                },
+                body: JSON.stringify(body),
+            });
+        } catch (e) {
+            throw new Error(`无法连接 ${url}：${e && e.message || e}`);
+        }
+        const text = await resp.text();
+        if (!resp.ok) {
+            const brief = text.length > 300 ? text.slice(0, 300) + '…' : text;
+            throw new Error(`HTTP ${resp.status}：${brief}`);
+        }
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch (e) {
+            throw new Error('返回的不是 JSON：' + (text.length > 200 ? text.slice(0, 200) + '…' : text));
+        }
+        const msg = data && data.choices && data.choices[0] && data.choices[0].message;
+        const out = msg && (msg.content != null ? msg.content : msg.reasoning_content);
+        if (out == null) {
+            throw new Error('返回结构里没有 choices[0].message.content：' + JSON.stringify(data).slice(0, 200));
+        }
+        return String(out);
+    }
+
+    /** 测试连接：发一条极短请求，返回结果文本供界面显示 */
+    async function testProfile(profile) {
+        const t0 = Date.now();
+        const out = await callModel('你是一个连通性测试助手，只回一个字。', '只回复两个字：收到');
+        return { ok: true, ms: Date.now() - t0, sample: String(out || '').trim().slice(0, 60) };
     }
 
     /** 从文本中提取代码块内容 */
@@ -1070,12 +1436,25 @@
     function parseOutline(raw) {
         const block = extractCodeBlock(raw, 'yaml') || extractCodeBlock(raw) || raw;
         const parsed = parseSimpleYaml(block);
-        return { parsed: parsed || {}, raw: String(raw || ''), fromFallback: !extractCodeBlock(raw, 'yaml') };
+        const hasYaml = !!extractCodeBlock(raw, 'yaml');
+        const nodeCount = (parsed && Array.isArray(parsed.nodes)) ? parsed.nodes.length : 0;
+        if (hasYaml) {
+            debug(`大纲解析：命中 yaml 代码块，节点 ${nodeCount} 个，顶层键 ${Object.keys(parsed || {}).join('、') || '无'}`);
+        } else {
+            warn(`大纲解析：模型没有返回 yaml 代码块，已把整段回复当 YAML 兜底解析，节点 ${nodeCount} 个`);
+        }
+        if (!nodeCount) {
+            warn('大纲解析结果里没有节点（nodes 为空或缺失），这次生成的大纲可能不可用');
+        }
+        return { parsed: parsed || {}, raw: String(raw || ''), fromFallback: !hasYaml };
     }
 
     function parseInventory(raw) {
         const jsonText = extractCodeBlock(raw, 'json');
         let structured = null;
+        if (!jsonText) {
+            warn('盘点解析：模型回复里没有 json 代码块，本次盘点只保留原文，节点清单不动');
+        }
         if (jsonText) {
             try {
                 structured = JSON.parse(jsonText);
@@ -1083,9 +1462,14 @@
                 // 尝试修补常见错误
                 try {
                     structured = JSON.parse(jsonText.replace(/,\s*([}\]])/g, '$1'));
+                    warn('盘点解析：JSON 有尾逗号等格式问题，修补后解析成功');
                 } catch (e2) {
-                    warn('盘点 JSON 解析失败', e2);
+                    error('盘点 JSON 解析失败，本次盘点不更新节点', e2);
                 }
+            }
+            if (structured) {
+                const t = Array.isArray(structured.triggeredNodes) ? structured.triggeredNodes.length : 0;
+                debug(`盘点解析：触发节点 ${t} 条，顶层键 ${Object.keys(structured).join('、') || '无'}`);
             }
         }
         return { structured, raw: String(raw || '') };
@@ -1144,9 +1528,19 @@
 
             const id = genEventId();
             const meta = getMeta();
+            // 事件名留空时用模型自己起的名；模型也没给就退回按日期兜底
+            const givenName = String(eventName || '').trim();
+            const aiName = String((parsed && parsed.event_name) || '').trim();
+            const finalName = givenName || aiName || `未命名事件（${new Date().toLocaleDateString('zh-CN')}）`;
+            if (!givenName) {
+                if (aiName) log(`事件名留空，采用模型自动命名：「${finalName}」`);
+                else warn('事件名留空且模型没有返回 event_name，已用日期兜底命名');
+            }
             const event = {
                 id,
-                name: eventName,
+                name: finalName,
+                autoNamed: !givenName,
+                brief: String((parsed && parsed.event_brief) || '').trim(),
                 status: 'active',
                 createdAt: new Date().toISOString(),
                 closedAt: null,
@@ -1154,11 +1548,19 @@
                 worldBook: book,
                 entryUid: null,
                 entryVersion: 1,
-                prefs: Object.assign({}, prefs),
+                // 自动盘点的计数基线：自上次盘点以来的楼层数（玩家楼 + AI 楼）
+                floorBase: countFloors(),
+                // 只存真正的偏好项；界面草稿状态不进事件卡
+                prefs: (() => {
+                    const o = Object.assign({}, prefs);
+                    delete o._groupMode;
+                    return o;
+                })(),
                 outline: parsed,
                 outlineRaw: rawText,
                 tracker: {
                     triggeredNodes: [],
+                    pendingNodes: [],
                     refutedMisleads: [],
                     offPathBranches: [],
                     nodeVetoed: [],
@@ -1215,17 +1617,28 @@
                 const mode = getSettings().tracker.mode;
                 const vetoed = new Set(t.nodeVetoed || []);
                 const triggered = new Set(t.triggeredNodes || []);
+                // 半自动：把模型判出的节点收进「待确认」暂存，不直接改 tracker
+                const pending = new Set();
 
                 for (const n of (Array.isArray(structured.triggeredNodes) ? structured.triggeredNodes : [])) {
                     const num = Number(n);
                     if (!Number.isFinite(num)) continue;
                     if (vetoed.has(num)) continue;
                     if (mode === 'manual') continue;
-                    if (mode === 'semi') continue; // 半自动：等用户确认
+                    if (mode === 'semi') {
+                        if (!triggered.has(num)) pending.add(num);
+                        continue;
+                    }
                     if (!triggered.has(num)) {
                         triggered.add(num);
                         t.autoCommitted.push({ node: num, at: record.at, round });
                     }
+                }
+                if (mode === 'semi') {
+                    // 只保留本轮的建议，上一轮没处理的自然被覆盖
+                    t.pendingNodes = Array.from(pending).sort((a, b) => a - b);
+                    record.suggestedNodes = t.pendingNodes.slice();
+                    log(`半自动：模型建议打勾 ${t.pendingNodes.length ? t.pendingNodes.join('、') : '无'}，等待确认`);
                 }
                 if (mode === 'auto') {
                     t.triggeredNodes = Array.from(triggered).sort((a, b) => a - b);
@@ -1254,6 +1667,8 @@
             );
             event.entryUid = res.uid;
             record.committedToBook = true;
+            // 盘点成功即把计数基线挪到当前楼层，下一轮从零开始累计
+            event.floorBase = countFloors();
 
             saveMeta();
             return { record, event };
@@ -1277,6 +1692,7 @@
             meta.currentEventId = null;
             await applyRetention(meta);
             saveMeta();
+            log(`事件「${event.name}」已${abandoned ? '废弃' : '完结'}，世界书条目已清理，事件卡转历史`);
             return event;
         } finally {
             setBusy(false);
@@ -1293,11 +1709,15 @@
 
         const done = pick('completed');
         const limitDone = Math.max(1, Number(s.retention.completed) || 20);
-        for (const e of done.slice(limitDone)) delete meta.events[e.id];
+        const dropDone = done.slice(limitDone);
+        for (const e of dropDone) delete meta.events[e.id];
+        if (dropDone.length) log(`历史保留：完结事件超上限 ${limitDone}，清理了 ${dropDone.length} 条最旧的：${dropDone.map(e => e.name).join('、')}`);
 
         const ab = pick('abandoned');
         const limitAb = Math.max(1, Number(s.retention.abandoned) || 3);
-        for (const e of ab.slice(limitAb)) delete meta.events[e.id];
+        const dropAb = ab.slice(limitAb);
+        for (const e of dropAb) delete meta.events[e.id];
+        if (dropAb.length) log(`历史保留：废弃事件超上限 ${limitAb}，清理了 ${dropAb.length} 条最旧的：${dropAb.map(e => e.name).join('、')}`);
     }
 
     function toggleNode(nodeId) {
@@ -1305,6 +1725,7 @@
         if (!event) return;
         const triggered = new Set(event.tracker.triggeredNodes || []);
         const vetoed = new Set(event.tracker.nodeVetoed || []);
+        const pending = new Set(event.tracker.pendingNodes || []);
         const id = Number(nodeId);
         if (triggered.has(id)) {
             triggered.delete(id);
@@ -1313,9 +1734,45 @@
             triggered.add(id);
             vetoed.delete(id);
         }
+        // 不管勾还是撤，这个节点都不再算「待确认」
+        pending.delete(id);
         event.tracker.triggeredNodes = Array.from(triggered).sort((a, b) => a - b);
         event.tracker.nodeVetoed = Array.from(vetoed).sort((a, b) => a - b);
+        event.tracker.pendingNodes = Array.from(pending).sort((a, b) => a - b);
         log(`手动${triggered.has(id) ? '打勾' : '撤销'}节点 ${id}（当前已触发 ${event.tracker.triggeredNodes.length} 个）`);
+        saveMeta();
+    }
+
+    /** 半自动：确认一条模型建议 */
+    function confirmPending(nodeId) {
+        const event = getCurrentEvent();
+        if (!event) return;
+        const id = Number(nodeId);
+        const pending = new Set(event.tracker.pendingNodes || []);
+        if (!pending.has(id)) return;
+        const triggered = new Set(event.tracker.triggeredNodes || []);
+        const vetoed = new Set(event.tracker.nodeVetoed || []);
+        triggered.add(id);
+        vetoed.delete(id);
+        pending.delete(id);
+        event.tracker.triggeredNodes = Array.from(triggered).sort((a, b) => a - b);
+        event.tracker.nodeVetoed = Array.from(vetoed).sort((a, b) => a - b);
+        event.tracker.pendingNodes = Array.from(pending).sort((a, b) => a - b);
+        event.tracker.autoCommitted.push({ node: id, at: new Date().toISOString(), round: (event.inventories || []).length, confirmed: true });
+        log(`确认建议：节点 ${id} 已打勾（剩余待确认 ${pending.size} 个）`);
+        saveMeta();
+    }
+
+    /** 半自动：忽略一条模型建议 */
+    function dismissPending(nodeId) {
+        const event = getCurrentEvent();
+        if (!event) return;
+        const id = Number(nodeId);
+        const pending = new Set(event.tracker.pendingNodes || []);
+        if (!pending.has(id)) return;
+        pending.delete(id);
+        event.tracker.pendingNodes = Array.from(pending).sort((a, b) => a - b);
+        log(`忽略建议：节点 ${id}（剩余待确认 ${pending.size} 个）`);
         saveMeta();
     }
 
@@ -1437,6 +1894,57 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-node{padding:4px 6px;cursor:pointer;border-radius:6px;line-height:1.55;}
 .eo-node:hover{background:#fff3d6;}
 .eo-node-on{color:#2c6e2c;font-weight:600;}
+.eo-node-suggest{color:#8a5a00;background:#fff6e0;}
+.eo-suggest{display:flex;align-items:center;gap:8px;padding:3px 4px;border-bottom:1px dashed #e6d7b0;}
+.eo-suggest span{flex:1;}
+
+/* 运行日志框：自己滚动，进来就停在最新一条 */
+.eo-logbox{max-height:340px;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;}
+
+/* 日志级别筛选按钮 */
+.eo-logfilter{display:flex;flex-wrap:wrap;gap:6px;padding:2px 0 4px;}
+.eo-filterbtn{padding:3px 10px;font-size:12px;}
+.eo-filterbtn-on{background:#f5d080;color:#4a3200;font-weight:700;}
+
+/* 事件类型：次类型多选按钮 */
+.eo-subtype-wrap{align-items:flex-start;}
+.eo-subtypes{display:flex;flex-wrap:wrap;gap:5px;flex:1;}
+.eo-subtype{padding:2px 9px;font-size:12px;line-height:1.5;}
+.eo-subtype-on{background:#f5d080;color:#4a3200;font-weight:700;border-color:#c9a13a;}
+
+/* 体验偏好：可折叠分组 + 大致/详细 */
+.eo-prefgroup{margin:6px 0;border:1px solid #e8dbb3;border-radius:8px;background:#fffdf7;}
+.eo-prefgroup-sum{cursor:pointer;padding:7px 10px;font-weight:600;color:#6b5424;font-size:13px;
+  list-style:none;user-select:none;}
+.eo-prefgroup-sum::-webkit-details-marker{display:none;}
+.eo-prefgroup-sum::before{content:'▸ ';color:#b8860b;}
+.eo-prefgroup[open] .eo-prefgroup-sum::before{content:'▾ ';}
+.eo-prefgroup-body{padding:2px 10px 8px;}
+.eo-prefmode{display:flex;align-items:center;gap:6px;padding:2px 0 6px;}
+.eo-modebtn{padding:3px 12px;font-size:12px;}
+.eo-modebtn-on{background:#f5d080;color:#4a3200;font-weight:700;}
+
+/* 记忆来源的子项（shujuku 诊断） */
+.eo-sub{margin:2px 0 6px 18px;padding:6px 10px;border-left:3px solid #e6cd8a;background:#fffdf6;border-radius:0 6px 6px 0;}
+.eo-sub-title{font-size:13px;font-weight:600;color:#6b5424;margin-bottom:2px;}
+
+/* 打勾模式：标题上的问号 */
+.eo-sec-inline{display:flex;align-items:center;gap:6px;}
+.eo-help{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
+  border-radius:50%;border:1px solid #b8860b;color:#8a6a10;font-size:11px;font-weight:700;
+  cursor:pointer;user-select:none;position:relative;background:#fff8e2;}
+.eo-help:hover{background:#f5e0a8;}
+.eo-help-on{background:#f5d080;color:#4a3200;}
+.eo-tip{position:absolute;left:22px;top:-4px;width:260px;padding:8px 10px;border-radius:8px;
+  background:#3a3222;color:#fff6e0;font-size:12px;font-weight:400;line-height:1.6;
+  box-shadow:0 3px 12px rgba(0,0,0,.28);z-index:10;white-space:normal;}
+
+/* 打勾模式：三档各占一行 */
+.eo-modes{display:flex;flex-direction:column;gap:5px;margin:4px 0;}
+.eo-mode{display:flex;gap:8px;align-items:flex-start;padding:5px 8px;border-radius:6px;
+  background:#fdf8ec;font-size:12px;line-height:1.6;color:#5a4a2a;}
+.eo-mode-active{background:#fff2cc;box-shadow:inset 0 0 0 1px #e0c078;}
+.eo-mode-tag{flex:0 0 auto;font-weight:700;color:#7a5a0a;}
 .eo-ctx-preview{font-size:12px;color:#6b5424;background:#fdf7e8;}
 
 `;
@@ -1867,7 +2375,14 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         if (activeTab === 'gen') renderGenPage(page);
         else if (activeTab === 'inv') renderInvPage(page);
-        else if (activeTab === 'log') renderLogPage(page);
+        else if (activeTab === 'log') {
+            renderLogPage(page);
+            // 切到日志页时再滚一次：此时元素已经挂到文档上，scrollHeight 才是真值
+            requestAnimationFrame(() => {
+                const lb = page.querySelector('.eo-logbox');
+                if (lb) lb.scrollTop = lb.scrollHeight;
+            });
+        }
         else renderSetPage(page);
     }
 
@@ -1947,49 +2462,220 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         nameRow.appendChild(el('label', null, '事件名'));
         const nameInput = el('input', 'eo-input');
         nameInput.type = 'text';
-        nameInput.placeholder = '如：开膛手杰克案';
+        nameInput.placeholder = '可留空，留空由 AI 根据当前剧情自动命名';
         nameRow.appendChild(nameInput);
         page.appendChild(nameRow);
+        page.appendChild(el('div', 'eo-hint',
+            '事件名可以留空。留空时模型会读当前剧情，自己起一个 4-12 字的事件名，并同时写一句事件简介。想自己起就填这里。'));
 
-        // 偏好：不折叠，生成前就该看到自己选了什么
-        const prefs = defaultPrefs();
-        page.appendChild(el('div', 'eo-sec',
-            `体验偏好（${PREF_GROUPS.length} 项，默认全部「${PREF_AUTO_NEW}」）`));
+        // 偏好状态放在闭包里，切换大致/详细或改档位只重绘内容区，
+        // 不重建折叠壳，所以不会自己折回去
+        const prefs = getDraftPrefs();
+        const groupMode = getGroupModes();
+
+        // --- 事件类型：主类型单选，次类型最多三个 ---
+        page.appendChild(el('div', 'eo-sec', '事件类型'));
+        page.appendChild(el('div', 'eo-hint',
+            `主类型只能选一个，次类型最多选 ${MAX_SUB_TYPES} 个，两个都可以不选，不选就由模型按当前剧情判断。`));
+
+        const mainRow = el('div', 'eo-row');
+        mainRow.appendChild(el('label', null, '主类型'));
+        const mainSel = el('select', 'eo-sel');
+        mainSel.style.flex = '1';
+        for (const t of [EVENT_TYPE_DEFAULT].concat(EVENT_MAIN_TYPES)) {
+            const o = el('option', null, t);
+            o.value = t;
+            mainSel.appendChild(o);
+        }
+        mainSel.value = prefs.eventMainType || EVENT_TYPE_DEFAULT;
+        mainSel.addEventListener('change', () => { prefs.eventMainType = mainSel.value; });
+        mainRow.appendChild(mainSel);
+        page.appendChild(mainRow);
+
+        // 次类型：多选按钮，点一下选中/取消，超过上限就拦住
+        const subWrap = el('div', 'eo-row eo-subtype-wrap');
+        subWrap.appendChild(el('label', null, '次类型'));
+        const subBox = el('div', 'eo-subtypes');
+        const selSet = new Set(prefs.eventSubTypes || []);
+        const counter = el('span', 'eo-hint', '');
+        const paintCounter = () => {
+            counter.textContent = `已选 ${selSet.size}/${MAX_SUB_TYPES}`;
+            counter.className = selSet.size >= MAX_SUB_TYPES ? 'eo-warn' : 'eo-hint';
+        };
+        for (const t of EVENT_SUB_TYPES) {
+            const b = el('button', 'eo-btn eo-subtype' + (selSet.has(t) ? ' eo-subtype-on' : ''), t);
+            b.type = 'button';
+            b.addEventListener('click', () => {
+                if (selSet.has(t)) {
+                    selSet.delete(t);
+                } else {
+                    if (selSet.size >= MAX_SUB_TYPES) {
+                        counter.textContent = `最多选 ${MAX_SUB_TYPES} 个，先取消一个再选`;
+                        counter.className = 'eo-bad';
+                        return;
+                    }
+                    selSet.add(t);
+                }
+                b.className = 'eo-btn eo-subtype' + (selSet.has(t) ? ' eo-subtype-on' : '');
+                prefs.eventSubTypes = Array.from(selSet);
+                paintCounter();
+            });
+            subBox.appendChild(b);
+        }
+        subWrap.appendChild(subBox);
+        page.appendChild(subWrap);
+        paintCounter();
+        page.appendChild(counter);
+
+        page.appendChild(el('div', 'eo-sec', '体验偏好'));
         page.appendChild(el('div', 'eo-hint',
             '这里是「这次想玩什么样的体验」，会原样写进生成大纲的提示词，模型按你的选择决定难度和危险程度。不确定选哪个的，留着「根据当前情况自行设定」就行，模型会自己配一套合理的。'));
 
-        let curGroup = null;
-        for (const g of PREF_GROUPS) {
-            if (g.group && g.group !== curGroup) {
-                curGroup = g.group;
-                page.appendChild(el('div', 'eo-subsec', `【${g.group}】`));
-            }
-            const row = el('div', 'eo-row');
-            const lb = el('label', null, g.label);
-            lb.style.minWidth = '92px';
-            row.appendChild(lb);
+        // 单项下拉（大致模式下的档位、详细模式下的子项都用它）
+        function makeSelect(row, labelText, options, current, onChange) {
+            const lab = el('label', null, labelText);
+            lab.style.minWidth = '92px';
+            row.appendChild(lab);
             const sel = el('select', 'eo-sel');
             sel.style.flex = '1';
-            for (const opt of g.options) {
-                const o = el('option', null, opt);
-                o.value = opt;
+            for (const opt of options) {
+                const o = el('option', null, opt.label);
+                o.value = opt.value;
                 sel.appendChild(o);
             }
-            sel.value = PREF_AUTO_NEW;
-            sel.addEventListener('change', () => { prefs[g.key] = sel.value; });
+            sel.value = current;
+            sel.addEventListener('change', () => onChange(sel.value));
             row.appendChild(sel);
-            page.appendChild(row);
+            return sel;
+        }
+
+        // 重绘某个分组的内容区（折叠壳与按钮不动）
+        function paintGroup(groupName, body, hintSpan) {
+            body.textContent = '';
+            const mode = groupMode[groupName];
+            const def = PREF_PRESETS[groupName];
+            const items = PREF_GROUPS.filter(x => x.group === groupName);
+
+            if (hintSpan) {
+                hintSpan.textContent = mode === 'rough'
+                    ? `选一个粗档位（含「${PREF_AUTO_NEW}」），${items.length} 个子项一次定好`
+                    : '逐项挑，可以拼出档位覆盖不了的组合';
+            }
+
+            if (mode === 'rough') {
+                const row = el('div', 'eo-row');
+                const all = presetOptions(groupName, prefs);
+                // 全部子项都是默认值时就是「自行设定」；组合拼不出来时也归到这一项
+                const cur = matchPreset(groupName, prefs) || 'auto';
+                makeSelect(row, '档位',
+                    all.map(o => ({ value: o.key, label: o.label })),
+                    cur,
+                    (v) => {
+                        const pick = all.find(o => o.key === v);
+                        if (!pick) return;
+                        for (const k of Object.keys(pick.values)) prefs[k] = pick.values[k];
+                        paintGroup(groupName, body, hintSpan);
+                    });
+                body.appendChild(row);
+                const pick = all.find(o => o.key === cur);
+                if (pick) body.appendChild(el('div', 'eo-hint', pick.desc));
+                return;
+            }
+
+            // 详细模式：逐项列出
+            const autoText = autoByText(prefs);
+            for (const g of items) {
+                const row = el('div', 'eo-row');
+                const opts = g.options.map(o => (o === SUB_AUTO ? autoText : o));
+                const curVal = prefs[g.key] || autoText;
+                makeSelect(row, g.label,
+                    opts.map(o => ({ value: o, label: o })),
+                    // 历史值可能是另一句文案，归一化后选中
+                    opts.includes(curVal) ? curVal : autoText,
+                    (v) => { prefs[g.key] = v; });
+                body.appendChild(row);
+            }
+        }
+
+        let curGroup = null;
+        // 各组内容区的重绘函数，供委托等级变化时统一刷新「自行设定」文案
+        const groupPainters = {};
+        function repaintAllGroups() {
+            for (const name of Object.keys(groupPainters)) {
+                try { groupPainters[name](); } catch (e) { warn('重绘偏好分组失败：' + name, e); }
+            }
+        }
+        for (const g of PREF_GROUPS) {
+            const isGrouped = !!g.group && !!PREF_PRESETS[g.group];
+
+            if (!isGrouped) {
+                // 独立项：直接一行（委托等级在这里）
+                const row = el('div', 'eo-row');
+                makeSelect(row, g.label,
+                    g.options.map(o => ({ value: o, label: o })),
+                    prefs[g.key] || PREF_AUTO_NEW,
+                    (v) => {
+                        prefs[g.key] = v;
+                        // 委托等级变了，下面各组的「自行设定」文案要跟着变
+                        if (g.key === 'commissionLevel') repaintAllGroups();
+                    });
+                page.appendChild(row);
+                continue;
+            }
+
+            if (g.group !== curGroup) {
+                curGroup = g.group;
+                const box = el('details', 'eo-prefgroup');
+                box.open = false;
+                const sum = el('summary', 'eo-prefgroup-sum');
+                const count = PREF_GROUPS.filter(x => x.group === g.group).length;
+                sum.textContent = `${g.group}（${count} 项）`;
+                box.appendChild(sum);
+
+                const modeRow = el('div', 'eo-row eo-prefmode');
+                const btns = {};
+                const hintSpan = el('span', 'eo-hint', '');
+                const body = el('div', 'eo-prefgroup-body');
+                const paintModes = () => {
+                    for (const mk of ['rough', 'detail']) {
+                        btns[mk].className = 'eo-btn eo-modebtn' + (groupMode[g.group] === mk ? ' eo-modebtn-on' : '');
+                    }
+                };
+                for (const [mk, ml] of [['rough', '大致'], ['detail', '详细']]) {
+                    const b = el('button', 'eo-btn eo-modebtn', ml);
+                    b.type = 'button';
+                    b.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (groupMode[g.group] === mk) return;
+                        groupMode[g.group] = mk;
+                        paintModes();
+                        paintGroup(g.group, body, hintSpan);
+                    });
+                    btns[mk] = b;
+                    modeRow.appendChild(b);
+                }
+                modeRow.appendChild(hintSpan);
+                box.appendChild(modeRow);
+                box.appendChild(body);
+                page.appendChild(box);
+
+                paintModes();
+                paintGroup(g.group, body, hintSpan);
+                // 登记，供委托等级切换时刷新文案（重绘内容区，折叠壳不动）
+                groupPainters[g.group] = () => paintGroup(g.group, body, hintSpan);
+            }
         }
 
         const extraRow = el('div', 'eo-row');
         extraRow.appendChild(el('label', null, '额外要求'));
         const extraInput = el('input', 'eo-input');
         extraInput.type = 'text';
-        extraInput.value = '无';
+        extraInput.value = prefs.extra || '无';
+        extraInput.addEventListener('input', () => { prefs.extra = extraInput.value; });
         extraInput.style.flex = '1';
         extraRow.appendChild(extraInput);
-        det.appendChild(extraRow);
-        page.appendChild(det);
+        page.appendChild(extraRow);
 
         // 上下文预览
         const ctxBox = el('div', 'eo-box eo-ctx-preview');
@@ -2002,7 +2688,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const btnGo = el('button', 'eo-btn eo-primary', '开始生成大纲');
         btnGo.addEventListener('click', async () => {
             const name = String(nameInput.value || '').trim();
-            if (!name) { opOut.className = 'eo-bad'; opOut.textContent = '请填写事件名'; return; }
+            // 事件名可以留空：留空就由模型根据当前剧情自己起名
             prefs.extra = String(extraInput.value || '无').trim() || '无';
             btnGo.disabled = true;
             opOut.className = 'eo-hint';
@@ -2011,12 +2697,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 const event = await createEvent(name, prefs);
                 const nodeCount = (event.outline && event.outline.nodes || []).length;
                 log(`生成大纲成功：${event.name}，节点 ${nodeCount} 个，世界书条目 uid=${event.entryUid}`);
+                resetDraftPrefs();
                 opOut.className = 'eo-ok';
                 opOut.textContent = `已生成：${event.name}，世界书条目 uid=${event.entryUid}`;
                 activeTab = 'gen';
                 renderPanel();
             } catch (e) {
-                warn('生成大纲失败：', e);
+                error('生成大纲失败：', e);
                 opOut.className = 'eo-bad';
                 opOut.textContent = '生成失败：' + (e && e.message || e);
             } finally { btnGo.disabled = false; }
@@ -2072,7 +2759,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 opOut.textContent = `第 ${r.record.round} 次盘点完成，已更新世界书条目 uid=${r.event.entryUid}`;
                 renderPanel();
             } catch (e) {
-                warn('盘点失败：', e);
+                error('盘点失败：', e);
                 opOut.className = 'eo-bad';
                 opOut.textContent = '盘点失败：' + (e && e.message || e);
             } finally { btnInv.disabled = false; }
@@ -2088,14 +2775,49 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const nodes = (ev.outline && ev.outline.nodes) || [];
         if (Array.isArray(nodes) && nodes.length) {
             const triggered = new Set(ev.tracker.triggeredNodes || []);
+            const pending = new Set(ev.tracker.pendingNodes || []);
+            const mode = getSettings().tracker.mode;
+
+            // 半自动：待确认建议单独列一块，放在节点清单上面
+            if (mode === 'semi' && pending.size) {
+                page.appendChild(el('div', 'eo-sec', `待确认的建议（${pending.size} 条，模型认为已达成）`));
+                page.appendChild(el('div', 'eo-hint',
+                    '这些是模型在这一轮剧情里认为碰到的节点。点「确认」才算真正打勾，点「忽略」就不算；不处理的话，下次盘点会被新建议覆盖。'));
+                const pb = el('div', 'eo-box');
+                for (const id of Array.from(pending).sort((a, b) => a - b)) {
+                    const node = nodes.find(n => Number(n.id != null ? n.id : n.index) === id);
+                    const row = el('div', 'eo-suggest');
+                    const txt = el('span', null, `${id}. ${(node && (node.type || '')) || ''} ${(node && (node.desc || node.info || node.content)) || '（大纲里找不到这个节点）'}`);
+                    row.appendChild(txt);
+                    const bOk = el('button', 'eo-btn eo-primary', '确认');
+                    bOk.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        confirmPending(id);
+                        renderPanel();
+                    });
+                    const bNo = el('button', 'eo-btn', '忽略');
+                    bNo.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        dismissPending(id);
+                        renderPanel();
+                    });
+                    row.appendChild(bOk);
+                    row.appendChild(bNo);
+                    pb.appendChild(row);
+                }
+                page.appendChild(pb);
+            }
+
             page.appendChild(el('div', 'eo-sec', `节点进度（${triggered.size}/${nodes.length}，点击切换）`));
             const nb = el('div', 'eo-box');
             for (const n of nodes) {
                 const id = Number(n.id != null ? n.id : n.index);
                 const on = triggered.has(id);
-                const line = el('div', 'eo-node' + (on ? ' eo-node-on' : ''));
-                line.textContent = `${on ? '☑' : '☐'} ${id}. ${n.type || ''} ${n.desc || n.info || n.content || ''}`
-                    + (n.keyword || n.keywords ? `（${n.keyword || n.keywords}）` : '');
+                const isPending = pending.has(id);
+                const line = el('div', 'eo-node' + (on ? ' eo-node-on' : '') + (isPending ? ' eo-node-suggest' : ''));
+                line.textContent = `${on ? '☑' : (isPending ? '◐' : '☐')} ${id}. ${n.type || ''} ${n.desc || n.info || n.content || ''}`
+                    + (n.keyword || n.keywords ? `（${n.keyword || n.keywords}）` : '')
+                    + (isPending ? '　← 模型建议，待确认' : '');
                 line.addEventListener('click', () => {
                     toggleNode(id);
                     renderPanel();
@@ -2135,19 +2857,59 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
     // ---------- 页：日志 ----------
 
+    // 日志页的级别筛选：记在模块级，切页签不丢；'all' = 全部
+    let logFilter = 'all';
+
     function renderRuntimeLogSection(page) {
-        page.appendChild(el('div', 'eo-sec', `扩展运行日志（${runtimeLog.length} 条，最多保留 ${RUNTIME_LOG_MAX}）`));
+        const head = el('div', 'eo-sec eo-sec-inline');
+        head.appendChild(el('span', null, '扩展运行日志'));
+        head.appendChild(el('span', 'eo-hint', `（${runtimeLog.length} 条，最多保留 ${RUNTIME_LOG_MAX}）`));
+        page.appendChild(head);
         page.appendChild(el('div', 'eo-hint',
             '这里记录扩展自己做过的事：挂载、读写世界书、记忆适配器判定、生成与解析、打勾变更、报错。只存在内存里，刷新页面就清空，不会写进聊天记录。'));
-        if (!runtimeLog.length) {
-            page.appendChild(el('div', 'eo-hint', '还没有记录。'));
+
+        // 级别筛选
+        const cnt = { debug: 0, info: 0, warn: 0, error: 0 };
+        for (const l of runtimeLog) if (cnt[l.level] != null) cnt[l.level]++;
+        const fRow = el('div', 'eo-row eo-logfilter');
+        const mkBtn = (key, label) => {
+            const b = el('button', 'eo-btn eo-filterbtn' + (logFilter === key ? ' eo-filterbtn-on' : ''), label);
+            b.type = 'button';
+            b.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                logFilter = key;
+                renderPanel();
+            });
+            fRow.appendChild(b);
+        };
+        mkBtn('all', `全部 ${runtimeLog.length}`);
+        for (const lv of LOG_LEVELS) mkBtn(lv, `${LOG_LEVEL_LABEL[lv]} ${cnt[lv]}`);
+        page.appendChild(fRow);
+
+        if (!debugEnabled()) {
+            const tip = el('div', 'eo-hint');
+            tip.textContent = '调试级日志默认不收集。需要看细节时到「设置」页打开「调试日志」，再回来就能看到。';
+            page.appendChild(tip);
+        }
+
+        // 只收调试级却一条都没有，说明这不只是筛选问题
+        const shown = logFilter === 'all' ? runtimeLog : runtimeLog.filter(l => l.level === logFilter);
+        if (!shown.length) {
+            page.appendChild(el('div', 'eo-hint',
+                runtimeLog.length ? '这个级别下暂时没有记录，点上面的「全部」看其它级别。' : '还没有记录。'));
             return;
         }
-        const box = el('div', 'eo-box');
-        box.textContent = runtimeLog.map(l =>
-            `${l.at} ${l.level === 'warn' ? '警告' : '信息'}｜${l.text}`
-        ).join('\n');
+        const box = el('div', 'eo-box eo-logbox');
+        box.textContent = shown.map(l =>
+            `${l.at} ${LOG_LEVEL_LABEL[l.level] || l.level}｜${l.text}`
+        ).join(String.fromCharCode(10));
         page.appendChild(box);
+        // 日志按时间正序排，最新一条在最下面：渲染完直接滚到底，一进来就看到最新的
+        const toBottom = () => { box.scrollTop = box.scrollHeight; };
+        toBottom();
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(toBottom);
+        setTimeout(toBottom, 60);
         const btn = el('button', 'eo-btn', '清空运行日志');
         btn.addEventListener('click', () => {
             runtimeLog.length = 0;
@@ -2186,6 +2948,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         lines.push(`已触发节点：${(t.triggeredNodes || []).join('、') || '无'}`);
         lines.push(`已推翻误导：${(t.refutedMisleads || []).join('、') || '无'}`);
         lines.push(`人工否决：${(t.nodeVetoed || []).join('、') || '无'}`);
+        const pend = t.pendingNodes || [];
+        if (pend.length) lines.push(`待确认建议：${pend.join('、')}（半自动模式，等你点确认）`);
         const offPath = t.offPathBranches || [];
         lines.push(`大纲外路径：${offPath.length ? offPath.map(o => `【大纲外】${o.desc}`).join('；') : '无'}`);
         if (offPath.some(o => o.reason)) {
@@ -2239,11 +3003,14 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         // --- API ---
         page.appendChild(el('div', 'eo-sec', '模型 API'));
         const s = getSettings();
+
+        // 使用哪套配置
         const apiRow = el('div', 'eo-row');
         apiRow.appendChild(el('label', null, '使用配置'));
         const apiSel = el('select', 'eo-sel');
+        apiSel.style.flex = '1';
         for (const p of s.apiProfiles) {
-            const o = el('option', null, p.name);
+            const o = el('option', null, p.name + (p.mode === 'main' ? '' : p.mode === 'direct' ? '（直连）' : '（酒馆连接源）'));
             o.value = p.id;
             apiSel.appendChild(o);
         }
@@ -2251,11 +3018,276 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         apiSel.addEventListener('change', () => {
             getSettings().activeProfileId = apiSel.value;
             saveSettings();
+            const p = (getSettings().apiProfiles || []).find(x => x.id === apiSel.value);
+            log(`模型 API 已切换为「${p ? p.name : apiSel.value}」`);
             renderPanel();
         });
         apiRow.appendChild(apiSel);
         page.appendChild(apiRow);
-        page.appendChild(el('div', 'eo-hint', '目前只有「跟随酒馆主连接」。单独配置与多套配置档在后续版本加入。'));
+
+        const cur = (s.apiProfiles || []).find(p => p.id === s.activeProfileId) || { mode: 'main' };
+        page.appendChild(el('div', 'eo-hint',
+            cur.mode === 'main'
+                ? '跟随酒馆主连接：用酒馆当前选的模型和连接，最省心。'
+                : cur.mode === 'direct'
+                    ? '直连：扩展自己请求你填的接口，与酒馆主模型完全独立。'
+                    : '酒馆连接源：调用酒馆里已配好的连接，可以指定模型名。'));
+
+        // 配置档列表：每行一套，可以编辑/删除
+        const listHead = el('div', 'eo-sec eo-sec-inline');
+        listHead.appendChild(el('span', null, '配置档'));
+        page.appendChild(listHead);
+
+        for (const p of s.apiProfiles) {
+            const box = el('details', 'eo-prefgroup');
+            box.open = false;
+            const sum = el('summary', 'eo-prefgroup-sum');
+            sum.textContent = `${p.name}${p.mode === 'main' ? '（跟随酒馆）' : p.mode === 'direct' ? '（直连）' : '（酒馆连接源）'}`;
+            box.appendChild(sum);
+            const body = el('div', 'eo-prefgroup-body');
+
+            if (p.mode === 'main') {
+                body.appendChild(el('div', 'eo-hint', '这套配置不需要填写任何东西，永远跟随酒馆当前连接。'));
+            } else {
+                const nameRow2 = el('div', 'eo-row');
+                nameRow2.appendChild(el('label', null, '名称'));
+                const nameIn = el('input', 'eo-input');
+                nameIn.type = 'text';
+                nameIn.value = p.name || '';
+                nameIn.style.flex = '1';
+                nameRow2.appendChild(nameIn);
+                body.appendChild(nameRow2);
+
+                const modeRow2 = el('div', 'eo-row');
+                modeRow2.appendChild(el('label', null, '方式'));
+                const modeSel = el('select', 'eo-sel');
+                for (const [mv, ml] of [['tavern', '走酒馆连接源'], ['direct', '直连接口']]) {
+                    const o = el('option', null, ml);
+                    o.value = mv;
+                    modeSel.appendChild(o);
+                }
+                modeSel.value = p.mode;
+                modeSel.addEventListener('change', () => {
+                    const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
+                    if (t) { t.mode = modeSel.value; saveSettings(); }
+                    renderPanel();
+                });
+                modeRow2.appendChild(modeSel);
+                body.appendChild(modeRow2);
+
+                if (p.mode === 'tavern') {
+                    const apiRow2 = el('div', 'eo-row');
+                    apiRow2.appendChild(el('label', null, '连接源'));
+                    const apiSel2 = el('select', 'eo-sel');
+                    const o0 = el('option', null, '（跟随酒馆当前连接源）');
+                    o0.value = '';
+                    apiSel2.appendChild(o0);
+                    for (const [av, al] of TAVERN_APIS) {
+                        const o = el('option', null, al);
+                        o.value = av;
+                        apiSel2.appendChild(o);
+                    }
+                    apiSel2.value = p.api || '';
+                    apiSel2.addEventListener('change', () => {
+                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
+                        if (t) { t.api = apiSel2.value; saveSettings(); }
+                    });
+                    apiRow2.appendChild(apiSel2);
+                    body.appendChild(apiRow2);
+
+                    const mRow = el('div', 'eo-row');
+                    mRow.appendChild(el('label', null, '模型名'));
+                    const mIn = el('input', 'eo-input');
+                    mIn.type = 'text';
+                    mIn.placeholder = '留空=跟随酒馆当前模型';
+                    mIn.value = p.model || '';
+                    mIn.style.flex = '1';
+                    mIn.addEventListener('change', () => {
+                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
+                        if (t) { t.model = mIn.value.trim(); saveSettings(); }
+                    });
+                    mRow.appendChild(mIn);
+                    body.appendChild(mRow);
+
+                    const rRow = el('div', 'eo-row');
+                    rRow.appendChild(el('label', null, '输出上限'));
+                    const rIn = el('input', 'eo-input');
+                    rIn.type = 'number';
+                    rIn.min = '0';
+                    rIn.step = '100';
+                    rIn.placeholder = '0=用酒馆当前设置';
+                    rIn.value = String(Number(p.responseLength) || 0);
+                    rIn.style.width = '90px';
+                    rIn.addEventListener('change', () => {
+                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
+                        if (t) { t.responseLength = Number(rIn.value) || 0; saveSettings(); }
+                    });
+                    rRow.appendChild(rIn);
+                    body.appendChild(rRow);
+                } else {
+                    const uRow = el('div', 'eo-row');
+                    uRow.appendChild(el('label', null, '接口地址'));
+                    const uIn = el('input', 'eo-input');
+                    uIn.type = 'text';
+                    uIn.placeholder = 'https://api.example.com/v1';
+                    uIn.value = p.baseUrl || '';
+                    uIn.style.flex = '1';
+                    uIn.addEventListener('change', () => {
+                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
+                        if (t) { t.baseUrl = uIn.value.trim(); saveSettings(); }
+                    });
+                    uRow.appendChild(uIn);
+                    body.appendChild(uRow);
+
+                    const kRow = el('div', 'eo-row');
+                    kRow.appendChild(el('label', null, '密钥'));
+                    const kIn = el('input', 'eo-input');
+                    kIn.type = 'password';
+                    kIn.placeholder = 'sk-…';
+                    kIn.value = p.apiKey || '';
+                    kIn.style.flex = '1';
+                    kIn.addEventListener('change', () => {
+                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
+                        if (t) { t.apiKey = kIn.value.trim(); saveSettings(); }
+                    });
+                    kRow.appendChild(kIn);
+                    body.appendChild(kRow);
+
+                    const mRow2 = el('div', 'eo-row');
+                    mRow2.appendChild(el('label', null, '模型名'));
+                    const mIn2 = el('input', 'eo-input');
+                    mIn2.type = 'text';
+                    mIn2.placeholder = '如 deepseek-chat';
+                    mIn2.value = p.model || '';
+                    mIn2.style.flex = '1';
+                    mIn2.addEventListener('change', () => {
+                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
+                        if (t) { t.model = mIn2.value.trim(); saveSettings(); }
+                    });
+                    mRow2.appendChild(mIn2);
+                    body.appendChild(mRow2);
+
+                    const tRow = el('div', 'eo-row');
+                    tRow.appendChild(el('label', null, '温度'));
+                    const tIn = el('input', 'eo-input');
+                    tIn.type = 'number';
+                    tIn.min = '0';
+                    tIn.max = '2';
+                    tIn.step = '0.1';
+                    tIn.value = String(Number.isFinite(Number(p.temperature)) ? Number(p.temperature) : 1);
+                    tIn.style.width = '76px';
+                    tIn.addEventListener('change', () => {
+                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
+                        if (t) { t.temperature = Number(tIn.value); saveSettings(); }
+                    });
+                    tRow.appendChild(tIn);
+                    tRow.appendChild(el('span', 'eo-hint', '0-2，越高越发散；结构化输出建议 0.7 以下'));
+                    body.appendChild(tRow);
+
+                    const xRow = el('div', 'eo-row');
+                    xRow.appendChild(el('label', null, '输出上限'));
+                    const xIn = el('input', 'eo-input');
+                    xIn.type = 'number';
+                    xIn.min = '0';
+                    xIn.step = '100';
+                    xIn.placeholder = '0=不限制';
+                    xIn.value = String(Number(p.maxTokens) || 0);
+                    xIn.style.width = '90px';
+                    xIn.addEventListener('change', () => {
+                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
+                        if (t) { t.maxTokens = Number(xIn.value) || 0; saveSettings(); }
+                    });
+                    xRow.appendChild(xIn);
+                    body.appendChild(xRow);
+                }
+
+                // 保存名称按钮 + 测试 + 删除
+                const actRow = el('div', 'eo-row');
+                const btnSave = el('button', 'eo-btn', '保存名称');
+                btnSave.type = 'button';
+                btnSave.addEventListener('click', () => {
+                    const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
+                    const nm = String(nameIn.value || '').trim();
+                    if (!nm) { nameIn.value = p.name; return; }
+                    if (t) { t.name = nm; saveSettings(); }
+                    log(`模型配置「${p.name}」已更名为「${nm}」`);
+                    renderPanel();
+                });
+                actRow.appendChild(btnSave);
+
+                const btnTest = el('button', 'eo-btn', '测试连接');
+                btnTest.type = 'button';
+                const testOut = el('span', 'eo-hint', '');
+                btnTest.addEventListener('click', async () => {
+                    btnTest.disabled = true;
+                    testOut.className = 'eo-hint';
+                    testOut.textContent = '测试中…';
+                    const prevActive = getSettings().activeProfileId;
+                    try {
+                        // 临时切到这套配置试一次
+                        getSettings().activeProfileId = p.id;
+                        const r = await testProfile(p);
+                        testOut.className = 'eo-ok';
+                        testOut.textContent = `通！${r.ms} 毫秒，返回「${r.sample}」`;
+                        log(`配置「${p.name}」测试连接通过：${r.ms} 毫秒`);
+                    } catch (e) {
+                        testOut.className = 'eo-bad';
+                        testOut.textContent = '不通：' + (e && e.message || e);
+                    } finally {
+                        getSettings().activeProfileId = prevActive;
+                        saveSettings();
+                        btnTest.disabled = false;
+                    }
+                });
+                actRow.appendChild(btnTest);
+                actRow.appendChild(testOut);
+                body.appendChild(actRow);
+
+                if (p.id !== 'main') {
+                    const delRow = el('div', 'eo-row');
+                    const btnDel = el('button', 'eo-btn', '删除这套配置');
+                    btnDel.type = 'button';
+                    btnDel.addEventListener('click', () => {
+                        const st = getSettings();
+                        st.apiProfiles = (st.apiProfiles || []).filter(x => x.id !== p.id);
+                        if (st.activeProfileId === p.id) st.activeProfileId = 'main';
+                        saveSettings();
+                        log(`已删除模型配置「${p.name}」`);
+                        renderPanel();
+                    });
+                    delRow.appendChild(btnDel);
+                    body.appendChild(delRow);
+                }
+            }
+
+            box.appendChild(body);
+            page.appendChild(box);
+        }
+
+        // 新建
+        const addRow = el('div', 'eo-row');
+        const btnAdd = el('button', 'eo-btn eo-primary', '新建配置');
+        btnAdd.type = 'button';
+        btnAdd.addEventListener('click', () => {
+            const st = getSettings();
+            const n = (st.apiProfiles || []).length;
+            const id = 'custom-' + Date.now();
+            st.apiProfiles.push({
+                id,
+                name: `自定义配置 ${n}`,
+                mode: 'direct',
+                baseUrl: '',
+                apiKey: '',
+                model: '',
+                temperature: 1,
+                maxTokens: 0,
+            });
+            saveSettings();
+            log(`新建了模型配置「自定义配置 ${n}」，请填写地址、密钥和模型名`);
+            renderPanel();
+        });
+        addRow.appendChild(btnAdd);
+        page.appendChild(addRow);
 
         // --- 记忆来源 ---
         page.appendChild(el('div', 'eo-sec', '记忆来源'));
@@ -2271,6 +3303,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         memSel.addEventListener('change', () => {
             getSettings().memory.source = memSel.value;
             saveSettings();
+            log(`记忆来源已切换为「${MEMORY_SOURCES[memSel.value] || memSel.value}」`);
             renderPanel();
         });
         memRow.appendChild(memSel);
@@ -2301,38 +3334,17 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         flRow.appendChild(el('span', 'eo-hint', '楼'));
         page.appendChild(flRow);
 
-        // --- 打勾模式 ---
-        page.appendChild(el('div', 'eo-sec', '打勾模式'));
-        page.appendChild(el('div', 'eo-hint',
-            '「打勾」= 把大纲里的某个节点标成已达成。剧情推进到某个节点时，谁来判断、谁来点，就是这个模式决定的。'));
-        const trRow = el('div', 'eo-row');
-        const trSel = el('select', 'eo-sel');
-        for (const [k, label] of Object.entries(TRACKER_MODES)) {
-            const o = el('option', null, label);
-            o.value = k;
-            trSel.appendChild(o);
-        }
-        trSel.value = s.tracker.mode;
-        trSel.addEventListener('change', () => {
-            getSettings().tracker.mode = trSel.value;
-            saveSettings();
-        });
-        trRow.appendChild(trSel);
-        page.appendChild(trRow);
-        const modeHint = {
-            auto: '自动：每次状态盘点后，模型自己判断这一轮剧情碰没碰到节点，碰到了就直接打勾。你不用管，适合想专心投入剧情的时候；代价是个别判断可能不合你意，而且勾上去之后靠人工否决来纠正。',
-            semi: '半自动：模型只给建议，把「我认为这几个节点已达成」列出来，勾还是不勾由你点。适合想保留决定权、又不想自己逐条比对大纲的时候。',
-            manual: '手动：模型完全不插手，节点全由你点。适合你心里有数、想严格按自己的理解记录进度；模型建议只作为提示显示，不会自动生效。',
-        };
-        page.appendChild(el('div', 'eo-hint', modeHint[s.tracker.mode] || ''));
-        page.appendChild(el('div', 'eo-hint',
-            '三者的区别只在「谁来打勾」：自动=模型打（你可否决），半自动=模型提议你确认，手动=你自己打。无论哪种，被触发的节点都会写进世界书条目，供模型下一轮参考。'));
-
-        // --- shujuku 诊断（仅记忆来源为 shujuku 时显示）---
-        if (s.memory.source === 'shujuku-jiyao') {
-            page.appendChild(el('div', 'eo-sec', 'shujuku 接入诊断'));
-            page.appendChild(el('div', 'eo-hint',
-                '这段是专门给 shujuku 用的体检：确认它当前用哪种填表模式、纪要表在哪、能不能解析出纪要。如果你把记忆来源切回别的选项，这里的检查就没有意义，所以不显示。'));
+        // --- shujuku 接入诊断：记忆来源的子项 ---
+        // 判定看「实际解析到的适配器」，不是看设置值：
+        // 手动选 shujuku → 显示；自动模式下探测到 shujuku → 也显示；
+        // 自动模式退到仅最近楼层 → 不显示（那时体检没有意义）
+        if (resolved.adapter.id === 'shujuku-jiyao') {
+            const sub = el('div', 'eo-sub');
+            sub.appendChild(el('div', 'eo-sub-title', '└ shujuku 接入诊断'));
+            sub.appendChild(el('div', 'eo-hint',
+                s.memory.source === 'auto'
+                    ? '自动模式下检测到 shujuku 正在使用，所以这里显示它的体检项：确认它当前用哪种填表模式、纪要表在哪、能不能解析出纪要。哪天自动模式不再命中 shujuku，这一项会自动消失。'
+                    : '这段是专门给 shujuku 用的体检：确认它当前用哪种填表模式、纪要表在哪、能不能解析出纪要。它是「记忆来源选 shujuku」时才有的子项，切回别的来源就不显示。'));
             const diagBtn = el('button', 'eo-btn', '体检');
             const diagOut = el('div', 'eo-box');
             diagOut.style.display = 'none';
@@ -2349,12 +3361,146 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             });
             const diagRow = el('div', 'eo-row');
             diagRow.appendChild(diagBtn);
-            page.appendChild(diagRow);
-            page.appendChild(diagOut);
+            sub.appendChild(diagRow);
+            sub.appendChild(diagOut);
+            page.appendChild(sub);
         }
 
+        // --- 打勾模式 ---
+        const trSec = el('div', 'eo-sec eo-sec-inline');
+        trSec.appendChild(el('span', null, '打勾模式'));
+        const trHelp = el('span', 'eo-help', '?');
+        trHelp.title = '「打勾」= 把大纲里的某个节点标成已达成。剧情推进到某个节点时，谁来判断、谁来点，就是这个模式决定的。';
+        trHelp.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const tip = el('div', 'eo-tip');
+            tip.textContent = trHelp.title;
+            const old = document.querySelector('.eo-tip');
+            if (old) old.remove();
+            if (trHelp.classList.contains('eo-help-on')) {
+                trHelp.classList.remove('eo-help-on');
+                return;
+            }
+            trHelp.classList.add('eo-help-on');
+            trHelp.appendChild(tip);
+        });
+        trSec.appendChild(trHelp);
+        page.appendChild(trSec);
+        const trRow = el('div', 'eo-row');
+        const trSel = el('select', 'eo-sel');
+        for (const [k, label] of Object.entries(TRACKER_MODES)) {
+            const o = el('option', null, label);
+            o.value = k;
+            trSel.appendChild(o);
+        }
+        trSel.value = s.tracker.mode;
+        trSel.addEventListener('change', () => {
+            getSettings().tracker.mode = trSel.value;
+            saveSettings();
+            log(`打勾模式已切换为「${TRACKER_MODES[trSel.value] || trSel.value}」`);
+            renderPanel();
+        });
+        trRow.appendChild(trSel);
+        page.appendChild(trRow);
+
+        // 三档各占一行，换行显示，避免糊成一段
+        const modeLines = {
+            auto: '自动：盘点后模型自己判断碰没碰到节点，碰到就直接打勾。你什么都不用管。下面还能设每积累多少层楼自动盘点一次。勾错了点节点「撤销」即可，撤销过的节点以后不会再被自动勾上。',
+            semi: '半自动：盘点后模型只给建议，列在盘点页顶部的「待确认的建议」里，节点标成 ◐。点「确认」才算打勾，点「忽略」就不算。适合想保留决定权、又不想自己逐条比对大纲的时候。',
+            manual: '手动：模型完全不插手，节点全由你点。适合心里有数、想严格按自己的理解记录进度。',
+        };
+        const modeList = el('div', 'eo-modes');
+        for (const k of ['auto', 'semi', 'manual']) {
+            const item = el('div', 'eo-mode' + (s.tracker.mode === k ? ' eo-mode-active' : ''));
+            const tag = el('span', 'eo-mode-tag', TRACKER_MODES[k]);
+            item.appendChild(tag);
+            item.appendChild(el('span', null, modeLines[k].replace(TRACKER_MODES[k] + '：', '')));
+            modeList.appendChild(item);
+        }
+        page.appendChild(modeList);
+
+        // 自动模式的子项：自动盘点的楼层间隔
+        if (s.tracker.mode === 'auto') {
+            const sub = el('div', 'eo-sub');
+            sub.appendChild(el('div', 'eo-sub-title', '└ 自动检测间隔'));
+            const afRow = el('div', 'eo-row');
+            afRow.appendChild(el('label', null, '每'));
+            const afIn = el('input', 'eo-input');
+            afIn.type = 'number';
+            afIn.min = '0';
+            afIn.max = '200';
+            afIn.value = String(s.tracker.autoEveryFloors);
+            afIn.style.width = '76px';
+            afIn.addEventListener('change', () => {
+                const v = Math.max(0, Math.min(200, Number(afIn.value) || 0));
+                afIn.value = String(v);
+                getSettings().tracker.autoEveryFloors = v;
+                saveSettings();
+                renderPanel();
+            });
+            afRow.appendChild(afIn);
+            afRow.appendChild(el('span', 'eo-hint', '层楼自动盘点一次'));
+            sub.appendChild(afRow);
+
+            if (getCurrentEvent()) {
+                const cur = countFloors();
+                const base = Number(getCurrentEvent().floorBase);
+                const since = Number.isFinite(base) ? Math.max(0, cur - base) : 0;
+                const every = Math.max(0, Number(s.tracker.autoEveryFloors) || 0);
+                const line = el('div', 'eo-hint',
+                    every > 0
+                        ? `当前对话共 ${cur} 层，距上次盘点已过 ${since} 层，还差 ${Math.max(0, every - since)} 层触发下一次自动盘点。`
+                        : `当前对话共 ${cur} 层。填 0 即关闭自动盘点，只在你手动点「开始盘点」时才跑。`);
+                sub.appendChild(line);
+            }
+            sub.appendChild(el('div', 'eo-hint',
+                '楼层按「玩家楼 + AI 楼」合计，系统消息不算。基点在新建事件和每次盘点成功后归零重计。触发时机是每收到一条新回复后自动检查，攒够间隔就自己跑一次盘点；填 0 则完全关闭自动盘点。'));
+
+            // 手动触发一次
+            const afBtn = el('button', 'eo-btn eo-primary', '现在盘点一次');
+            afBtn.addEventListener('click', async () => {
+                try {
+                    afBtn.disabled = true;
+                    afBtn.textContent = '盘点中…';
+                    await runInventory();
+                    renderPanel();
+                } catch (e) {
+                    afBtn.disabled = false;
+                    afBtn.textContent = '现在盘点一次';
+                    alert('盘点失败：' + (e && e.message || e));
+                }
+            });
+            const afRow2 = el('div', 'eo-row');
+            afRow2.appendChild(afBtn);
+            sub.appendChild(afRow2);
+            page.appendChild(sub);
+        }
+
+        page.appendChild(el('div', 'eo-hint',
+            '无论哪一档，已触发的节点都会写进世界书条目，供模型下一轮参考。'));
+
+        // --- shujuku 诊断已上移到「记忆来源」子项（见上） ---
+
         // --- 保留数量 ---
-        page.appendChild(el('div', 'eo-sec', '历史保留'));
+        const retSec = el('div', 'eo-sec eo-sec-inline');
+        retSec.appendChild(el('span', null, '历史保留'));
+        const retHelp = el('span', 'eo-help', '?');
+        retHelp.title = '事件完结或废弃后，事件卡不会立刻消失，而是留在这里当历史。这两个数字是分别保留多少条：超出上限时按结束时间从旧到新删掉最老的。进行中的事件永远不会被清掉。';
+        retHelp.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const old = document.querySelector('.eo-tip');
+            if (old) old.remove();
+            if (retHelp.classList.contains('eo-help-on')) {
+                retHelp.classList.remove('eo-help-on');
+                return;
+            }
+            retHelp.classList.add('eo-help-on');
+            const tip = el('div', 'eo-tip');
+            tip.textContent = retHelp.title;
+            retHelp.appendChild(tip);
+        });
+        retSec.appendChild(retHelp);
+        page.appendChild(retSec);
         const retRow = el('div', 'eo-row');
         retRow.appendChild(el('label', null, '完结'));
         const inDone = el('input', 'eo-input');
@@ -2401,6 +3547,22 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         fabRow.appendChild(fabChk);
         fabRow.appendChild(el('span', 'eo-hint', '关闭后仍可从扩展菜单打开'));
         page.appendChild(fabRow);
+
+        // 调试日志开关：打开后 debug 级日志才会被收集
+        const dbgRow = el('div', 'eo-row');
+        dbgRow.appendChild(el('label', null, '调试日志'));
+        const dbgChk = el('input');
+        dbgChk.type = 'checkbox';
+        dbgChk.checked = !!s.debug;
+        dbgChk.addEventListener('change', () => {
+            getSettings().debug = dbgChk.checked;
+            saveSettings();
+            debug(`调试日志已${dbgChk.checked ? '开启' : '关闭'}`);
+            renderPanel();
+        });
+        dbgRow.appendChild(dbgChk);
+        dbgRow.appendChild(el('span', 'eo-hint', '开启后记录每一步的细节，排障时用；平时建议关掉，免得刷屏'));
+        page.appendChild(dbgRow);
 
         // --- 世界书自检 ---
         page.appendChild(el('div', 'eo-sec', '世界书'));
@@ -2545,6 +3707,47 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             });
         } catch (e) {
             warn('事件绑定失败', e);
+        }
+
+        // 每次 AI 回复落地（玩家楼 + AI 楼各算一层）就检查一次自动盘点
+        try {
+            context.eventSource.on(context.eventTypes.MESSAGE_RECEIVED, () => {
+                scheduleAutoInventoryCheck();
+            });
+            context.eventSource.on(context.eventTypes.GENERATION_ENDED, () => {
+                scheduleAutoInventoryCheck();
+            });
+        } catch (e) {
+            warn('自动盘点事件绑定失败', e);
+        }
+    }
+
+    // 自动盘点：消息事件触发后延迟检查，避免和酒馆自身的渲染抢时序
+    let autoCheckTimer = null;
+    let autoRunning = false;
+
+    function scheduleAutoInventoryCheck() {
+        if (autoCheckTimer) clearTimeout(autoCheckTimer);
+        autoCheckTimer = setTimeout(() => {
+            autoCheckTimer = null;
+            checkAutoInventory().catch(e => warn('自动盘点检查失败', e));
+        }, 1200);
+    }
+
+    async function checkAutoInventory() {
+        if (autoRunning) return;
+        const hit = shouldAutoInventory();
+        if (!hit) return;
+        autoRunning = true;
+        try {
+            log(`自动盘点触发：距上次盘点已过 ${hit.since} 层（阈值 ${hit.every} 层）`);
+            await runInventory();
+            log('自动盘点完成');
+            if (panelEl && panelEl.classList.contains('eo-open')) renderPanel();
+        } catch (e) {
+            error('自动盘点失败：' + (e && e.message || e));
+        } finally {
+            autoRunning = false;
         }
     }
 
