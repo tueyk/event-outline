@@ -112,6 +112,8 @@ case "$cmd" in
       set -e
       cd '${RELAY_REPO}'
       TMPP=\$(mktemp /tmp/incoming-XXXXXX.pack)
+      cleanup_x() { [ -n \"\${TMPP:-}\" ] && rm -f \"\$TMPP\" \"\${TMPP%.pack}.idx\" \"\${TMPP%.pack}.rev\"; return 0; }
+      trap cleanup_x EXIT
       cat > \"\$TMPP\"
       BASE=\${TMPP%.pack}
       git index-pack \"\$TMPP\" >/dev/null   # 产物: \$BASE.pack(不变) \$BASE.idx \$BASE.rev
