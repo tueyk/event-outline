@@ -21,13 +21,13 @@
 #
 # 环境变量:
 #   TAVERN_SSH   ssh 别名（默认 tavern）
-#   RELAY_REPO   VPS 上裸库路径（默认 /home/ubuntu/git/tavern-ext.git）
+#   RELAY_REPO   VPS 上裸库路径（默认 /home/ubuntu/git/event-outline.git）
 set -euo pipefail
 
 SSH_ALIAS="${TAVERN_SSH:-tavern}"
-RELAY_REPO="${RELAY_REPO:-/home/ubuntu/git/tavern-ext.git}"
+RELAY_REPO="${RELAY_REPO:-/home/ubuntu/git/event-outline.git}"
 RELAY_URL="ssh://${SSH_ALIAS}${RELAY_REPO}"
-PUSH_LOG=/home/ubuntu/git/tavern-ext-push.log
+PUSH_LOG=/home/ubuntu/git/event-outline-push.log
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"

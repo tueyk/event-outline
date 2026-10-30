@@ -60,11 +60,40 @@
             : null;
     }
 
+    /**
+     * 扩展运行日志（内存环形缓冲，不落盘，刷新页面即清空）。
+     * 只记录本扩展自己的动作：挂载、读写世界书、适配器判定、生成与解析、
+     * 打勾变更、错误。不记录聊天内容本身，避免把剧情抄进日志。
+     */
+    const RUNTIME_LOG_MAX = 500;
+    const runtimeLog = [];
+
+    function pushRuntimeLog(level, args) {
+        let text;
+        try {
+            text = args.map(a => {
+                if (typeof a === 'string') return a;
+                if (a instanceof Error) return a.message + (a.stack ? '\n' + a.stack.split('\n')[1] : '');
+                try { return JSON.stringify(a); } catch (e) { return String(a); }
+            }).join(' ');
+        } catch (e) {
+            text = String(args[0]);
+        }
+        const d = new Date();
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mi = String(d.getMinutes()).padStart(2, '0');
+        const ss = String(d.getSeconds()).padStart(2, '0');
+        runtimeLog.push({ at: hh + ':' + mi + ':' + ss, level, text });
+        if (runtimeLog.length > RUNTIME_LOG_MAX) runtimeLog.splice(0, runtimeLog.length - RUNTIME_LOG_MAX);
+    }
+
     function log(...args) {
+        pushRuntimeLog('info', args);
         console.log(LOG_PREFIX, ...args);
     }
 
     function warn(...args) {
+        pushRuntimeLog('warn', args);
         console.warn(LOG_PREFIX, ...args);
     }
 
@@ -562,12 +591,18 @@
         const wanted = s.memory.source || 'auto';
         if (wanted !== 'auto') {
             const a = ADAPTERS.find(x => x.id === wanted);
-            if (a && a.detect()) return { adapter: a, degraded: false };
+            if (a && a.detect()) {
+                log(`记忆来源：按设置使用「${a.label}」，${a.describe()}`);
+                return { adapter: a, degraded: false };
+            }
             const fallback = ADAPTERS.find(x => x.id === 'recent-floors');
+            warn(`记忆来源：设置要「${a ? a.label : wanted}」但检测不到数据，已降级为「${fallback.label}」（${fallback.describe()}）`);
             return { adapter: fallback, degraded: true, wanted };
         }
         const hits = ADAPTERS.filter(a => a.detect()).sort((x, y) => x.priority - y.priority);
-        return { adapter: hits[0] || ADAPTERS[ADAPTERS.length - 1], degraded: false };
+        const picked = hits[0] || ADAPTERS[ADAPTERS.length - 1];
+        log(`记忆来源：自动选择「${picked.label}」，${picked.describe()}`);
+        return { adapter: picked, degraded: false };
     }
 
     // ==================== 8. OOC 词与偏好 ====================
@@ -1280,6 +1315,7 @@
         }
         event.tracker.triggeredNodes = Array.from(triggered).sort((a, b) => a - b);
         event.tracker.nodeVetoed = Array.from(vetoed).sort((a, b) => a - b);
+        log(`手动${triggered.has(id) ? '打勾' : '撤销'}节点 ${id}（当前已触发 ${event.tracker.triggeredNodes.length} 个）`);
         saveMeta();
     }
 
@@ -1911,20 +1947,22 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         nameRow.appendChild(el('label', null, '事件名'));
         const nameInput = el('input', 'eo-input');
         nameInput.type = 'text';
-        nameInput.placeholder = '如：石桥镇失踪案';
+        nameInput.placeholder = '如：开膛手杰克案';
         nameRow.appendChild(nameInput);
         page.appendChild(nameRow);
 
-        // 偏好：默认折叠
+        // 偏好：不折叠，生成前就该看到自己选了什么
         const prefs = defaultPrefs();
-        const det = el('details', 'eo-details');
-        det.appendChild(el('summary', null, `体验偏好（${PREF_GROUPS.length} 项，默认全部「${PREF_AUTO_NEW}」）`));
+        page.appendChild(el('div', 'eo-sec',
+            `体验偏好（${PREF_GROUPS.length} 项，默认全部「${PREF_AUTO_NEW}」）`));
+        page.appendChild(el('div', 'eo-hint',
+            '这里是「这次想玩什么样的体验」，会原样写进生成大纲的提示词，模型按你的选择决定难度和危险程度。不确定选哪个的，留着「根据当前情况自行设定」就行，模型会自己配一套合理的。'));
 
         let curGroup = null;
         for (const g of PREF_GROUPS) {
             if (g.group && g.group !== curGroup) {
                 curGroup = g.group;
-                det.appendChild(el('div', 'eo-subsec', `【${g.group}】`));
+                page.appendChild(el('div', 'eo-subsec', `【${g.group}】`));
             }
             const row = el('div', 'eo-row');
             const lb = el('label', null, g.label);
@@ -1940,7 +1978,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             sel.value = PREF_AUTO_NEW;
             sel.addEventListener('change', () => { prefs[g.key] = sel.value; });
             row.appendChild(sel);
-            det.appendChild(row);
+            page.appendChild(row);
         }
 
         const extraRow = el('div', 'eo-row');
@@ -1971,14 +2009,16 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             opOut.textContent = '正在生成大纲，请稍候…';
             try {
                 const event = await createEvent(name, prefs);
+                const nodeCount = (event.outline && event.outline.nodes || []).length;
+                log(`生成大纲成功：${event.name}，节点 ${nodeCount} 个，世界书条目 uid=${event.entryUid}`);
                 opOut.className = 'eo-ok';
                 opOut.textContent = `已生成：${event.name}，世界书条目 uid=${event.entryUid}`;
                 activeTab = 'gen';
                 renderPanel();
             } catch (e) {
+                warn('生成大纲失败：', e);
                 opOut.className = 'eo-bad';
                 opOut.textContent = '生成失败：' + (e && e.message || e);
-                warn(e);
             } finally { btnGo.disabled = false; }
         });
         goRow.appendChild(btnGo);
@@ -2027,13 +2067,14 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             opOut.textContent = '正在盘点…';
             try {
                 const r = await runInventory();
+                log(`第 ${r.record.round} 次盘点完成，世界书条目已更新（uid=${r.event.entryUid}）`);
                 opOut.className = 'eo-ok';
                 opOut.textContent = `第 ${r.record.round} 次盘点完成，已更新世界书条目 uid=${r.event.entryUid}`;
                 renderPanel();
             } catch (e) {
+                warn('盘点失败：', e);
                 opOut.className = 'eo-bad';
                 opOut.textContent = '盘点失败：' + (e && e.message || e);
-                warn(e);
             } finally { btnInv.disabled = false; }
         });
         row.appendChild(btnInv);
@@ -2094,10 +2135,38 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
     // ---------- 页：日志 ----------
 
+    function renderRuntimeLogSection(page) {
+        page.appendChild(el('div', 'eo-sec', `扩展运行日志（${runtimeLog.length} 条，最多保留 ${RUNTIME_LOG_MAX}）`));
+        page.appendChild(el('div', 'eo-hint',
+            '这里记录扩展自己做过的事：挂载、读写世界书、记忆适配器判定、生成与解析、打勾变更、报错。只存在内存里，刷新页面就清空，不会写进聊天记录。'));
+        if (!runtimeLog.length) {
+            page.appendChild(el('div', 'eo-hint', '还没有记录。'));
+            return;
+        }
+        const box = el('div', 'eo-box');
+        box.textContent = runtimeLog.map(l =>
+            `${l.at} ${l.level === 'warn' ? '警告' : '信息'}｜${l.text}`
+        ).join('\n');
+        page.appendChild(box);
+        const btn = el('button', 'eo-btn', '清空运行日志');
+        btn.addEventListener('click', () => {
+            runtimeLog.length = 0;
+            renderPanel();
+        });
+        const r = el('div', 'eo-row');
+        r.appendChild(btn);
+        page.appendChild(r);
+    }
+
     function renderLogPage(page) {
+        // 运行日志放最上面：它是「扩展是否在正常工作」的全貌，
+        // 与下面的事件状态是两件事，没在进行中的事件也要能看到。
+        renderRuntimeLogSection(page);
+
         const ev = getCurrentEvent();
         if (!ev) {
-            page.appendChild(el('div', 'eo-hint', '当前没有进行中的事件，没有可观察的日志。'));
+            page.appendChild(el('div', 'eo-sec', '当前事件状态'));
+            page.appendChild(el('div', 'eo-hint', '当前没有进行中的事件，没有可观察的事件状态。'));
             const hist = listEvents();
             if (hist.length) {
                 page.appendChild(el('div', 'eo-sec', '历史事件'));
@@ -2122,7 +2191,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         if (offPath.some(o => o.reason)) {
             lines.push('　理由：' + offPath.filter(o => o.reason).map(o => o.reason).join('；'));
         }
-        page.appendChild(el('div', 'eo-sec', '当前状态'));
+        page.appendChild(el('div', 'eo-sec', '当前事件状态'));
         const sb = el('div', 'eo-box');
         sb.textContent = lines.join('\n');
         page.appendChild(sb);
@@ -2234,6 +2303,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         // --- 打勾模式 ---
         page.appendChild(el('div', 'eo-sec', '打勾模式'));
+        page.appendChild(el('div', 'eo-hint',
+            '「打勾」= 把大纲里的某个节点标成已达成。剧情推进到某个节点时，谁来判断、谁来点，就是这个模式决定的。'));
         const trRow = el('div', 'eo-row');
         const trSel = el('select', 'eo-sel');
         for (const [k, label] of Object.entries(TRACKER_MODES)) {
@@ -2249,31 +2320,38 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         trRow.appendChild(trSel);
         page.appendChild(trRow);
         const modeHint = {
-            auto: '自动：盘点后模型判定触发节点并自动打勾。',
-            semi: '半自动：模型给出建议，由你点击确认才打勾。',
-            manual: '手动：完全由你点击节点切换，模型建议只作参考。',
+            auto: '自动：每次状态盘点后，模型自己判断这一轮剧情碰没碰到节点，碰到了就直接打勾。你不用管，适合想专心投入剧情的时候；代价是个别判断可能不合你意，而且勾上去之后靠人工否决来纠正。',
+            semi: '半自动：模型只给建议，把「我认为这几个节点已达成」列出来，勾还是不勾由你点。适合想保留决定权、又不想自己逐条比对大纲的时候。',
+            manual: '手动：模型完全不插手，节点全由你点。适合你心里有数、想严格按自己的理解记录进度；模型建议只作为提示显示，不会自动生效。',
         };
         page.appendChild(el('div', 'eo-hint', modeHint[s.tracker.mode] || ''));
+        page.appendChild(el('div', 'eo-hint',
+            '三者的区别只在「谁来打勾」：自动=模型打（你可否决），半自动=模型提议你确认，手动=你自己打。无论哪种，被触发的节点都会写进世界书条目，供模型下一轮参考。'));
 
-        // --- shujuku 诊断 ---
-        page.appendChild(el('div', 'eo-sec', 'shujuku 接入诊断'));
-        const diagBtn = el('button', 'eo-btn', '体检');
-        const diagOut = el('div', 'eo-box');
-        diagOut.style.display = 'none';
-        diagBtn.addEventListener('click', () => {
-            try {
-                diagOut.textContent = diagnoseShujuku().join(String.fromCharCode(10));
-                diagOut.style.display = 'block';
-            } catch (e) {
-                diagOut.className = 'eo-bad';
-                diagOut.textContent = '诊断失败：' + (e && e.message || e);
-                diagOut.style.display = 'block';
-            }
-        });
-        const diagRow = el('div', 'eo-row');
-        diagRow.appendChild(diagBtn);
-        page.appendChild(diagRow);
-        page.appendChild(diagOut);
+        // --- shujuku 诊断（仅记忆来源为 shujuku 时显示）---
+        if (s.memory.source === 'shujuku-jiyao') {
+            page.appendChild(el('div', 'eo-sec', 'shujuku 接入诊断'));
+            page.appendChild(el('div', 'eo-hint',
+                '这段是专门给 shujuku 用的体检：确认它当前用哪种填表模式、纪要表在哪、能不能解析出纪要。如果你把记忆来源切回别的选项，这里的检查就没有意义，所以不显示。'));
+            const diagBtn = el('button', 'eo-btn', '体检');
+            const diagOut = el('div', 'eo-box');
+            diagOut.style.display = 'none';
+            diagBtn.addEventListener('click', () => {
+                try {
+                    diagOut.className = 'eo-box';
+                    diagOut.textContent = diagnoseShujuku().join(String.fromCharCode(10));
+                    diagOut.style.display = 'block';
+                } catch (e) {
+                    diagOut.className = 'eo-bad';
+                    diagOut.textContent = '诊断失败：' + (e && e.message || e);
+                    diagOut.style.display = 'block';
+                }
+            });
+            const diagRow = el('div', 'eo-row');
+            diagRow.appendChild(diagBtn);
+            page.appendChild(diagRow);
+            page.appendChild(diagOut);
+        }
 
         // --- 保留数量 ---
         page.appendChild(el('div', 'eo-sec', '历史保留'));

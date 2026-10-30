@@ -12,12 +12,11 @@ function ok(msg) { console.log('[ok]   ' + msg); }
 // ---- 1. 所有文档存在 ----
 const expected = [
     'README.md',
-    'docs/需求-事件大纲扩展.md',
-    'docs/设计-事件大纲扩展.md',
-    'docs/决策记录-事件大纲扩展.md',
+    'docs/需求.md',
+    'docs/设计.md',
+    'docs/决策记录.md',
     'docs/设计-记忆读取-shujuku纪要.md',
-    'docs/需求-OOC词自动化扩展.md',
-    'docs/agent-runbook.md',
+    'docs/规范.md',
     'scripts/deploy.sh',
     'scripts/remote-sync.sh',
     'scripts/test-event-outline.js',
@@ -84,10 +83,11 @@ function checkSections(file) {
     if (seen.length) ok(`${file} 章节 ${seen[0]}–${seen[seen.length - 1]} 连贯`);
     return seen;
 }
-checkSections('docs/需求-事件大纲扩展.md');
-checkSections('docs/设计-事件大纲扩展.md');
-checkSections('docs/决策记录-事件大纲扩展.md');
+checkSections('docs/需求.md');
+checkSections('docs/设计.md');
+checkSections('docs/决策记录.md');
 checkSections('docs/设计-记忆读取-shujuku纪要.md');
+checkSections('docs/规范.md');
 
 // ---- 5. 版本号一致性 ----
 const mf = JSON.parse(fs.readFileSync(path.join(root, 'src/event-outline/manifest.json'), 'utf8'));
