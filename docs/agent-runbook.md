@@ -11,7 +11,8 @@
 5. `bash scripts/deploy.sh <扩展名>` 部署并回读 sha256。
 6. `git add -A && git commit`，message 写清：动了什么、为什么、版本号。
 7. 打 tag：`git tag v-<扩展名>-<version>`。
-8. 回复用户：一句话说结果 + 版本号 + 服务端校验是否一致 + 让用户强刷。
+8. 推送：`bash scripts/remote-sync.sh push`（见下文「远程仓库」，不要再交赫尔墨斯）。日志出现 `exit=0` 才算到 GitHub。
+9. 回复用户：一句话说结果 + 版本号 + 服务端校验是否一致 + 让用户强刷。
 
 ## 提交信息格式
 
@@ -29,14 +30,32 @@
 - 改动 `/opt/tavern` 下扩展目录以外的任何东西
 - 改动用户已有扩展（Pathweaver 汉化、shujuku、酒馆助手脚本）
 
-## 远程仓库：交给赫尔墨斯（2026-10-29 危晓定）
+## 远程仓库：dsh 侧自己负责（2026-10-30 危晓改定）
 
-- 本地仓库归我：`git add` / `commit` / 本地 tag / `status` / `log` / `diff`。
-- 远程一律交赫尔墨斯（Hermes 侧）：`push` / `fetch` / `pull` / 远端 tag / 远端回滚，不要自己动。
-- 原因：dsh 的 Windows 沙箱里 MSYS bash 无法 fork，git 的联网命令在里面起不来；Hermes 侧原生 git 可用。
-- 通道（2026-10-29 定稿）：本地推 VPS 裸库 `ssh://tavern/home/ubuntu/git/tavern-ext.git`，VPS 的 post-receive 钩子再走 **SSH 443**（ssh.github.com）推 GitHub。原因：本机到 github.com:443 与 VPS 到 github.com:443 都是间歇性阻断，只有 VPS 到 ssh.github.com:443 实测稳定。
-- 远端 sha 与本地一致（真 git push，不是 API 重建），可以正常 fetch / pull。`.deploy/push-via-api.mjs` 只作兜底。
-- 凭证不进仓库：VPS 上只有一把专用 ed25519 部署密钥（`~/.ssh/id_ed25519_github`），本机的 GitHub token 放在 `D:\dsh-home\secrets\tavern-ext.env`。
+- 全部本地与远程操作都由我（dsh）做：`add` / `commit` / `tag` / `push` / `fetch` / `pull` / 远端 tag / 远端回滚。
+- **2026-10-30 变更**：原「远程一律交赫尔墨斯」作废。当时那么定，是因为以为 dsh 沙箱做不了远程 git；现经 VPS 中继已验证可行，危晓明确把远程操作收回给 dsh，不再经赫尔墨斯。
+- 通道：本地 → VPS 裸库 `ssh://tavern/home/ubuntu/git/tavern-ext.git` → 裸库 `post-receive` 钩子走 **SSH 443**（ssh.github.com）转推 GitHub。
+- 原生命令仍然不可用：沙箱禁止 git fork 传输层与打包子进程，`git push|fetch|ls-remote|bundle` 会报 `cannot create standard input pipe ... Permission denied`。**不要再试原生命令**，一律用脚本：
+
+```bash
+bash scripts/remote-sync.sh ls-remote      # 比对本地与 VPS 裸库
+bash scripts/remote-sync.sh push           # 本地 → VPS → GitHub（自动触发钩子）
+bash scripts/remote-sync.sh fetch          # VPS → 本地，不合并
+bash scripts/remote-sync.sh pull           # VPS → 本地并快进
+bash scripts/remote-sync.sh push-log       # 看转推 GitHub 的日志
+```
+
+- 原理：脚本自己当传输层。`rev-list --objects` 落文件 → `pack-objects --stdout` 造 pack → ssh 管道送 VPS → 裸库 `index-pack` 收包 + `update-ref` → 手动调用 `post-receive`。
+  因为直接写裸库对象、不走 `receive-pack`，钩子不会自动跑，所以脚本里显式调用一次。
+- 推送成功后必须看日志里有 `exit=0` 才算真的到了 GitHub；脚本会自查，失败时以非零退出。
+- 远端 sha 与本地一致（真 git 对象，不是 API 重建）。`.deploy/push-via-api.mjs` 只作兜底。
+- 凭证不进仓库：VPS 上只有一把专用 ed25519 部署密钥（`~/.ssh/id_ed25519_github`），本机的 GitHub token 放在 `D:\dsh-home\secrets\tavern-ext.env`（现在用不到）。
+
+### 沙箱哪些 git 子命令能跑（2026-10-30 实测）
+
+- 能：`rev-parse` / `log` / `status` / `cat-file` / `rev-list` / `archive` / `add` / `commit` / `pack-objects --stdout`（用文件重定向喂 stdin）/ `index-pack` / `update-ref` / `fetch <本地文件>`。
+- 不能：任何要 fork helper 的操作 —— `push` / `fetch` / `ls-remote` 走网络、`git bundle`（内部要 fork `pack-objects` 走管道）。
+- 判断方法：报 `cannot create standard input pipe for <x>` 或 `fatal: unable to fork` 就是撞上这条限制。
 
 ## 永不触碰
 

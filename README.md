@@ -41,6 +41,16 @@ bash scripts/deploy.sh <扩展名>   # 重新部署
 
 扩展面板里关掉，或删 `/opt/tavern/extensions/<扩展名>` 后刷新，是最快的临时止血手段，无可回滚的数据副作用。
 
+## 远程同步
+
+```bash
+bash scripts/remote-sync.sh push     # 本地 → VPS 裸库 → GitHub
+bash scripts/remote-sync.sh pull     # VPS → 本地
+bash scripts/remote-sync.sh ls-remote
+```
+
+原生 `git push/fetch` 在本机沙箱里跑不了（禁止 fork 传输层），走这个脚本。细节见 `docs/agent-runbook.md`。
+
 ## 边界
 
 - 只动 `/opt/tavern/extensions/<扩展名>/`，不动 settings.json、config.yaml、compose、别的扩展、角色卡、存档、世界书。
