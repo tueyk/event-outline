@@ -20,9 +20,14 @@ if [[ ! -f "${SRC_DIR}/manifest.json" ]]; then
 fi
 
 # 本地自查
-node --check "${SRC_DIR}/index.js"
-node -e "const m=require('${SRC_DIR//\\//}/manifest.json');for(const k of ['js','display_name','loading_order'])if(m[k]===undefined)throw new Error('manifest 缺字段: '+k);console.log('[ok] manifest '+m.display_name+' v'+m.version)"
-VER="$(node -e "console.log(require('${SRC_DIR//\\//}/manifest.json').version)")"
+# node 不认 Git Bash 的 /c/... 路径，转成 Windows 形式
+NODE_DIR="$SRC_DIR"
+if command -v cygpath >/dev/null 2>&1; then
+  NODE_DIR="$(cygpath -m "$SRC_DIR")"
+fi
+node --check "${NODE_DIR}/index.js"
+node -e "const m=require('${NODE_DIR}/manifest.json');for(const k of ['js','display_name','loading_order'])if(m[k]===undefined)throw new Error('manifest 缺字段: '+k);console.log('[ok] manifest '+m.display_name+' v'+m.version)"
+VER="$(node -e "console.log(require('${NODE_DIR}/manifest.json').version)")"
 
 TMP="$(mktemp -d)"
 TAR="${TMP}/${NAME}.tar.gz"

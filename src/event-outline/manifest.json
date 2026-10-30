@@ -1,0 +1,12 @@
+{
+    "display_name": "事件大纲",
+    "loading_order": 130,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "",
+    "author": "hermes",
+    "version": "0.1.0",
+    "homePage": "",
+    "auto_update": false
+}
