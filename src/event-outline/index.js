@@ -3210,7 +3210,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             if (q && !q.ok) {
                 const bad = el('div', 'eo-bad-box');
                 bad.textContent = '⚠ 这次生成的大纲结构不完整：' + q.missing.join('；')
-                    + '。节点进度将无法正常跟踪。可点「重新生成」，或到日志页查看模型原始输出。';
+                    + '。节点进度将无法正常跟踪。可把当前事件废弃后在生成页重新生成，或到日志页查看模型原始输出。';
                 page.appendChild(bad);
             }
             const outlineText = renderOutlineText(ev.outline);
@@ -4182,6 +4182,26 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         wbBox.appendChild(wbChk);
         wbBox.appendChild(el('span', null, '读取角色世界书'));
         page.appendChild(wbBox);
+
+        // 世界书字数上限：超了会截断后面的条目，用户必须能自己调
+        const wcRow = el('div', 'eo-row');
+        wcRow.appendChild(el('label', null, '世界书字数上限'));
+        const wcIn = el('input', 'eo-input');
+        wcIn.type = 'number';
+        wcIn.min = '1000';
+        wcIn.step = '1000';
+        wcIn.value = String((s.worldbook && s.worldbook.maxChars) || 30000);
+        wcIn.style.flex = '0 0 110px';
+        wcIn.addEventListener('change', () => {
+            const n = Math.max(1000, Number(wcIn.value) || 30000);
+            getSettings().worldbook.maxChars = n;
+            wcIn.value = String(n);
+            saveSettings();
+            log(`世界书字数上限已设为 ${n} 字`);
+        });
+        wcRow.appendChild(wcIn);
+        wcRow.appendChild(el('span', 'eo-hint', '字。超出会截断后面的条目'));
+        page.appendChild(wcRow);
 
         const wbBook = getCharacterBookName();
         const wbHint = el('div', 'eo-hint');
