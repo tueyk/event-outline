@@ -430,6 +430,52 @@ exports.normalize = normalizePrefs;
     check('旧文案改成难度等级', wording.difficultyLevel === '根据难度等级自行设定', wording.difficultyLevel);
 }
 
+// ---- 16. 设置默认值补全 ----
+// 老对话的 extension_settings 里没有后加的 worldbook / preset 字段，
+// getSettings 不补的话 s.worldbook 是 undefined，读 .maxChars 直接抛异常
+{
+    const gsSrc = (() => {
+        const s = src.indexOf('function getSettings');
+        let i = src.indexOf('{', s), d = 0, e = -1;
+        for (; i < src.length; i++) {
+            if (src[i] === '{') d++;
+            else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
+        }
+        return src.slice(s, e);
+    })();
+    const defSrc = src.match(/const DEFAULT_SETTINGS = \{[\s\S]*?\n    \};/)[0];
+
+    const fakeCtx = { extensionSettings: { event_outline: { memory: { source: 'auto' } } } };
+    const gsBox = {};
+    new Function('exports', `
+const MODULE = 'event_outline';
+const ctx = () => __ctx;
+${defSrc}
+${gsSrc}
+exports.get = getSettings;
+`)(gsBox);
+    globalThis.__ctx = fakeCtx;
+
+    const s = gsBox.get();
+    check('老设置补出 worldbook', !!s.worldbook, String(s.worldbook));
+    check('worldbook.enabled 默认 true', s.worldbook.enabled === true);
+    check('worldbook.maxChars 默认 30000', s.worldbook.maxChars === 30000, String(s.worldbook.maxChars));
+    check('老设置补出 preset', !!s.preset);
+    check('preset.difficultyLevels 默认空数组', Array.isArray(s.preset.difficultyLevels) && s.preset.difficultyLevels.length === 0);
+    check('原有字段不被覆盖', s.memory.source === 'auto');
+
+    // 用户已改过的值要保留
+    globalThis.__ctx = {
+        extensionSettings: {
+            event_outline: { worldbook: { enabled: false, maxChars: 50000 }, preset: { difficultyLevels: ['F', 'E'] } },
+        },
+    };
+    const s2 = gsBox.get();
+    check('已改的 enabled 保留', s2.worldbook.enabled === false);
+    check('已改的 maxChars 保留', s2.worldbook.maxChars === 50000, String(s2.worldbook.maxChars));
+    check('已改的档位保留', s2.preset.difficultyLevels.join(',') === 'F,E');
+}
+
 console.log('');
 console.log(fail === 0 ? '全部通过' : fail + ' 项失败');
 process.exit(fail === 0 ? 0 : 1);

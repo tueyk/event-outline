@@ -171,6 +171,10 @@
         s.tracker = Object.assign({}, DEFAULT_SETTINGS.tracker, s.tracker || {});
         s.retention = Object.assign({}, DEFAULT_SETTINGS.retention, s.retention || {});
         s.memory = Object.assign({}, DEFAULT_SETTINGS.memory, s.memory || {});
+        // 后加的两组也要补：老对话的设置里没有这两项，
+        // 不补的话 s.worldbook 是 undefined，下面直接读 .maxChars 会抛异常
+        s.worldbook = Object.assign({}, DEFAULT_SETTINGS.worldbook, s.worldbook || {});
+        s.preset = Object.assign({}, DEFAULT_SETTINGS.preset, s.preset || {});
         return s;
     }
 
@@ -844,6 +848,17 @@
             }
             const hits = ADAPTERS.filter(a => a.detect()).sort((x, y) => x.priority - y.priority);
             const picked = hits[0] || ADAPTERS[ADAPTERS.length - 1];
+            // shujuku 有数据却选不到时，多半是时序问题：表格写在 AI 回复楼里，
+            // 那一轮回复还没落盘就读，自然扫不到。把这点说出来，免得以为是配置错了
+            const shujuku = ADAPTERS.find(a => a.id === 'shujuku-jiyao');
+            if (picked.id !== 'shujuku-jiyao' && shujuku && !hits.some(a => a.id === 'shujuku-jiyao')) {
+                const sheets = collectSheetsFromChat();
+                const hint = sheets.size
+                    ? `扫到 ${sheets.size} 张表但没有纪要表可用`
+                    : '当前楼层里没有任何 shujuku 表格数据';
+                warn(`记忆来源：shujuku 纪要本次未检测到（${hint}），已退回最近楼层。`
+                    + '如果主对话确实在用 shujuku，可能是那一轮 AI 回复还没把表格写进楼层，等回复完成或硬刷页面后重试');
+            }
             return { adapter: picked, degraded: false };
         })();
 
@@ -1562,7 +1577,7 @@
                 { role: 'system', content: String(systemPrompt || '') },
                 { role: 'user', content: String(prompt || '') },
             ],
-            temperature: Number.isFinite(Number(profile.temperature)) ? Number(profile.temperature) : 1,
+            temperature: Number.isFinite(Number(profile.temperature)) ? Number(profile.temperature) : 0.7,
             stream: false,
         };
         if (Number(profile.maxTokens) > 0) body.max_tokens = Number(profile.maxTokens);
@@ -2688,7 +2703,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-modes{display:flex;flex-direction:column;gap:5px;margin:4px 0;}
 .eo-mode{display:flex;gap:8px;align-items:flex-start;padding:5px 8px;border-radius:6px;
   background:#fdf8ec;font-size:12px;line-height:1.6;color:#5a4a2a;}
-.eo-mode-active{background:#fff2cc;box-shadow:inset 0 0 0 1px #e0c078;}
+/* 当前档位不用底色和边框，只挂一个小标记，避免看起来像能点的按钮 */
+.eo-mode-cur{flex:0 0 auto;font-size:11px;padding:0 5px;border-radius:3px;
+  background:#e6dcc0;color:#6b5424;}
 .eo-mode-tag{flex:0 0 auto;font-weight:700;color:#7a5a0a;}
 .eo-ctx-preview{font-size:12px;color:#6b5424;background:#fdf7e8;}
 
@@ -3241,11 +3258,11 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         nameRow.appendChild(el('label', null, '事件名'));
         const nameInput = el('input', 'eo-input');
         nameInput.type = 'text';
-        nameInput.placeholder = '可留空，留空由 AI 根据当前剧情自动命名';
+        nameInput.placeholder = '例如：东方快车谋杀案';
         nameRow.appendChild(nameInput);
         page.appendChild(nameRow);
         page.appendChild(el('div', 'eo-hint',
-            '事件名可以留空。留空时模型会读当前剧情，自己起一个 4-12 字的事件名，并同时写一句事件简介。想自己起就填这里。'));
+            '事件名可以留空。留空时模型会读当前剧情，自己起一个 4-12 字的事件名。想自己起就填这里。'));
 
         // 偏好状态放在闭包里，切换大致/详细或改档位只重绘内容区，
         // 不重建折叠壳，所以不会自己折回去
@@ -3465,7 +3482,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             '你想让这个事件最终达成什么。留空则由模型按当前剧情自行判断。填了会成为硬约束，大纲会围绕它展开。'));
         const goalInput = el('textarea', 'eo-input eo-textarea');
         goalInput.rows = 3;
-        goalInput.placeholder = '例如：让主角彻底接受自己已是女校学生这一事实，主动去办完剩下的两枚印章';
+        goalInput.placeholder = '例如：让玩家在最终揭开前，逐步发现车上的乘客都与同一桩旧案有关，并理解他们为何共同动手';
         goalInput.value = prefs.goal || '';
         goalInput.addEventListener('input', () => { prefs.goal = goalInput.value; });
         page.appendChild(goalInput);
@@ -3476,7 +3493,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             '你自己构思的大致框架、想要的桥段或细节。留空则完全由模型设计。填了会尽量采纳。'));
         const hintInput = el('textarea', 'eo-input eo-textarea');
         hintInput.rows = 4;
-        hintInput.placeholder = '例如：开场在活动室里，千夏带主角看名册；中途有人敲门要找人，制造一次被打断的紧张；结尾主角因为害怕选择自己动手盖章';
+        hintInput.placeholder = '例如：开场列车遭遇暴雪被困，死者身中十二刀；中途每个乘客的证词都互相印证却彼此矛盾；结尾靠一枚被烧焦的信纸残片把所有人的旧案串起来';
         hintInput.value = prefs.promptHint || '';
         hintInput.addEventListener('input', () => { prefs.promptHint = hintInput.value; });
         page.appendChild(hintInput);
@@ -3833,6 +3850,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
     // ---------- 页：设置 ----------
 
+    // 设置页里处于展开状态的配置档 id。面板重建会重造 DOM，
+    // 放在这里才能跨重渲染保留，不然改个选项就自己折回去
+    const openProfiles = new Set();
+
     function renderSetPage(page) {
         // --- API ---
         page.appendChild(el('div', 'eo-sec', '模型 API'));
@@ -3874,7 +3895,12 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         for (const p of s.apiProfiles) {
             const box = el('details', 'eo-prefgroup');
-            box.open = false;
+            // 重建面板时恢复展开状态：切换方式会触发 renderPanel，
+            // 不记住的话刚展开的配置会自己折回去，用户还得再点一次
+            box.open = openProfiles.has(p.id);
+            box.addEventListener('toggle', () => {
+                if (box.open) openProfiles.add(p.id); else openProfiles.delete(p.id);
+            });
             const sum = el('summary', 'eo-prefgroup-sum');
             sum.textContent = `${p.name}${p.mode === 'main' ? '（跟随酒馆）' : p.mode === 'direct' ? '（直连）' : '（酒馆连接源）'}`;
             box.appendChild(sum);
@@ -4008,7 +4034,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     tIn.min = '0';
                     tIn.max = '2';
                     tIn.step = '0.1';
-                    tIn.value = String(Number.isFinite(Number(p.temperature)) ? Number(p.temperature) : 1);
+                    tIn.value = String(Number.isFinite(Number(p.temperature)) ? Number(p.temperature) : 0.7);
                     tIn.style.width = '76px';
                     tIn.addEventListener('change', () => {
                         const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
@@ -4085,6 +4111,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                         const st = getSettings();
                         st.apiProfiles = (st.apiProfiles || []).filter(x => x.id !== p.id);
                         if (st.activeProfileId === p.id) st.activeProfileId = 'main';
+                        openProfiles.delete(p.id);
                         saveSettings();
                         log(`已删除模型配置「${p.name}」`);
                         renderPanel();
@@ -4113,10 +4140,12 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 baseUrl: '',
                 apiKey: '',
                 model: '',
-                temperature: 1,
+                temperature: 0.7,
                 maxTokens: 0,
             });
             saveSettings();
+            // 新建即展开，用户点完就能直接填，不用再点一下
+            openProfiles.add(id);
             log(`新建了模型配置「自定义配置 ${n}」，请填写地址、密钥和模型名`);
             renderPanel();
         });
@@ -4309,7 +4338,11 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         };
         const modeList = el('div', 'eo-modes');
         for (const k of ['auto', 'semi', 'manual']) {
-            const item = el('div', 'eo-mode' + (s.tracker.mode === k ? ' eo-mode-active' : ''));
+            const isCur = s.tracker.mode === k;
+            // 不整块高亮：底色加边框看着像按钮，实际点不动。
+            // 改成在档位名后标「当前」，位置固定、不会让人误以为可点
+            const item = el('div', 'eo-mode');
+            if (isCur) item.appendChild(el('span', 'eo-mode-cur', '当前'));
             const tag = el('span', 'eo-mode-tag', TRACKER_MODES[k]);
             item.appendChild(tag);
             item.appendChild(el('span', null, modeLines[k].replace(TRACKER_MODES[k] + '：', '')));
@@ -4656,6 +4689,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         try {
             context.eventSource.on(context.eventTypes.MESSAGE_RECEIVED, () => {
                 scheduleAutoInventoryCheck();
+                // shujuku 把表格写进楼里的时机比 MESSAGE_RECEIVED 晚，
+                // 立刻重绘会读到还没有表格的楼层，导致记忆来源判定成「最近楼层」。
+                // 延后再绘一次，让判定跑在数据落盘之后
+                setTimeout(() => {
+                    lastAdapterSig = null;  // 强制重判，否则去重会跳过这次变化
+                    if (panelEl && panelEl.classList.contains('eo-open')) renderPanel();
+                }, 1500);
             });
             context.eventSource.on(context.eventTypes.GENERATION_ENDED, () => {
                 scheduleAutoInventoryCheck();
