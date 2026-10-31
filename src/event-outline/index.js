@@ -6,7 +6,7 @@
     'use strict';
 
     const MODULE = 'event_outline';
-    const VERSION = '0.1.1';
+    const VERSION = '0.1.2';
     const ENTRY_PREFIX = '▸事件｜';
     // 待选事件最多留几个：生成不再直接写世界书，草稿得有个上限
     const MAX_DRAFTS = 3;
