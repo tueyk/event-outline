@@ -476,6 +476,486 @@ exports.get = getSettings;
     check('已改的档位保留', s2.preset.difficultyLevels.join(',') === 'F,E');
 }
 
+// ---- 17. 危险/时间子项语义不重叠 ----
+// 致死性(高)、失败后果(不可逆的惨重损失)、超时后果(角色死亡) 原本是三份互相加强的指令，
+// 模型会理解成「要特别狠」。这里锁死三者的取值范围不许有语义重复。
+{
+    const groupsSrc = (() => {
+        const s = src.indexOf('const PREF_GROUPS = [');
+        let i = src.indexOf('[', s), d = 0, e = -1;
+        for (; i < src.length; i++) {
+            if (src[i] === '[') d++;
+            else if (src[i] === ']') { d--; if (d === 0) { e = i + 1; break; } }
+        }
+        return src.slice(s, e);
+    })();
+    const subAuto = src.match(/const SUB_AUTO = '[^']*';/)[0];
+    const box = {};
+    new Function('exports', `${subAuto}\n${groupsSrc}\nexports.g = PREF_GROUPS;`)(box);
+    const byKey = {};
+    for (const g of box.g) byKey[g.key] = g;
+
+    const opts = (k) => (byKey[k].options || []).filter(o => o !== '__eo_sub_auto__');
+
+    check('致死性不再有「低/中/高」以外的暗示', opts('lethality').join(',') === '无,低,中,高', opts('lethality').join(','));
+
+    check('失败后果不再写「不可逆的惨重损失」',
+        !opts('failureConsequence').includes('不可逆的惨重损失'), opts('failureConsequence').join(','));
+    check('失败后果改用「无法挽回的损失」',
+        opts('failureConsequence').includes('无法挽回的损失'));
+
+    check('超时后果不再含「角色死亡」',
+        !opts('timeoutConsequence').some(o => o.includes('死亡')), opts('timeoutConsequence').join(','));
+    check('超时后果改用「局势不可逆转」',
+        opts('timeoutConsequence').includes('局势不可逆转'));
+
+    check('容错率带次数说明，与后果轻重解耦',
+        opts('tolerance').every(o => o.includes('（')), opts('tolerance').join(','));
+
+    // 三项都要有语义边界说明
+    check('致死性有边界说明', !!byKey.lethality.desc);
+    check('失败后果有边界说明', !!byKey.failureConsequence.desc);
+    check('容错率有边界说明', !!byKey.tolerance.desc);
+    check('超时后果有边界说明', !!byKey.timeoutConsequence.desc);
+
+    // prompt 里要明确禁止叠加
+    check('prompt 含语义边界声明', src.includes('语义边界（重要）'));
+    check('prompt 要求不要叠加', src.includes('不要叠加理解'));
+}
+
+// ---- 18. 旧子项取值迁移 ----
+{
+    const normSrc = (() => {
+        const s = src.indexOf('function normalizePrefs');
+        let i = src.indexOf('{', s), d = 0, e = -1;
+        for (; i < src.length; i++) {
+            if (src[i] === '{') d++;
+            else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
+        }
+        return src.slice(s, e);
+    })();
+    const mapSrc = src.match(/const LEGACY_LEVEL_MAP = \{[\s\S]*?\};/)[0];
+    const box = {};
+    new Function('exports', `
+const PREF_GROUPS = [];
+const debug = () => {};
+${mapSrc}
+${normSrc}
+exports.n = normalizePrefs;
+`)(box);
+
+    const old = { tolerance: '低', failureConsequence: '不可逆的惨重损失', timeoutConsequence: '角色死亡或不可逆损失', lethality: '高' };
+    box.n(old);
+    check('容错率旧值是「低」', old.tolerance === '低（一次即定局）', old.tolerance);
+    check('失败后果旧值迁移', old.failureConsequence === '无法挽回的损失', old.failureConsequence);
+    check('超时后果旧值迁移', old.timeoutConsequence === '局势不可逆转', old.timeoutConsequence);
+    check('致死性「高」不被误迁移', old.lethality === '高', old.lethality);
+}
+
+// ---- 19. 时长与倒计时语义分离 + 新增形态项 ----
+{
+    const groupsSrc = (() => {
+        const s = src.indexOf('const PREF_GROUPS = [');
+        let i = src.indexOf('[', s), d = 0, e = -1;
+        for (; i < src.length; i++) {
+            if (src[i] === '[') d++;
+            else if (src[i] === ']') { d--; if (d === 0) { e = i + 1; break; } }
+        }
+        return src.slice(s, e);
+    })();
+    const subAuto = src.match(/const SUB_AUTO = '[^']*';/)[0];
+    const box = {};
+    new Function('exports', `${subAuto}\n${groupsSrc}\nexports.g = PREF_GROUPS;`)(box);
+    const byKey = {};
+    for (const g of box.g) byKey[g.key] = g;
+    const opts = (k) => (byKey[k].options || []).filter(o => o !== '__eo_sub_auto__');
+
+    // 倒计时 = 玩家知不知道有期限；时长 = 紧迫感。两者不许混
+    check('倒计时选项表达「知不知道期限」',
+        opts('timePressure').join('|').includes('不知道'), opts('timePressure').join('|'));
+    check('倒计时不再用 隐藏/可见 这类含糊词',
+        !opts('timePressure').includes('隐藏') && !opts('timePressure').includes('可见'));
+    check('时长选项表达紧迫感', opts('timeDuration').join(',') === '宽松,适中,紧张', opts('timeDuration').join(','));
+    check('倒计时有边界说明指向时长', (byKey.timePressure.desc || '').includes('时长'));
+    check('时长有边界说明指向倒计时', (byKey.timeDuration.desc || '').includes('倒计时'));
+
+    // 四项新增形态配置
+    for (const k of ['nodeCount', 'castScale', 'pacingStructure', 'linkPrevious']) {
+        check(`新增项存在：${k}`, !!byKey[k], k);
+        check(`新增项有选项：${k}`, opts(k).length >= 3, String(opts(k).length));
+        check(`新增项不归入旧的三组：${k}`, !byKey[k].group, String(byKey[k].group));
+    }
+
+    check('节点数量给出具体区间', opts('nodeCount').some(o => /\d+-\d+/.test(o)), opts('nodeCount').join(','));
+    check('与前事关联可选独立/承接/留伏笔',
+        opts('linkPrevious').join(',') === '完全独立,承接已有线索,主动留下后续伏笔', opts('linkPrevious').join(','));
+
+    // prompt 要把这四项当硬性的结构约束
+    check('prompt 含事件形态段落', src.includes('事件形态（已在界面选定'));
+    check('prompt 约束节点数量落区间', src.includes('输出的 nodes 数组长度要落在这个区间'));
+}
+
+// ---- 20. 每个偏好项都要有说明（小问号内容） ----
+{
+    const groupsSrc = (() => {
+        const s = src.indexOf('const PREF_GROUPS = [');
+        let i = src.indexOf('[', s), d = 0, e = -1;
+        for (; i < src.length; i++) {
+            if (src[i] === '[') d++;
+            else if (src[i] === ']') { d--; if (d === 0) { e = i + 1; break; } }
+        }
+        return src.slice(s, e);
+    })();
+    const subAuto = src.match(/const SUB_AUTO = '[^']*';/)[0];
+    const box = {};
+    new Function('exports', `${subAuto}\n${groupsSrc}\nexports.g = PREF_GROUPS;`)(box);
+
+    const missing = box.g.filter(g => !g.desc || !String(g.desc).trim()).map(g => g.label);
+    check('所有偏好项都有说明文字', missing.length === 0, missing.join('、') || '共 ' + box.g.length + ' 项');
+
+    // 说明不能只是把选项名重复一遍
+    const tooShort = box.g.filter(g => g.desc && String(g.desc).trim().length < 10).map(g => g.label);
+    check('说明文字不是敷衍的短语', tooShort.length === 0, tooShort.join('、'));
+
+    // 渲染层要真的把 desc 传给 makeSelect
+    check('独立项传入 desc', /if \(g\.key === 'difficultyLevel'\) repaintAllGroups\(\);[\s\S]{0,120}?g\.desc\)/.test(src));
+    check('子项渲染传入 desc', /prefs\[g\.key\] = v;\s*\},\s*g\.desc\)/.test(src));
+    check('粗档位也有说明', src.includes('选一个粗档位，把本组'));
+}
+
+// ---- 21. 说明气泡点外部可关闭 ----
+{
+    check('存在统一的关闭函数', src.includes('function closeAllTips'));
+    check('点外部关闭：捕获阶段监听 document', src.includes("document.addEventListener('click', onDocClickClose, true)"));
+    check('点问号本身不被关闭逻辑拦截', src.includes("ev.target.closest('.eo-help')"));
+    check('关闭时摘掉监听，避免累积',
+        src.includes("document.removeEventListener('click', onDocClickClose, true)"));
+    check('支持 Esc 关闭', src.includes("document.addEventListener('keydown', onEscClose, true)"));
+
+    // 三处问号都必须走同一个实现，不许再各写一套
+    check('打勾模式用统一实现', /attachHelp\(trSec,/.test(src));
+    check('历史保留用统一实现', /attachHelp\(retSec,/.test(src));
+    check('偏好项用统一实现', /attachHelp\(lab, desc, true\)/.test(src));
+
+    const manual = (src.match(/const (trHelp|retHelp) = el\('span', 'eo-help', '\?'\)/g) || []).length;
+    check('不再有手写的问号实现', manual === 0, String(manual));
+
+    // attachHelp 必须在模块级（两个页面函数之外），否则设置页调不到
+    const genIdx = src.indexOf('function renderGenPage');
+    const setIdx = src.indexOf('function renderSetPage');
+    const helpIdx = src.indexOf('function attachHelp');
+    check('attachHelp 在模块级', helpIdx < genIdx && helpIdx < setIdx, `help@${helpIdx} gen@${genIdx} set@${setIdx}`);
+}
+
+// ---- 22. 占位符不许漏到界面 ----
+// SUB_AUTO 是内部标记，渲染时必须换成「自行设定」文案。
+// 独立项曾经直接拿 g.options 用，导致下拉框显示成 __eo_sub_auto__
+{
+    check('独立项会把 SUB_AUTO 换成文案', src.includes('o === SUB_AUTO ? autoByText(prefs) : o'));
+    check('不再直接透传 g.options 到界面', !/[:?]\s*g\.options;\s*\n\s*const row = el/.test(src));
+
+    // 逐个独立项实测：渲染后不许含下划线占位符
+    const groupsSrc = (() => {
+        const s = src.indexOf('const PREF_GROUPS = [');
+        let i = src.indexOf('[', s), d = 0, e = -1;
+        for (; i < src.length; i++) {
+            if (src[i] === '[') d++;
+            else if (src[i] === ']') { d--; if (d === 0) { e = i + 1; break; } }
+        }
+        return src.slice(s, e);
+    })();
+    const subAuto = src.match(/const SUB_AUTO = '[^']*';/)[0];
+    const box = {};
+    new Function('exports', `${subAuto}\n${groupsSrc}\nexports.g = PREF_GROUPS;`)(box);
+
+    const prefs = {};
+    for (const g of box.g) prefs[g.key] = '__eo_sub_auto__';
+
+    const leaks = [];
+    for (const g of box.g) {
+        if (g.group) continue;
+        const opts = g.dynamic === 'difficulty'
+            ? ['根据当前情况自行设定']
+            : (g.options || []).map(o => (o === '__eo_sub_auto__' ? '根据当前情况自行设定' : o));
+        if (opts.some(o => String(o).includes('__eo_sub_auto__'))) leaks.push(g.label);
+    }
+    check('所有独立项渲染后无占位符', leaks.length === 0, leaks.join('、'));
+
+    // 组内子项本来就做了替换，再确认一次没有漏网的
+    const groupedLeak = box.g.filter(g => g.group).filter(g =>
+        (g.options || []).some(o => String(o).includes('__eo_sub_auto__') && o !== '__eo_sub_auto__'));
+    check('组内子项无异常占位符', groupedLeak.length === 0, groupedLeak.map(g => g.label).join('、'));
+}
+
+// ---- 23. 生成与写入世界书分离（待选机制） ----
+{
+    check('存在待选上限常量', /const MAX_DRAFTS = 3;/.test(src));
+    check('新事件默认落成草稿', /status: 'draft'/.test(src));
+    check('存在采用函数', src.includes('async function commitDraft'));
+    check('存在丢弃函数', src.includes('function discardDraft'));
+
+    // createEvent 里不许再直接写世界书
+    const ceStart = src.indexOf('async function createEvent');
+    const ceEnd = src.indexOf('async function commitDraft');
+    const ceBody = src.slice(ceStart, ceEnd);
+    check('createEvent 不再写世界书', !ceBody.includes('upsertEventEntry'), '仍包含 upsertEventEntry');
+    check('createEvent 不再设为当前事件', !ceBody.includes('meta.currentEventId = id'));
+
+    // commitDraft 才写世界书、才设为当前
+    const cdEnd = src.indexOf('function discardDraft');
+    const cdBody = src.slice(ceEnd, cdEnd);
+    check('commitDraft 写世界书', cdBody.includes('upsertEventEntry'));
+    check('commitDraft 设为当前事件', cdBody.includes('meta.currentEventId = id'));
+    check('commitDraft 置为 active', cdBody.includes("event.status = 'active'"));
+    check('有进行中事件时不许采用', cdBody.includes('还在进行中'));
+
+    // 草稿不写世界书，丢弃就是纯本地删除
+    check('discardDraft 不碰世界书', !src.slice(cdEnd, cdEnd + 700).includes('upsertEventEntry'));
+
+    // 界面要有待选列表与三个按钮
+    check('生成页渲染待选列表', src.includes('待选事件（'));
+    check('有待选区样式', src.includes('.eo-drafts{'));
+    check('待选项有采用按钮', src.includes("'采用'"));
+    check('待选项有丢弃按钮', src.includes("'丢弃'"));
+    check('待选项有看大纲按钮', src.includes("'看大纲'"));
+}
+
+// ---- 24. 推进路径的字段名容错 ----
+// 模型给的是 {step, node, route, must, risk, fail}，
+// 早期渲染只认 desc/detail + failure，导致正文和失败后果都显示不出来
+{
+    const renderSrc = (() => {
+        const s = src.indexOf('function renderOutlineText');
+        let i = src.indexOf('{', s), d = 0, e = -1;
+        for (; i < src.length; i++) {
+            if (src[i] === '{') d++;
+            else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
+        }
+        return src.slice(s, e);
+    })();
+    const box = {};
+    new Function('exports', `
+function log(){} function warn(){} function error(){} function debug(){}
+${renderSrc}
+exports.r = renderOutlineText;
+`)(box);
+
+    const out = box.r({
+        paths: [
+            { step: 1, node: 1, route: '千夏带路进教室', must: '必经', risk: '低', fail: '出门收证件 → 被当外人' },
+            { step: '【大纲外】', route: '借口去盥洗室', why: '身体状态不稳允许离队', risk: '高', fail: '被发现落单' },
+        ],
+    });
+
+    check('路径显示路线正文', out.includes('路线：千夏带路进教室'), '');
+    check('路径显示必经过', out.includes('必经'), '');
+    check('路径显示节点号', out.includes('节点 1'), '');
+    check('路径显示失败后果（fail 键）', out.includes('失败后果：出门收证件'), '');
+    check('大纲外分支显示存在理由', out.includes('存在理由：身体状态不稳'), '');
+    check('数字 step 不当标题', !out.includes('1.（节点 1'), '');
+    check('无独立标题时用路线首句兜底', out.includes('1. 千夏带路进教室'), '');
+
+    // 老字段名仍要能用
+    const out2 = box.r({ paths: [{ step: '开局', detail: '从门口开始', risk: '中', failure: '被抓' }] });
+    check('旧字段 detail 仍可用', out2.includes('路线：从门口开始'), '');
+    check('旧字段 failure 仍可用', out2.includes('失败后果：被抓'), '');
+    check('字符串 step 当标题', out2.includes('开局'), '');
+}
+
+// ---- 25. 重置按钮 / 生成后保留选项 / 移除上下文统计 ----
+{
+    check('有重置为默认按钮', src.includes("'重置为默认'"));
+    check('重置会清空草稿', /function resetDraftPrefs\(\)[\s\S]{0,200}draftPrefs = null/.test(src));
+    check('重置会清空事件名', /function resetDraftPrefs\(\)[\s\S]{0,220}draftName = ''/.test(src));
+    check('事件名存进草稿', src.includes('draftName = nameInput.value'));
+    check('事件名从草稿回填', src.includes("nameInput.value = draftName || ''"));
+
+    // 生成成功后不许重置：选项要停在生成时的那份
+    const goStart = src.indexOf("btnGo.addEventListener");
+    const goBody = src.slice(goStart, goStart + 2000);
+    check('生成成功后不重置选项', !goBody.includes('resetDraftPrefs()'),
+        '生成回调里仍有 resetDraftPrefs');
+
+    // 上下文统计那块已经移除
+    check('不再渲染上下文预览框', !src.includes('正在统计上下文'));
+    check('不再有 refreshCtxPreview', !src.includes('refreshCtxPreview'));
+    check('不再有记忆来源统计行', !src.includes('`记忆来源：${resolved.adapter.describe()}'),
+        '仍存在该统计行');
+    check('不再有 eo-ctx-preview 样式', !src.includes('.eo-ctx-preview{'));
+}
+
+// ---- 26. 大纲正文的换行与排版 ----
+// 大纲是 \n 拼出来的纯文本，容器必须有 white-space:pre-wrap，否则全挤成一行
+{
+    check('大纲样式存在', src.includes('.eo-outline-text{'));
+    const styleChunk = src.slice(src.indexOf('.eo-outline-text{'), src.indexOf('.eo-outline-text{') + 300);
+    check('大纲保留换行', styleChunk.includes('white-space:pre-wrap'), styleChunk.slice(0, 60));
+    check('大纲保留缩进（pre-wrap 同时管缩进空格）', !styleChunk.includes('white-space:collapse'));
+    check('大纲不再用限高的 eo-box', !/el\('div', 'eo-box'\)[\s\S]{0,60}outlineText/.test(src));
+
+    // 两处渲染（待选预览、当前事件大纲）都用同一个样式类
+    const usingOutlineText = (src.match(/el\('div', 'eo-outline-text'\)/g) || []).length;
+    check('两处大纲渲染都用该样式', usingOutlineText >= 2, String(usingOutlineText));
+}
+
+// ---- 27. 中文字段名的容错 ----
+// 模型有时整套换成中文键：角色用 名称/身份/动机，路径用 内容/节点/风险。
+// 只认英文时角色全变「未命名」、路径全空
+{
+    const renderSrc = (() => {
+        const s = src.indexOf('function renderOutlineText');
+        let i = src.indexOf('{', s), d = 0, e = -1;
+        for (; i < src.length; i++) {
+            if (src[i] === '{') d++;
+            else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
+        }
+        return src.slice(s, e);
+    })();
+    const box = {};
+    new Function('exports', `
+function log(){} function warn(){} function error(){} function debug(){}
+function labelOf(k){ return k; }
+${renderSrc}
+exports.r = renderOutlineText;
+`)(box);
+
+    const out = box.r({
+        characters: {
+            '助力者': [{ '名称': '千夏', '身份': '2班班长', '动机': '职责与脸面', '条件或代价': '要跟着她走' }],
+            '幕后方': [{ '名称': '这所学校', '掌握信息': '入校办理流程' }],
+        },
+        paths: [
+            { step: 1, '内容': '千夏核对卡片，宣布带绫香走一圈。', '节点': '必经', '风险': '无' },
+        ],
+    });
+
+    check('中文名可识别', out.includes('千夏') && !out.includes('未命名'), '');
+    check('中文身份可识别', out.includes('（2班班长）'), '');
+    check('中文动机可识别', out.includes('动机：职责与脸面'), '');
+    check('条件或代价可识别', out.includes('条件或代价：要跟着她走'), '');
+    check('中文掌握信息可识别', out.includes('掌握信息：入校办理流程'), '');
+    check('中文内容当路线', out.includes('路线：千夏核对卡片'), '');
+    check('中文节点里的「必经」当标记', out.includes('（必经）') && !out.includes('节点 必经'), '');
+    check('中文路径不再出现空标题', !/^\s+1\. $/m.test(out), '');
+
+    // 英文老键名仍要能用
+    const out2 = box.r({
+        characters: { '助力者': [{ name: '千夏', role: '班长', motive: '职责' }] },
+        paths: [{ step: 1, route: '走廊', must: '必经', risk: '低', fail: '被抓' }],
+    });
+    check('英文字段仍然可用', out2.includes('千夏（班长）') && out2.includes('（必经）'), '');
+    check('英文失败后果仍可用', out2.includes('失败后果：被抓'), '');
+}
+
+// ---- 28. prompt 里给出固定字段骨架 ----
+{
+    const s = src.indexOf('function buildOutlinePrompt');
+    let i = src.indexOf('{', s), d = 0, e = -1;
+    for (; i < src.length; i++) {
+        if (src[i] === '{') d++;
+        else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
+    }
+    const body = src.slice(s, e);
+
+    check('prompt 含 yaml 骨架', body.includes('```yaml'));
+    check('骨架要求逐字照用', body.includes('字段名必须逐字照用'));
+    check('骨架禁止改成中文键', body.includes('不许改写成中文'));
+    check('骨架含角色 name', /-\s*name:\s*<角色名>/.test(body));
+    check('骨架含角色 identity', /identity:\s*<身份>/.test(body));
+    check('骨架含路径 route', /route:\s*<这一步发生什么>/.test(body));
+    check('骨架含路径 must', /must:\s*<必经\|可跳过>/.test(body));
+    check('骨架含时间压力', body.includes('time_pressure:'));
+    check('骨架含危险程度', body.includes('danger:'));
+    check('骨架说明大纲外写法', body.includes('step 填 "【大纲外】"'));
+    check('骨架要求节点连续编号', body.includes('从 1 连续编号'));
+}
+
+// ---- 29. 字段名漂移检查 ----
+{
+    const s = src.indexOf('function checkOutlineQuality');
+    let i = src.indexOf('{', s), d = 0, e = -1;
+    for (; i < src.length; i++) {
+        if (src[i] === '{') d++;
+        else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
+    }
+    const qSrc = src.slice(s, e);
+    const box = {};
+    new Function('exports', `
+function log(){} function warn(){} function error(){} function debug(){}
+const NODE_TEXT_KEYS = ['info','desc','content','points_to','detail','description','reveal'];
+function nodeText(n){ for(const k of NODE_TEXT_KEYS){ if(n&&n[k]) return String(n[k]); } return ''; }
+function nodeId(n){ return n && n.id != null ? Number(n.id) : null; }
+${qSrc}
+exports.q = checkOutlineQuality;
+`)(box);
+
+    // 按骨架写：无漂移
+    const good = box.q({
+        nodes: [{ id: 1, info: '内容' }],
+        min_nodes_for_deduction: [1],
+        event_brief: 'b', core_truth: 'c',
+        characters: { '助力者': [{ name: '千夏', identity: '班长' }] },
+        paths: [{ step: 1, node: 1, route: '走', must: '必经' }],
+    });
+    check('骨架写法无漂移', good.drift.length === 0, good.drift.join('；'));
+
+    // 中文键：应报漂移
+    const bad = box.q({
+        nodes: [{ id: 1, info: '内容' }],
+        min_nodes_for_deduction: [1],
+        event_brief: 'b', core_truth: 'c',
+        characters: { '助力者': [{ '名称': '千夏' }] },
+        paths: [{ step: 1, '内容': '走', '节点': '必经' }],
+    });
+    check('中文角色名报漂移', bad.drift.some(x => x.includes('角色名')), bad.drift.join('；'));
+    check('中文路径正文报漂移', bad.drift.some(x => x.includes('路径正文')), bad.drift.join('；'));
+    check('缺 must 报漂移', bad.drift.some(x => x.includes('必经标记')), bad.drift.join('；'));
+
+    // 漂移不影响 ok：渲染有容错，不该因此判失败
+    check('漂移不判为失败', bad.ok === good.ok, '');
+}
+
+// ---- 30. 新键名在渲染层可读 ----
+{
+    const cut = (name) => {
+        const s = src.indexOf('function ' + name);
+        let i = src.indexOf('{', s), d = 0, e = -1;
+        for (; i < src.length; i++) {
+            if (src[i] === '{') d++;
+            else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
+        }
+        return src.slice(s, e);
+    };
+    const box = {};
+    new Function('exports', `
+function log(){} function warn(){} function error(){} function debug(){}
+function labelOf(k){ return k; }
+const EVENT_TYPE_LABEL = {};
+const NODE_TYPE_LABEL = {};
+const NODE_TEXT_KEYS = ['info','desc','content','points_to','detail','description','reveal'];
+const NODE_TRIGGER_KEYS = ['trigger'];
+${cut('nodeId')}${cut('nodeText')}${cut('nodeTrigger')}${cut('renderOutlineText')}
+exports.r = renderOutlineText;
+`)(box);
+
+    const out = box.r({
+        event_brief: 'b',
+        event_type: { '主类型': '探险探索', '次类型': ['社交博弈'] },
+        nodes: [{ id: 1, type: '环境', trigger: '走出门', info: '内容' }],
+        min_nodes_for_deduction: [1],
+        characters: { '助力者': [{ name: '千夏', identity: '2班班长', motive: '职责', cost: '跟着走' }] },
+        paths: [{ step: 1, node: 1, route: '走廊', must: '必经', risk: '低', fail: '被当外人' }],
+        time_pressure: { '倒计时': '傍晚前', '超时后果': '挂账' },
+        danger: { '致死性': '低' },
+        forbidden: ['不得透露'],
+    });
+
+    check('事件类型中文键可读', out.includes('探险探索（兼 社交博弈）'), '');
+    check('角色 identity 可读', out.includes('千夏（2班班长）'), '');
+    check('时间压力会显示', out.includes('时间压力：') && out.includes('倒计时：傍晚前'), '');
+    check('危险程度会显示', out.includes('危险程度：') && out.includes('致死性：低'), '');
+}
+
 console.log('');
 console.log(fail === 0 ? '全部通过' : fail + ' 项失败');
 process.exit(fail === 0 ? 0 : 1);

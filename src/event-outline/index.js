@@ -8,6 +8,8 @@
     const MODULE = 'event_outline';
     const VERSION = '0.1.1';
     const ENTRY_PREFIX = '▸事件｜';
+    // 待选事件最多留几个：生成不再直接写世界书，草稿得有个上限
+    const MAX_DRAFTS = 3;
     const LOG_PREFIX = '[事件大纲]';
 
     // ==================== 0. 常量 ====================
@@ -194,7 +196,6 @@
         m.snapshots = m.snapshots || {};
         return m;
     }
-
     function saveMeta() {
         const context = ctx();
         if (context && context.saveMetadataDebounced) context.saveMetadataDebounced();
@@ -950,6 +951,20 @@
                 prefs[g.key] = v.replace(/委托等级/g, '难度等级');
             }
         }
+        // 容错率/失败后果/超时后果改过文案，按下标逐字段迁移。
+        // 不能全局替换：「高/中/低」在致死性里同样合法，混淆会改错值
+        const subMap = {
+            tolerance: { '高': '高（可多次试错）', '中': '中（两次）', '低': '低（一次即定局）' },
+            failureConsequence: { '不可逆的惨重损失': '无法挽回的损失' },
+            timeoutConsequence: { '角色死亡或不可逆损失': '局势不可逆转' },
+        };
+        for (const [k, m] of Object.entries(subMap)) {
+            const v = prefs[k];
+            if (typeof v === 'string' && m[v]) {
+                debug(`偏好迁移：${k}「${v}」-> 「${m[v]}」`);
+                prefs[k] = m[v];
+            }
+        }
         return prefs;
     }
 
@@ -982,77 +997,126 @@
             // 选项来自设置里的自定义档位，这里留空由界面动态填充
             options: [],
             dynamic: 'difficulty',
+            desc: '这次事件整体的强度档位。选定后，凡是写着「根据难度等级自行设定」的项，都会按这个等级成套推导。',
+        },
+        {
+            key: 'nodeCount',
+            label: '节点数量',
+            // 影响盘点负担：节点越多，打勾越费事
+            desc: '信息节点大致几个。数量多推理更绵密，但盘点时要逐个勾选，负担也更大',
+            options: [SUB_AUTO, '少（4-6 个）', '中（7-9 个）', '多（10-14 个）'],
+        },
+        {
+            key: 'castScale',
+            label: '参与者规模',
+            // 和大纲里的「参与角色」直接对应
+            desc: '这次事件牵扯多少人。人多线多，但每个角色的戏份会被摊薄',
+            options: [SUB_AUTO, '少数（主角加 1-2 人）', '适中（3-5 人）', '庞大（6 人以上或牵扯势力）'],
+        },
+        {
+            key: 'pacingStructure',
+            label: '节奏结构',
+            desc: '事件怎么推进。单点突破最快收束，并行多线最能撑开篇幅',
+            options: [SUB_AUTO, '单点突破（找到关键即结束）', '多层递进（逐层揭开）', '并行多线（几条线索交替）'],
+        },
+        {
+            key: 'linkPrevious',
+            label: '与前事关联',
+            // 承接上一个事件遗留的线索，还是完全独立
+            desc: '是否接续之前的剧情线索。承接能把废物料再用起来，但要求前面的伏笔还在',
+            options: [SUB_AUTO, '完全独立', '承接已有线索', '主动留下后续伏笔'],
         },
         {
             key: 'clueSufficiency',
             label: '线索充足度',
             group: '推理难度',
+            desc: '给你的线索够不够。稀缺意味着要靠推理和追问补齐，充足则是关键信息摆在明面上。',
             options: [SUB_AUTO, '充足', '够用', '稀缺'],
         },
         {
             key: 'misleadingStrength',
             label: '误导强度',
             group: '推理难度',
+            desc: '有多少信息是故意误导你的。强度越高，越容易出现看似合理但方向错的线索。',
             options: [SUB_AUTO, '无', '轻度', '中度', '重度'],
         },
         {
             key: 'hiddenSegments',
             label: '隐藏环节',
             group: '推理难度',
+            desc: '有多少环节不主动告诉你，需要你自己想到。设成需要自行提出关键假设时，事件可能整段藏在你的推断里。',
             options: [SUB_AUTO, '无', '1 个', '2 个', '需玩家自行提出关键假设'],
         },
         {
             key: 'infoPresentation',
             label: '信息呈现',
             group: '推理难度',
+            desc: '信息以什么方式呈现。直给是明说，间接要你自己串，隐晦则藏在细节里、可能被忽略。',
             options: [SUB_AUTO, '直给', '间接', '隐晦'],
         },
         {
             key: 'lethality',
             label: '致死性',
             group: '危险程度',
+            // 只回答「有多大可能丢命」，后果轻重交给 failureConsequence，
+            // 否则两项会互相加强，模型容易理解成「要特别狠」
+            desc: '只表示致命风险大小，具体后果看「失败后果」，两项不要叠加理解',
             options: [SUB_AUTO, '无', '低', '中', '高'],
         },
         {
             key: 'failureConsequence',
             label: '失败后果',
             group: '危险程度',
-            options: [SUB_AUTO, '仅损失机会', '受伤或被俘', '失去关键物品或盟友', '不可逆的惨重损失'],
+            // 定性取代价，不再重复写「致死」，那是 lethal 的事
+            desc: '失误一次要付出什么代价，按严重程度递增；「无法挽回」与致死的区别在于人是活的、但事情废了',
+            options: [SUB_AUTO, '仅损失机会', '受伤或被俘', '失去关键物品或盟友', '无法挽回的损失'],
         },
         {
             key: 'tolerance',
             label: '容错率',
             group: '危险程度',
-            options: [SUB_AUTO, '高', '中', '低'],
+            // 管次数，不管后果轻重：同一个后果可以给三次机会，也可以只给一次
+            desc: '允许犯几次错，与后果轻重无关；同一个后果可以给多次机会，也可以一次就废',
+            options: [SUB_AUTO, '高（可多次试错）', '中（两次）', '低（一次即定局）'],
         },
         {
             key: 'threatSource',
             label: '威胁来源',
             group: '危险程度',
+            desc: '危险从哪来。选多重叠加时，环境、人和时间会同时施压，局势更难控。',
             options: [SUB_AUTO, '环境', '敌对角色', '时间', '自身状态', '多重叠加'],
         },
         {
             key: 'timePressure',
             label: '倒计时',
             group: '时间压力',
-            options: [SUB_AUTO, '无', '隐藏', '可见'],
+            // 只回答「玩家知不知道有个期限」这一个问题，与紧迫感无关；
+            // 紧迫感是下面的「时长」，两者不要叠加理解
+            desc: '玩家知不知道这件事必须在某个时间点前做完。与紧迫感无关，紧迫感看下面的「时长」',
+            options: [SUB_AUTO, '没有硬期限', '有期限但不知道', '有期限且明确知道'],
         },
         {
             key: 'timeDuration',
             label: '时长',
             group: '时间压力',
+            // 只回答「节奏有多赶」，与有没有期限无关
+            desc: '事件的紧迫感：节奏是宽松还是步步紧逼。与有没有期限无关，期限看上面的「倒计时」',
             options: [SUB_AUTO, '宽松', '适中', '紧张'],
         },
         {
             key: 'timeoutConsequence',
             label: '超时后果',
             group: '时间压力',
-            options: [SUB_AUTO, '无', '损失机会或信息', '事件走向坏结局', '角色死亡或不可逆损失'],
+            // 只描述「时间耗尽」这一种触发条件下的结局，与「失误」分开；
+            // 不再提供「角色死亡」，那种分量的后果交给致死性与失败后果表达
+            desc: '仅指时间耗尽时的结局，与失误造成的后果分开表述；不要与致死性叠加',
+            options: [SUB_AUTO, '无', '损失机会或信息', '事件走向坏结局', '局势不可逆转'],
         },
         {
             key: 'procrastinationCost',
             label: '拖延代价',
             group: '时间压力',
+            desc: '不推进事件的代价。持续损耗是慢慢变糟，阶段性恶化则过一阵会明显坏一截。',
             options: [SUB_AUTO, '无', '持续损耗', '阶段性恶化'],
         },
     ];
@@ -1087,14 +1151,14 @@
         },
         '危险程度': {
             options: [
-                { key: 'easy', label: '大致·安全', desc: '不致死，错了只损失机会',
-                  values: { lethality: '无', failureConsequence: '仅损失机会', tolerance: '高', threatSource: '环境' } },
-                { key: 'normal', label: '大致·常规', desc: '部分节点可致死，错了要受伤或被俘',
-                  values: { lethality: '低', failureConsequence: '受伤或被俘', tolerance: '中', threatSource: '敌对角色' } },
-                { key: 'hard', label: '大致·凶险', desc: '多处节点可致死，容错低，威胁多重叠加',
-                  values: { lethality: '高', failureConsequence: '失去关键物品或盟友', tolerance: '低', threatSource: '多重叠加' } },
-                { key: 'brutal', label: '大致·致命', desc: '一次关键失误就走向坏结局，损失不可逆',
-                  values: { lethality: '高', failureConsequence: '不可逆的惨重损失', tolerance: '低', threatSource: '多重叠加' } },
+                { key: 'easy', label: '大致·安全', desc: '不会死，错了只损失机会，可以反复试',
+                  values: { lethality: '无', failureConsequence: '仅损失机会', tolerance: '高（可多次试错）', threatSource: '环境' } },
+                { key: 'normal', label: '大致·常规', desc: '致死风险低，错了受伤或被俘，允许两次',
+                  values: { lethality: '低', failureConsequence: '受伤或被俘', tolerance: '中（两次）', threatSource: '敌对角色' } },
+                { key: 'hard', label: '大致·凶险', desc: '致死风险中，错了失去关键物品或盟友，一次即定局',
+                  values: { lethality: '中', failureConsequence: '失去关键物品或盟友', tolerance: '低（一次即定局）', threatSource: '多重叠加' } },
+                { key: 'brutal', label: '大致·致命', desc: '致死风险高，错了就无法挽回，一次即定局',
+                  values: { lethality: '高', failureConsequence: '无法挽回的损失', tolerance: '低（一次即定局）', threatSource: '多重叠加' } },
             ],
         },
         '时间压力': {
@@ -1105,8 +1169,8 @@
                   values: { timePressure: '可见', timeDuration: '适中', timeoutConsequence: '损失机会或信息', procrastinationCost: '持续损耗' } },
                 { key: 'hard', label: '大致·紧迫', desc: '倒计时隐藏，时间紧张，超时事件走向坏结局',
                   values: { timePressure: '隐藏', timeDuration: '紧张', timeoutConsequence: '事件走向坏结局', procrastinationCost: '阶段性恶化' } },
-                { key: 'brutal', label: '大致·绝命', desc: '隐藏倒计时叠加极度紧张，超时即角色死亡或不可逆损失',
-                  values: { timePressure: '隐藏', timeDuration: '紧张', timeoutConsequence: '角色死亡或不可逆损失', procrastinationCost: '阶段性恶化' } },
+                { key: 'brutal', label: '大致·绝命', desc: '隐藏倒计时叠加极度紧张，错过就无法逆转',
+                  values: { timePressure: '隐藏', timeDuration: '紧张', timeoutConsequence: '局势不可逆转', procrastinationCost: '阶段性恶化' } },
             ],
         },
     };
@@ -1139,6 +1203,8 @@
     // 生成页的草稿偏好与分组模式：跨重渲染保留，点了「开始生成」才用掉
     let draftPrefs = null;
     let draftGroupModes = null;
+    // 事件名单独存：它不在 prefs 里，但「重置为默认」也要一起清掉
+    let draftName = '';
 
     function getDraftPrefs() {
         if (!draftPrefs) draftPrefs = defaultPrefs();
@@ -1157,6 +1223,7 @@
     function resetDraftPrefs() {
         draftPrefs = null;
         draftGroupModes = null;
+        draftName = '';
     }
 
     function buildPrefsBlock(prefs) {
@@ -1189,6 +1256,30 @@
             lines.push(`说明：难度等级已定为「${lv}」，凡写「根据难度等级自行设定」的子项，请按该等级应有的难度、危险程度与时间压力成套推导，同一组内要互相匹配。`);
         } else {
             lines.push('说明：难度等级未指定，凡写「根据当前情况自行设定」的子项，请结合当前剧情阶段与该角色所处处境，自己配一套合理的取值。');
+        }
+        // 危险与时间两组各有一处容易叠着理解的地方，明确划界，
+        // 否则三项都往「重」的方向选时，模型会把它们相加，输出过度狠辣的事件
+        lines.push('语义边界（重要）：',
+            '「致死性」只表示丢命的可能性大小，「失败后果」表示失误一次的代价，',
+            '「容错率」只表示允许错几次，三者各自独立，不要叠加理解——',
+            '容错率低不等于后果更重，超时后果也只作用于时间耗尽这一种情况，不是第二次惩罚。',
+            '按各自字面分别落实，不要因为它们同时偏重就进一步加重事件。');
+        lines.push('「倒计时」只表示玩家知不知道存在期限，「时长」只表示节奏紧迫感，两者也互相独立：',
+            '可以有明确期限但节奏舒缓，也可以没有期限却步步紧逼。');
+        // 形态类选项：直接决定大纲的结构尺寸，模型要照此生成而不是自行发挥
+        const shape = [];
+        if (prefs.nodeCount && prefs.nodeCount !== PREF_AUTO_NEW) shape.push(`信息节点数量按「${prefs.nodeCount}」，输出的 nodes 数组长度要落在这个区间`);
+        if (prefs.castScale && prefs.castScale !== PREF_AUTO_NEW) shape.push(`参与者规模按「${prefs.castScale}」，characters 里的角色数量与之相称`);
+        if (prefs.pacingStructure && prefs.pacingStructure !== PREF_AUTO_NEW) shape.push(`节奏结构按「${prefs.pacingStructure}」，paths 的组织方式要体现这种结构`);
+        if (prefs.linkPrevious && prefs.linkPrevious !== PREF_AUTO_NEW) {
+            const v = prefs.linkPrevious;
+            if (v === '完全独立') shape.push('本事件与之前的线索完全独立，不要引用其他事件的内容');
+            else if (v === '承接已有线索') shape.push('本事件承接之前遗留的线索，把【当前剧情】里已有的伏笔接起来');
+            else shape.push('本事件在解决自身问题的同时，要为后续留下可用的伏笔，写进 forbidden 或 paths');
+        }
+        if (shape.length) {
+            lines.push('事件形态（已在界面选定，按此生成，不要自行改动规模）：');
+            for (const s of shape) lines.push('  · ' + s);
         }
         // 次类型：没选就让模型自己配
         if (subs.length) {
@@ -1257,6 +1348,68 @@
             '- 允许根据当前情况设计大纲之外的合理路径，但每条必须标注「【大纲外】」并说明为什么现在会出现这条路径',
             '',
             '输出格式：只输出一个 YAML 代码块，顶层键为 event_name / event_brief / event_type / core_truth / nodes / min_nodes_for_deduction / characters / paths / forbidden。',
+            '',
+            '【字段名必须逐字照用】下面这份骨架列出了每个键的确切拼写。',
+            '键名一律用英文小写加下划线，不许改写成中文、不许自造同义词、不许增减层级。',
+            '只有尖括号里的内容要你填，其余照抄。',
+            '',
+            '```yaml',
+            'event_name: <事件名>',
+            'event_brief: <一句话简介>',
+            'event_type:',
+            '  主类型: <案件推理|谈判交涉|探险探索|生存危机|社交博弈|战斗冲突|日常委托|禁忌秘辛>',
+            '  次类型: [<最多3个>]',
+            'core_truth: |',
+            '  <多层真相，逐条列>',
+            'nodes:',
+            '  - id: 1',
+            '    type: <物证|证言|环境|时间线|关系>',
+            '    trigger: <触发条件>',
+            '    info: <指向的信息或后果>',
+            '    refute_by: [<可选，误导项填节点编号>]',
+            'min_nodes_for_deduction: [<推理必需的节点编号>]',
+            'characters:',
+            '  助力者:',
+            '    - name: <角色名>',
+            '      identity: <身份>',
+            '      motive: <动机，各人不同>',
+            '      cost: <条件或代价，无则填 无>',
+            '  阻碍者:',
+            '    - name: <角色名>',
+            '      identity: <身份>',
+            '      reason: <阻碍理由>',
+            '      resolvable_by: <化解方式>',
+            '  知情者:',
+            '    - name: <角色名>',
+            '      info_known: <掌握的信息>',
+            '  幕后方:',
+            '    - name: <角色名或势力>',
+            '      reveal: forbidden',
+            '      exposure_path: <暴露路径>',
+            'paths:',
+            '  - step: 1',
+            '    node: <对应节点编号，纯数字>',
+            '    route: <这一步发生什么>',
+            '    must: <必经|可跳过>',
+            '    risk: <无|低|中|高>',
+            '    fail: <失败后果>',
+            'time_pressure:',
+            '  倒计时: <描述>',
+            '  时长: <描述>',
+            '  超时后果: <描述>',
+            '  拖延代价: <描述>',
+            'danger:',
+            '  致死性: <描述>',
+            '  失败后果: <描述>',
+            '  容错率: <描述>',
+            '  威胁来源: <描述>',
+            'forbidden:',
+            '  - <禁止事项>',
+            '```',
+            '',
+            '【大纲外路径】的写法：与普通路径同结构，但 step 填 "【大纲外】"，并多加一个 why: <为什么现在会出现这条路径>。',
+            '【一致性】nodes 的 id 必须从 1 连续编号；paths 里的 node 只能引用已列出的节点编号；',
+            'min_nodes_for_deduction、refute_by 里的编号同样只能引用已列出的节点。',
             '',
             '---',
             '【世界观设定】（角色世界书的常驻条目，本世界的规则与设定，所有内容必须与之相容）',
@@ -1881,7 +2034,30 @@
         const summary = `节点 ${nodeN} 个、角色 ${charN} 人、`
             + `推理必需节点 ${Array.isArray(minNodes) ? minNodes.length : 0} 个、`
             + `顶层键 ${Object.keys(o).length} 个`;
-        return { ok: missing.length === 0, missing, summary };
+
+        // 字段名漂移检查：prompt 里给了固定骨架，模型偶尔仍会自造键。
+        // 这里不算失败（渲染层有容错，还能显示），但要在日志里点出来，
+        // 否则容错名单越加越多，没人知道模型到底有没有照规矩写
+        const drift = [];
+        const pick = (obj, keys) => keys.find(k => obj && obj[k] != null && obj[k] !== '');
+        const sampleChar = (() => {
+            if (!chars || typeof chars !== 'object') return null;
+            for (const list of Object.values(chars)) {
+                if (Array.isArray(list) && list.length) return list[0];
+            }
+            return null;
+        })();
+        if (sampleChar && !pick(sampleChar, ['name'])) {
+            drift.push('角色名没用 name');
+        }
+        const sampleNode = nodes && nodes.length ? nodes[0] : null;
+        if (sampleNode && !pick(sampleNode, ['info'])) drift.push('节点内容没用 info');
+        const pathsArr = Array.isArray(o.paths) ? o.paths : [];
+        const samplePath = pathsArr.find(p => p && typeof p === 'object') || null;
+        if (samplePath && !pick(samplePath, ['route'])) drift.push('路径正文没用 route');
+        if (samplePath && !pick(samplePath, ['must'])) drift.push('必经标记没用 must');
+
+        return { ok: missing.length === 0, missing, summary, drift };
     }
 
     function parseInventory(raw) {
@@ -2019,8 +2195,10 @@
             if (typeof et === 'string') {
                 lines.push(`事件类型：${EVENT_TYPE_LABEL[et] || et}`);
             } else {
-                const main = et.primary || et.main || '';
-                const subs = Array.isArray(et.secondary) ? et.secondary : (Array.isArray(et.sub) ? et.sub : []);
+                const main = et.primary || et.main || et['主类型'] || '';
+                const subs = Array.isArray(et.secondary) ? et.secondary
+                    : (Array.isArray(et.sub) ? et.sub
+                    : (Array.isArray(et['次类型']) ? et['次类型'] : []));
                 const mainText = EVENT_TYPE_LABEL[main] || main;
                 lines.push(`事件类型：${mainText}${subs.length ? '（兼 ' + subs.join('、') + '）' : ''}`);
             }
@@ -2063,15 +2241,24 @@
                 if (!Array.isArray(list) || !list.length) continue;
                 lines.push(`  ${sideLabel}：`);
                 for (const c of list) {
-                    const head = [c.name || c.角色 || '未命名', c.role ? `（${c.role}）` : ''].join('');
+                    // 模型有时整套用中文字段（名称/身份/动机），只认英文会全显示成「未命名」
+                    const cname = c.name || c['名称'] || c['角色名'] || c['姓名'] || '未命名';
+                    const cRole = c.role || c.identity || c['身份'] || c['职衔'];
+                    const head = [cname, cRole ? `（${cRole}）` : ''].join('');
                     lines.push(`    · ${head}`);
                     if (c.motive_detail || c.motive_type) {
                         lines.push(`      动机：${[c.motive_type, c.motive_detail].filter(Boolean).join('——')}`);
+                    } else if (c.motive || c['动机']) {
+                        lines.push(`      动机：${c.motive || c['动机']}`);
                     }
                     if (c.reason) lines.push(`      阻碍理由：${c.reason}`);
                     if (c.resolvable_by) lines.push(`      化解方式：${c.resolvable_by}`);
                     if (c.conditions) lines.push(`      条件：${c.conditions}`);
-                    if (c.info_known) lines.push(`      掌握信息：${c.info_known}`);
+                    const cost = c.cost || c['条件或代价'] || c['代价'];
+                    if (cost) lines.push(`      条件或代价：${cost}`);
+                    if (c.info || c.info_known || c['掌握信息'] || c['掌握']) {
+                        lines.push(`      掌握信息：${c.info || c.info_known || c['掌握信息'] || c['掌握']}`);
+                    }
                     if (c.note) lines.push(`      备注：${c.note}`);
                 }
             }
@@ -2083,14 +2270,52 @@
             lines.push(`推进路径（共 ${paths.length} 步）：`);
             paths.forEach((p, i) => {
                 if (typeof p === 'string') { lines.push(`  ${i + 1}. ${p}`); return; }
-                const title = p.step || p.desc || p.name || `第 ${i + 1} 步`;
-                lines.push(`  ${i + 1}. ${title}`);
-                if (p.detail) lines.push(`     ${p.detail}`);
-                if (p.required_nodes) lines.push(`     必经节点：${Array.isArray(p.required_nodes) ? p.required_nodes.join('、') : p.required_nodes}`);
+                // 模型给的键名不稳定：路线是 route/desc/detail，
+                // 是否必经是 must/required，失败后果是 fail/failure。
+                // 早期只认 desc/detail + failure，导致正文和失败后果都显示不出来
+                // step 是数字时只是序号，不能当标题用，否则会显示成「1（节点 1，必经）」
+                const stepIsIndex = p.step == null || typeof p.step === 'number'
+                    || /^\d+$/.test(String(p.step).trim());
+                let title = stepIsIndex ? (p.name || '') : String(p.step);
+                // 路线正文：模型除了 route/desc/detail，还会直接写「内容」
+                const route = p.route || p.desc || p.detail || p.description || p['内容'] || p['路线'];
+                // 有些模型把「必经/可跳过」塞进 node 字段，那不是节点号，
+                // 直接当号码用会渲染成「节点 必经」，所以先判断是不是纯数字
+                const nodeRaw = (p.node != null ? p.node : (p['节点'] != null ? p['节点'] : '')) + '';
+                const nodeRawT = nodeRaw.trim();
+                const nodeIsNum = /^\d+$/.test(nodeRawT);
+                const badge = [];
+                if (nodeIsNum) badge.push(`节点 ${nodeRawT}`);
+                const must = p.must || p.required || p.required_nodes || (nodeIsNum ? '' : nodeRawT) || '';
+                const mustText = must ? (Array.isArray(must) ? must.join('、') : String(must)) : '';
+                if (mustText) badge.push(mustText);
+                // 没有独立标题时，用路线首句当标题，别让序号后面空着
+                if (!title && route) title = String(route).split(/[，。；]/)[0];
+                lines.push(`  ${i + 1}. ${title}`
+                    + (badge.length ? `（${badge.join('，')}）` : ''));
+
+                if (route) lines.push(`     路线：${route}`);
+                const why = p.why || p.reason || p['存在理由'];
+                if (why) lines.push(`     存在理由：${why}`);
                 if (p.risk) lines.push(`     风险：${p.risk}`);
-                if (p.failure) lines.push(`     失败后果：${p.failure}`);
+                const fail = p.fail || p.failure || p.consequence || p['失败后果'];
+                if (fail) lines.push(`     失败后果：${fail}`);
             });
         }
+
+        // 时间压力与危险程度：这两块以前只写不显示，用户看不到模型对难度的判断
+        const dumpGroup = (obj, title) => {
+            if (!obj || typeof obj !== 'object') return;
+            const entries = Object.entries(obj).filter(([, v]) => v != null && String(v).trim());
+            if (!entries.length) return;
+            lines.push('');
+            lines.push(`${title}：`);
+            for (const [k, v] of entries) {
+                lines.push(`  ${k}：${Array.isArray(v) ? v.join('、') : String(v).trim()}`);
+            }
+        };
+        dumpGroup(outline.time_pressure, '时间压力');
+        dumpGroup(outline.danger, '危险程度');
 
         if (outline.forbidden) {
             lines.push('');
@@ -2258,6 +2483,10 @@
             const raw = await callModel(systemPrompt, prompt);
             step('解析模型返回的大纲');
             const { parsed, raw: rawText, quality } = parseOutline(raw);
+            // 模型没按骨架写字段名时点一句，方便判断是不是 prompt 需要再加压
+            if (quality && quality.drift && quality.drift.length) {
+                warn(`字段名没有按骨架输出：${quality.drift.join('；')}（渲染层有容错，仍可正常显示）`);
+            }
             const nodeCount = (parsed && Array.isArray(parsed.nodes)) ? parsed.nodes.length : 0;
             step(`解析完成：${nodeCount} 个信息节点`
                 + (nodeCount ? '' : '（未识别到节点，原始输出可在日志页查看）'));
@@ -2281,7 +2510,9 @@
                 name: finalName,
                 autoNamed: !givenName,
                 brief: String((parsed && parsed.event_brief) || '').trim(),
-                status: 'active',
+                // 新事件先落成待选草稿：不写世界书、不设为当前事件。
+                // 用户点「采用」之后才真正生效，避免反复重生成时来回写删世界书
+                status: 'draft',
                 createdAt: new Date().toISOString(),
                 closedAt: null,
                 chatId: context.chatId,
@@ -2312,23 +2543,71 @@
                 inventories: [],
             };
 
-            // 写世界书
-            const content = buildEntryContent(event, 0);
-            const res = await upsertEventEntry(
-                book,
-                content,
-                `${ENTRY_PREFIX}${eventName}｜chatId=${event.chatId}`,
-                null,
-            );
-            event.entryUid = res.uid;
-
+            // 只存成待选草稿，不写世界书。
+            // 用户看到满意后点「采用」才走 commitDraft，那时才写条目、设为当前事件
+            const list = Object.values(meta.events).filter(e => e && e.status === 'draft');
+            if (list.length >= MAX_DRAFTS) {
+                // 满了就丢最早的，免得草稿无限堆积
+                list.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+                const drop = list[0];
+                delete meta.events[drop.id];
+                log(`待选事件已有 ${MAX_DRAFTS} 个，挤掉最早的「${drop.name}」`);
+            }
             meta.events[id] = event;
-            meta.currentEventId = id;
             saveMeta();
             return event;
         } finally {
             setBusy(false, true);
         }
+    }
+
+    /**
+     * 采用一个待选事件：写世界书条目、设为当前事件。
+     * 生成和写入分开，就是为了反复重生成时不弄脏世界书。
+     */
+    async function commitDraft(id) {
+        const meta = getMeta();
+        const event = meta.events[id];
+        if (!event) throw new Error('找不到这个待选事件');
+        if (event.status !== 'draft') throw new Error('这个事件不是待选状态');
+
+        const cur = getCurrentEvent();
+        if (cur) {
+            throw new Error(`「${cur.name}」还在进行中，请先完结或废弃它，再采用新的待选事件`);
+        }
+
+        setBusy(true, false, '正在采用事件并写入世界书…');
+        try {
+            const book = event.worldBook || getCharacterBookName();
+            if (!book) throw new Error('当前角色未绑定世界书');
+            const content = buildEntryContent(event, 0);
+            const res = await upsertEventEntry(
+                book,
+                content,
+                `${ENTRY_PREFIX}${event.name}｜chatId=${event.chatId}`,
+                null,
+            );
+            event.entryUid = res.uid;
+            event.status = 'active';
+            event.floorBase = countFloors();
+            meta.currentEventId = id;
+            saveMeta();
+            log(`已采用事件「${event.name}」，世界书条目 uid=${res.uid}`);
+            return event;
+        } finally {
+            setBusy(false, true);
+        }
+    }
+
+    /** 丢掉一个待选事件（没写过世界书，删掉数据就行） */
+    function discardDraft(id) {
+        const meta = getMeta();
+        const event = meta.events[id];
+        if (!event || event.status !== 'draft') return false;
+        delete meta.events[id];
+        saveMeta();
+        log(`已丢弃待选事件「${event.name}」`);
+        return true;
     }
 
     async function runInventory() {
@@ -2607,6 +2886,12 @@
   background:#fffaf0;margin-bottom:9px;white-space:pre-wrap;word-break:break-word;
   max-height:220px;overflow:auto;line-height:1.55;}
 .eo-hint{color:#8a7333;font-size:12px;line-height:1.5;}
+/* 大纲正文：保留换行与缩进，不加高度上限（大纲本来就有几百行，截断反而看不到全貌） */
+.eo-outline-text{white-space:pre-wrap;word-break:break-word;line-height:1.7;
+  font-size:13px;color:#3c2f14;background:#fffdf7;border:1px solid rgba(184,134,11,.28);
+  border-radius:9px;padding:10px 12px;margin-bottom:10px;}
+/* 子项语义说明：紧跟在对应下拉框下面，小一号、更淡 */
+.eo-subdesc{font-size:11px;color:#9b8a5e;margin:-2px 0 6px 8px;}
 .eo-warn{color:#a35c00;background:#fff3d6;border:1px solid #e6c37a;
   border-radius:8px;padding:7px 9px;margin-bottom:9px;font-size:12px;}
 .eo-ok{color:#2c6e2c;}
@@ -2615,6 +2900,15 @@
   border-radius:8px;padding:8px 10px;margin-bottom:9px;font-size:12px;line-height:1.6;}
 select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11,.45);
   background:#fffdf7;color:#3c2f14;font-size:13px;}
+/* 待选事件：列表式排布，每一项带采用/丢弃/看大纲 */
+.eo-drafts{display:flex;flex-direction:column;gap:8px;margin:6px 0 10px;}
+.eo-draft{background:#fffdf7;border:1px solid rgba(184,134,11,.35);border-radius:8px;
+  padding:8px 10px;}
+.eo-draft-head{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;}
+.eo-draft-name{font-weight:700;color:#6b5424;font-size:13px;}
+.eo-draft-meta{font-size:11px;color:#9b8a5e;}
+.eo-draft-brief{font-size:12px;color:#5a4a2a;line-height:1.6;margin:4px 0 6px;}
+.eo-draft-body{margin-top:8px;border-top:1px dashed rgba(184,134,11,.3);padding-top:8px;}
 .eo-sec{border-top:1px dashed rgba(184,134,11,.35);margin:10px 0 6px;padding-top:8px;
   font-weight:600;color:#6b5424;}
 
@@ -2698,6 +2992,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-tip{position:absolute;left:22px;top:-4px;width:260px;padding:8px 10px;border-radius:8px;
   background:#3a3222;color:#fff6e0;font-size:12px;font-weight:400;line-height:1.6;
   box-shadow:0 3px 12px rgba(0,0,0,.28);z-index:10;white-space:normal;}
+/* 偏好项里的问号在行内偏右，提示框改成从问号正下方向右展开，
+   否则 260px 的框会顶出面板右缘 */
+.eo-help-inline .eo-tip{left:-6px;top:20px;}
 
 /* 打勾模式：三档各占一行 */
 .eo-modes{display:flex;flex-direction:column;gap:5px;margin:4px 0;}
@@ -2707,7 +3004,6 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-mode-cur{flex:0 0 auto;font-size:11px;padding:0 5px;border-radius:3px;
   background:#e6dcc0;color:#6b5424;}
 .eo-mode-tag{flex:0 0 auto;font-weight:700;color:#7a5a0a;}
-.eo-ctx-preview{font-size:12px;color:#6b5424;background:#fdf7e8;}
 
 `;
         document.head.appendChild(style);
@@ -3164,16 +3460,157 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         else renderSetPage(page);
     }
 
+    // ---------- 问号说明气泡（生成页与设置页共用） ----------
+
+    /** 关掉当前打开的所有说明气泡，同时摘掉全局监听 */
+    function closeAllTips() {
+        for (const tip of document.querySelectorAll('.eo-tip')) tip.remove();
+        for (const on of document.querySelectorAll('.eo-help-on')) on.classList.remove('eo-help-on');
+        document.removeEventListener('click', onDocClickClose, true);
+        document.removeEventListener('keydown', onEscClose, true);
+    }
+
+    function onDocClickClose(ev) {
+        // 点问号本身不在这里处理，交给它自己的 click，
+        // 否则同一个点击会先关再开，看起来像没反应
+        if (ev.target && ev.target.closest && ev.target.closest('.eo-help')) return;
+        closeAllTips();
+    }
+
+    function onEscClose(ev) {
+        if (ev.key === 'Escape') closeAllTips();
+    }
+
+    /**
+     * 小问号：点一下展开说明，点别处或按 Esc 收起。
+     * 说明文字存在 title 里，方便直接读取。
+     */
+    function attachHelp(host, text, inline) {
+        const h = el('span', inline ? 'eo-help eo-help-inline' : 'eo-help', '?');
+        h.title = text;
+        h.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const wasOn = h.classList.contains('eo-help-on');
+            closeAllTips();
+            if (wasOn) return;
+            h.classList.add('eo-help-on');
+            const tip = el('div', 'eo-tip');
+            tip.textContent = text;
+            h.appendChild(tip);
+            // 延到下一轮再加监听，否则本次点击会立刻把它自己关掉。
+            // 捕获阶段挂，点面板任意位置都能收到
+            setTimeout(() => {
+                document.addEventListener('click', onDocClickClose, true);
+                document.addEventListener('keydown', onEscClose, true);
+            }, 0);
+        });
+        host.appendChild(h);
+        return h;
+    }
+
     // ---------- 页：生成事件 ----------
+
+    // 当前展开预览的待选事件 id；跨重渲染保留，没展开就是 null
+    let previewDraftId = null;
 
     function renderGenPage(page) {
         const ev = getCurrentEvent();
 
         const statusBox = el('div', 'eo-box');
+        const draftN = Object.values(getMeta().events).filter(e => e && e.status === 'draft').length;
         statusBox.textContent = ev
             ? `进行中：${ev.name}\n开始于 ${String(ev.createdAt || '').slice(0, 19)}\n世界书：${ev.worldBook}　条目 uid=${ev.entryUid}`
-            : '当前没有进行中的事件。填好下面的事件名和偏好即可开始。';
+                + (draftN ? `\n另有 ${draftN} 个待选事件等你决定` : '')
+            : (draftN
+                ? `当前没有进行中的事件。上方有 ${draftN} 个待选事件，点「采用」即可开始；也可以继续生成新的来比较。`
+                : '当前没有进行中的事件。填好下面的事件名和偏好即可开始。生成后先进待选，满意再采用。');
         page.appendChild(statusBox);
+
+        // --- 待选事件 ---
+        // 生成只产出待选，不写世界书；点「采用」才真正生效。
+        // 这样反复重生成不会来回写删世界书条目
+        const drafts = Object.values(getMeta().events)
+            .filter(e => e && e.status === 'draft')
+            .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+        if (drafts.length) {
+            const dHead = el('div', 'eo-sec eo-sec-inline');
+            dHead.appendChild(el('span', null, `待选事件（${drafts.length}/${MAX_DRAFTS}）`));
+            attachHelp(dHead, '生成后先放在这里，不写世界书、不设为当前事件。看看满意就点「采用」，'
+                + '不满意就点「丢弃」，或者调一调偏好再生成一个来比较。最多同时保留 '
+                + MAX_DRAFTS + ' 个，超出时最早的会被挤掉。');
+            page.appendChild(dHead);
+
+            const draftBox = el('div', 'eo-drafts');
+            for (const d of drafts) {
+                const item = el('div', 'eo-draft');
+                const head = el('div', 'eo-draft-head');
+                head.appendChild(el('span', 'eo-draft-name', d.name));
+                const n = (d.outline && d.outline.nodes || []).length;
+                const c = Object.keys((d.outline && d.outline.characters) || {}).length;
+                const meta = [];
+                meta.push(`${n} 个节点`);
+                if (c) meta.push(`${c} 类角色`);
+                if (d.autoNamed) meta.push('自动命名');
+                head.appendChild(el('span', 'eo-draft-meta', meta.join('　')));
+                item.appendChild(head);
+
+                if (d.brief) item.appendChild(el('div', 'eo-draft-brief', d.brief));
+
+                const acts = el('div', 'eo-row');
+                const btnUse = el('button', 'eo-btn eo-primary', '采用');
+                btnUse.type = 'button';
+                btnUse.addEventListener('click', async () => {
+                    btnUse.disabled = true;
+                    btnUse.textContent = '正在采用…';
+                    try {
+                        await commitDraft(d.id);
+                        activeTab = 'gen';
+                        renderPanel();
+                    } catch (e) {
+                        error('采用待选事件失败：', e);
+                        btnUse.disabled = false;
+                        btnUse.textContent = '采用';
+                        alert('采用失败：' + (e && e.message || e));
+                    }
+                });
+                acts.appendChild(btnUse);
+
+                const btnDrop = el('button', 'eo-btn', '丢弃');
+                btnDrop.type = 'button';
+                btnDrop.addEventListener('click', () => {
+                    if (!confirm(`丢弃待选事件「${d.name}」？它还没写进世界书，丢弃不会留下任何东西。`)) return;
+                    discardDraft(d.id);
+                    renderPanel();
+                });
+                acts.appendChild(btnDrop);
+
+                const btnLook = el('button', 'eo-btn', '看大纲');
+                btnLook.type = 'button';
+                btnLook.addEventListener('click', () => {
+                    previewDraftId = previewDraftId === d.id ? null : d.id;
+                    renderPanel();
+                });
+                acts.appendChild(btnLook);
+                item.appendChild(acts);
+
+                // 展开时才渲染大纲正文，避免一屏堆几百行
+                if (previewDraftId === d.id) {
+                    const body = el('div', 'eo-draft-body');
+                    const q = d.parseQuality;
+                    if (q && !q.ok) {
+                        const bad = el('div', 'eo-bad-box');
+                        bad.textContent = '⚠ 这份大纲结构不完整：' + q.missing.join('；');
+                        body.appendChild(bad);
+                    }
+                    const txt = el('div', 'eo-outline-text');
+                    txt.textContent = renderOutlineText(d.outline);
+                    body.appendChild(txt);
+                    item.appendChild(body);
+                }
+                draftBox.appendChild(item);
+            }
+            page.appendChild(draftBox);
+        }
 
         if (ev) {
             const opOut = el('div', 'eo-hint');
@@ -3235,7 +3672,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 const det = el('details', 'eo-details');
                 det.open = true;
                 det.appendChild(el('summary', null, '事件大纲'));
-                const ob = el('div', 'eo-box');
+                // 用 outline-text 而不是 eo-box：后者有 220px 高度上限，
+                // 大纲几百行会被压在一条小滚动条里，看起来就像没有排版
+                const ob = el('div', 'eo-outline-text');
                 ob.textContent = outlineText;
                 det.appendChild(ob);
                 page.appendChild(det);
@@ -3249,7 +3688,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 det.appendChild(ob);
                 page.appendChild(det);
             }
-            return;
+            // 不再 return：待选机制允许在事件进行中继续生成新的来比较，
+            // 只是「采用」时要先把当前这件事收掉
+            page.appendChild(el('div', 'eo-sec', '再生成一个待选'));
         }
 
         // --- 新建事件表单 ---
@@ -3259,6 +3700,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const nameInput = el('input', 'eo-input');
         nameInput.type = 'text';
         nameInput.placeholder = '例如：东方快车谋杀案';
+        // 事件名也存进草稿，这样「重置为默认」能把它一起清掉
+        nameInput.value = draftName || '';
+        nameInput.addEventListener('input', () => { draftName = nameInput.value; });
         nameRow.appendChild(nameInput);
         page.appendChild(nameRow);
         page.appendChild(el('div', 'eo-hint',
@@ -3323,15 +3767,47 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         paintCounter();
         page.appendChild(counter);
 
+        // 事件目的与框架提示放在体验偏好之前：这两个是「想要什么」，
+        // 偏好是「多难多险」，先想清楚要什么再调强度，顺序才对
+        page.appendChild(el('div', 'eo-sec eo-sec-inline', '事件目的'));
+        page.appendChild(el('div', 'eo-hint',
+            '你想让这个事件最终达成什么。留空则由模型按当前剧情自行判断。填了会成为硬约束，大纲会围绕它展开。'));
+        const goalInput = el('textarea', 'eo-input eo-textarea');
+        goalInput.rows = 3;
+        goalInput.placeholder = '例如：让玩家在最终揭开前，逐步发现车上的乘客都与同一桩旧案有关，并理解他们为何共同动手';
+        goalInput.value = prefs.goal || '';
+        goalInput.addEventListener('input', () => { prefs.goal = goalInput.value; });
+        page.appendChild(goalInput);
+
+        page.appendChild(el('div', 'eo-sec eo-sec-inline', '事件框架提示'));
+        page.appendChild(el('div', 'eo-hint',
+            '你自己构思的大致框架、想要的桥段或细节。留空则完全由模型设计。填了会尽量采纳。'));
+        const hintInput = el('textarea', 'eo-input eo-textarea');
+        hintInput.rows = 4;
+        hintInput.placeholder = '例如：开场列车遭遇暴雪被困，死者身中十二刀；中途每个乘客的证词都互相印证却彼此矛盾；结尾靠一枚被烧焦的信纸残片把所有人的旧案串起来';
+        hintInput.value = prefs.promptHint || '';
+        hintInput.addEventListener('input', () => { prefs.promptHint = hintInput.value; });
+        page.appendChild(hintInput);
+
         page.appendChild(el('div', 'eo-sec', '体验偏好'));
         page.appendChild(el('div', 'eo-hint',
             '这里是「这次想玩什么样的体验」，会原样写进生成大纲的提示词，模型按你的选择决定难度和危险程度。不确定选哪个的，留着「根据当前情况自行设定」就行，模型会自己配一套合理的。'));
 
         // 单项下拉（大致模式下的档位、详细模式下的子项都用它）
-        function makeSelect(row, labelText, options, current, onChange) {
+        function makeSelect(row, labelText, options, current, onChange, desc) {
             const lab = el('label', null, labelText);
             lab.style.minWidth = '92px';
             row.appendChild(lab);
+            // 有说明就挂个问号，跟在标签后头；没说明就什么都不加
+            if (desc) {
+                attachHelp(lab, desc, true);
+                lab.style.display = 'flex';
+                lab.style.alignItems = 'center';
+                lab.style.gap = '4px';
+                // 问号占位置，最小宽度放开，避免标签被挤或被撑宽
+                lab.style.minWidth = 'auto';
+                lab.style.flex = '0 0 auto';
+            }
             const sel = el('select', 'eo-sel');
             sel.style.flex = '1';
             for (const opt of options) {
@@ -3371,7 +3847,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                         if (!pick) return;
                         for (const k of Object.keys(pick.values)) prefs[k] = pick.values[k];
                         paintGroup(groupName, body, hintSpan);
-                    });
+                    },
+                    `选一个粗档位，把本组 ${items.length} 个子项一次定好。各个子项之间是独立的，`
+                    + '档位只是替你批量填好，想单独调哪一项切到「详细」就行。');
                 body.appendChild(row);
                 const pick = all.find(o => o.key === cur);
                 if (pick) body.appendChild(el('div', 'eo-hint', pick.desc));
@@ -3388,7 +3866,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     opts.map(o => ({ value: o, label: o })),
                     // 历史值可能是另一句文案，归一化后选中
                     opts.includes(curVal) ? curVal : autoText,
-                    (v) => { prefs[g.key] = v; });
+                    (v) => { prefs[g.key] = v; },
+                    g.desc);
                 body.appendChild(row);
             }
         }
@@ -3408,16 +3887,20 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 // 独立项：直接一行（难度等级在这里，选项来自设置里的自定义档位）
                 const opts = g.dynamic === 'difficulty'
                     ? [PREF_AUTO_NEW].concat(getDifficultyLevels())
-                    : g.options;
+                    // 独立项里也有带 SUB_AUTO 占位的（节点数量等），
+                    // 不换掉的话下拉框会直接显示成 __eo_sub_auto__
+                    : (g.options || []).map(o => (o === SUB_AUTO ? autoByText(prefs) : o));
                 const row = el('div', 'eo-row');
                 makeSelect(row, g.label,
                     opts.map(o => ({ value: o, label: o })),
-                    prefs[g.key] || PREF_AUTO_NEW,
+                    // 历史值可能是另一句「自行设定」文案，归一化后选中
+                    opts.includes(prefs[g.key]) ? prefs[g.key] : (opts[0] || PREF_AUTO_NEW),
                     (v) => {
                         prefs[g.key] = v;
                         // 难度等级变了，下面各组的「自行设定」文案要跟着变
                         if (g.key === 'difficultyLevel') repaintAllGroups();
-                    });
+                    },
+                    g.desc);
                 page.appendChild(row);
                 continue;
             }
@@ -3476,33 +3959,24 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         extraRow.appendChild(extraInput);
         page.appendChild(extraRow);
 
-        // 事件目的：用户想达成什么
-        page.appendChild(el('div', 'eo-sec eo-sec-inline', '事件目的'));
-        page.appendChild(el('div', 'eo-hint',
-            '你想让这个事件最终达成什么。留空则由模型按当前剧情自行判断。填了会成为硬约束，大纲会围绕它展开。'));
-        const goalInput = el('textarea', 'eo-input eo-textarea');
-        goalInput.rows = 3;
-        goalInput.placeholder = '例如：让玩家在最终揭开前，逐步发现车上的乘客都与同一桩旧案有关，并理解他们为何共同动手';
-        goalInput.value = prefs.goal || '';
-        goalInput.addEventListener('input', () => { prefs.goal = goalInput.value; });
-        page.appendChild(goalInput);
-
-        // 事件提示词：用户自己想的框架
-        page.appendChild(el('div', 'eo-sec eo-sec-inline', '事件框架提示'));
-        page.appendChild(el('div', 'eo-hint',
-            '你自己构思的大致框架、想要的桥段或细节。留空则完全由模型设计。填了会尽量采纳。'));
-        const hintInput = el('textarea', 'eo-input eo-textarea');
-        hintInput.rows = 4;
-        hintInput.placeholder = '例如：开场列车遭遇暴雪被困，死者身中十二刀；中途每个乘客的证词都互相印证却彼此矛盾；结尾靠一枚被烧焦的信纸残片把所有人的旧案串起来';
-        hintInput.value = prefs.promptHint || '';
-        hintInput.addEventListener('input', () => { prefs.promptHint = hintInput.value; });
-        page.appendChild(hintInput);
+        // 重置按钮：把上面这一整套选项拨回默认，不动待选区
+        const rstRow = el('div', 'eo-row');
+        const btnReset = el('button', 'eo-btn', '重置为默认');
+        btnReset.type = 'button';
+        attachHelp(btnReset, '把事件名、事件目的、框架提示、额外要求和全部体验偏好拨回默认值。'
+            + '已经生成的待选事件不受影响，它们各自记着自己生成时的那份设置。');
+        btnReset.addEventListener('click', () => {
+            if (!confirm('把上面所有选项重置为默认？已生成的待选事件不受影响。')) return;
+            resetDraftPrefs();
+            log('生成页选项已重置为默认');
+            renderPanel();
+        });
+        rstRow.appendChild(btnReset);
+        page.appendChild(rstRow);
 
         // 上下文预览
-        const ctxBox = el('div', 'eo-box eo-ctx-preview');
-        ctxBox.textContent = '正在统计上下文…';
-        page.appendChild(ctxBox);
-        refreshCtxPreview(ctxBox);
+        // 这里原本会列出「记忆来源 / 最近楼层 / 世界书 / 纪要」四行统计，
+        // 但生成时真正用了哪些上下文，日志页有更准确的一份，这块只是重复占地方，已移除
 
         const opOut = el('div', 'eo-hint');
         const goRow = el('div', 'eo-row');
@@ -3529,10 +4003,12 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             try {
                 const event = await createEvent(name, prefs);
                 const nodeN = (event.outline && event.outline.nodes || []).length;
-                log(`生成大纲成功：${event.name}，节点 ${nodeN} 个，世界书条目 uid=${event.entryUid}`);
-                resetDraftPrefs();
+                log(`生成大纲成功：${event.name}，节点 ${nodeN} 个，已放入待选，未写世界书`);
+                // 刻意不重置偏好：生成出待选之后，下面那套选项要停在刚才用的那份，
+                // 方便在此基础上微调后再生成一个来比较。想回默认就点「重置为默认」
                 opOut.className = 'eo-ok';
-                opOut.textContent = `已生成：${event.name}，世界书条目 uid=${event.entryUid}`;
+                opOut.textContent = `已生成「${event.name}」（${nodeN} 个节点），已放入上方待选。看看满意就点「采用」写入世界书，不满意可以直接再生成一个。`;
+                previewDraftId = event.id;
                 activeTab = 'gen';
                 renderPanel();
             } catch (e) {
@@ -3552,29 +4028,6 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         ph.id = 'eo_progress_host';
         page.appendChild(ph);
         if (progress.steps.length) renderProgress();
-    }
-
-    async function refreshCtxPreview(box) {
-        try {
-            const resolved = resolveAdapter();
-            const s = getSettings();
-            const context = ctx();
-            const chatLen = ((context && context.chat) || []).filter(m => m && !m.is_system && String(m.mes || '').trim()).length;
-            const lines = [
-                `记忆来源：${resolved.adapter.describe()}${resolved.degraded ? '（已降级）' : ''}`,
-                `最近楼层：${Math.max(1, Number(s.memory.recentFloors) || 15)} 楼（可用 ${chatLen} 楼）`,
-                `世界书：${getCharacterBookName() || '（角色未绑定）'}`,
-            ];
-            if (resolved.adapter.id === 'shujuku-jiyao' && resolved.adapter.rows) {
-                const rows = resolved.adapter.rows();
-                const mode = resolved.adapter.mode ? resolved.adapter.mode() : null;
-                const modeName = MODE_LABEL[mode] || mode || '未识别';
-                lines.push(`纪要：${rows.length} 条（${modeName}模式，取最近 ${s.memory.jiyaoRecentRows} 条）`);
-            }
-            box.textContent = lines.join('\n');
-        } catch (e) {
-            box.textContent = '上下文统计失败：' + (e && e.message || e);
-        }
     }
 
     // ---------- 页：盘点 ----------
@@ -4296,22 +4749,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         // --- 打勾模式 ---
         const trSec = el('div', 'eo-sec eo-sec-inline');
         trSec.appendChild(el('span', null, '打勾模式'));
-        const trHelp = el('span', 'eo-help', '?');
-        trHelp.title = '「打勾」= 把大纲里的某个节点标成已达成。剧情推进到某个节点时，谁来判断、谁来点，就是这个模式决定的。';
-        trHelp.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const tip = el('div', 'eo-tip');
-            tip.textContent = trHelp.title;
-            const old = document.querySelector('.eo-tip');
-            if (old) old.remove();
-            if (trHelp.classList.contains('eo-help-on')) {
-                trHelp.classList.remove('eo-help-on');
-                return;
-            }
-            trHelp.classList.add('eo-help-on');
-            trHelp.appendChild(tip);
-        });
-        trSec.appendChild(trHelp);
+        attachHelp(trSec, '「打勾」= 把大纲里的某个节点标成已达成。剧情推进到某个节点时，谁来判断、谁来点，就是这个模式决定的。');
         page.appendChild(trSec);
         const trRow = el('div', 'eo-row');
         const trSel = el('select', 'eo-sel');
@@ -4415,22 +4853,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         // --- 保留数量 ---
         const retSec = el('div', 'eo-sec eo-sec-inline');
         retSec.appendChild(el('span', null, '历史保留'));
-        const retHelp = el('span', 'eo-help', '?');
-        retHelp.title = '事件完结或废弃后，事件卡不会立刻消失，而是留在这里当历史。这两个数字是分别保留多少条：超出上限时按结束时间从旧到新删掉最老的。进行中的事件永远不会被清掉。';
-        retHelp.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const old = document.querySelector('.eo-tip');
-            if (old) old.remove();
-            if (retHelp.classList.contains('eo-help-on')) {
-                retHelp.classList.remove('eo-help-on');
-                return;
-            }
-            retHelp.classList.add('eo-help-on');
-            const tip = el('div', 'eo-tip');
-            tip.textContent = retHelp.title;
-            retHelp.appendChild(tip);
-        });
-        retSec.appendChild(retHelp);
+        attachHelp(retSec, '事件完结或废弃后，事件卡不会立刻消失，而是留在这里当历史。这两个数字是分别保留多少条：超出上限时按结束时间从旧到新删掉最老的。进行中的事件永远不会被清掉。');
         page.appendChild(retSec);
         const retRow = el('div', 'eo-row');
         retRow.appendChild(el('label', null, '完结'));
@@ -4522,9 +4945,11 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     `shujuku 导出条目：${foreignExport}`,
                     mine.length ? `明细：${mine.map(m => `${m.uid}(${m.contentLength}字)`).join('、')}` : '明细：无',
                 ].join('\n');
+                log(`世界书自检：${target}，总条目 ${total}，本扩展 ${mine.length} 条，shujuku 导出 ${foreignExport} 条`);
             } catch (e) {
                 checkOut.className = 'eo-bad';
                 checkOut.textContent = '读取失败：' + (e && e.message || e);
+                error('世界书自检失败：', e);
             } finally { btnCheck.disabled = false; }
         });
         bookRow.appendChild(btnCheck);
@@ -4544,9 +4969,11 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 const r = await upsertEventEntry(target, content, `${ENTRY_PREFIX}${TEST_MARK}`, null);
                 checkOut.className = 'eo-ok';
                 checkOut.textContent = `写入成功，uid=${r.uid}。其余条目内容校验通过。`;
+                log(`世界书写入测试成功：${target}，uid=${r.uid}`);
             } catch (e) {
                 checkOut.className = 'eo-bad';
                 checkOut.textContent = '写入失败：' + (e && e.message || e);
+                error('世界书写入测试失败：', e);
             } finally { btnTest.disabled = false; }
         });
 
@@ -4564,14 +4991,17 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 if (!targets.length) {
                     checkOut.className = 'eo-hint';
                     checkOut.textContent = '没有找到测试条目。';
+                    log(`删除测试条目：${target} 里没有找到测试条目`);
                     return;
                 }
                 for (const uid of targets) await deleteEventEntry(target, uid);
                 checkOut.className = 'eo-ok';
                 checkOut.textContent = `已删除 ${targets.length} 条测试条目。`;
+                log(`已删除世界书测试条目 ${targets.length} 条：${targets.join('、')}`);
             } catch (e) {
                 checkOut.className = 'eo-bad';
                 checkOut.textContent = '删除失败：' + (e && e.message || e);
+                error('删除世界书测试条目失败：', e);
             } finally { btnClean.disabled = false; }
         });
 
