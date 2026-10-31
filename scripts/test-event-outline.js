@@ -357,6 +357,79 @@ new Function('exports', `${labelSrc}\n${nodeTypeSrc}\n${eventTypeSrc}\n${labelFn
     check('空大纲返回 null', renderBox.render(null) === null && renderBox.render({}) === null);
 }
 
+// ---- 15. 难度档位 ----
+// 旧的「村中琐事/城镇委托/王国要务/禁忌事件」绑死奇幻中世纪，
+// 改成通用档位并允许用户在设置里整组替换（有些角色卡自带分级）。
+{
+    const lvSrc = src.match(/const DEFAULT_DIFFICULTY_LEVELS = \[[\s\S]*?\];/)[0];
+    const getLvSrc = (() => {
+        const s = src.indexOf('function getDifficultyLevels');
+        let i = src.indexOf('{', s), d = 0, e = -1;
+        for (; i < src.length; i++) {
+            if (src[i] === '{') d++;
+            else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
+        }
+        return src.slice(s, e);
+    })();
+    const normSrc = (() => {
+        const s = src.indexOf('function normalizePrefs');
+        let i = src.indexOf('{', s), d = 0, e = -1;
+        for (; i < src.length; i++) {
+            if (src[i] === '{') d++;
+            else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
+        }
+        return src.slice(s, e);
+    })();
+    const mapSrc = src.match(/const LEGACY_LEVEL_MAP = \{[\s\S]*?\};/)[0];
+
+    let fake = { preset: { difficultyLevels: [] } };
+    globalThis.__settings = fake;
+    // 每次切换配置都同步写回沙箱读的变量
+    const setFake = (v) => { fake = v; globalThis.__settings = v; };
+    const lvBox = {};
+    new Function('exports', `
+const getSettings = () => __settings;
+const PREF_GROUPS = [{ key: 'difficultyLevel' }];
+const debug = () => {};
+${lvSrc}
+${mapSrc}
+${getLvSrc}
+${normSrc}
+exports.getLevels = getDifficultyLevels;
+exports.normalize = normalizePrefs;
+`)(lvBox);
+    globalThis.__settings = fake;
+
+    check('空的自定义档位 -> 用默认档', lvBox.getLevels().length === 5, lvBox.getLevels().join(','));
+    check('默认档不含奇幻词汇', !lvBox.getLevels().some(x => /村中|城镇|王国/.test(x)));
+
+    fake = { preset: { difficultyLevels: ['F', 'E', 'D'] } };
+    setFake(fake);
+    check('自定义档位生效', lvBox.getLevels().join(',') === 'F,E,D', lvBox.getLevels().join(','));
+
+    fake = { preset: { difficultyLevels: ['  ', ''] } };
+    setFake(fake);
+    check('全空白当作未设置', lvBox.getLevels().length === 5);
+
+    fake = {};
+    setFake(fake);
+    check('没有 preset 字段不崩', lvBox.getLevels().length === 5);
+
+    // 旧字段迁移
+    const legacy = { commissionLevel: '城镇委托' };
+    lvBox.normalize(legacy);
+    check('旧字段 commissionLevel 迁移', legacy.difficultyLevel === '小麻烦', String(legacy.difficultyLevel));
+    const unknown = { commissionLevel: '自定义旧档' };
+    lvBox.normalize(unknown);
+    check('未登记的旧档位原样保留', unknown.difficultyLevel === '自定义旧档');
+    const withNew = { difficultyLevel: '重大危机', commissionLevel: '村中琐事' };
+    lvBox.normalize(withNew);
+    check('已有新字段时不覆盖', withNew.difficultyLevel === '重大危机');
+    const wording = { difficultyLevel: '根据委托等级自行设定' };
+    lvBox.normalize(wording);
+    check('旧文案改成难度等级', wording.difficultyLevel === '根据难度等级自行设定', wording.difficultyLevel);
+}
+
 console.log('');
 console.log(fail === 0 ? '全部通过' : fail + ' 项失败');
 process.exit(fail === 0 ? 0 : 1);

@@ -34,6 +34,10 @@
             autoEveryFloors: 10,
         },
         retention: { completed: 20, abandoned: 3 },
+        preset: {
+            // 自定义难度档位。空数组 = 用内置默认档（日常琐事/小麻烦/正经事件/重大危机/生死关头）
+            difficultyLevels: [],
+        },
         memory: {
             source: 'auto',
             recentFloors: 15,
@@ -212,6 +216,8 @@
      */
     function healOutline(event) {
         if (!event) return event;
+        // 旧事件卡的偏好字段（commissionLevel 等）迁移到新结构
+        if (event.prefs) normalizePrefs(event.prefs);
         // 质量判定规则变了（例如模型的节点正文键名是 points_to 而旧规则只认 info），
         // 旧结论可能已经不成立，按当前规则重判一次，避免红色警示一直挂着
         if (event.outline) event.parseQuality = checkOutlineQuality(event.outline);
@@ -863,16 +869,73 @@
     // 第 12-45 行 = 大纲词，51-63 行 = 盘点词。此处为改良版，差异见设计文档。
 
     const PREF_AUTO_NEW = '根据当前情况自行设定';
-    // 子项的「交还给上层」选项：委托等级没选时按当前剧情判断，
-    // 选了委托等级就改成按那个等级推导
-    const PREF_AUTO_BY_LEVEL = '根据委托等级自行设定';
+
+    /**
+     * 难度等级的默认档位。
+     * 旧的「村中琐事/城镇委托/王国要务/禁忌事件」绑死了奇幻中世纪，换世界观就不合用，
+     * 所以改成描述「这件事本身有多难、多危险」的通用档，任何题材都套得上。
+     * 用户可以在设置里整组替换成自己角色卡自带的分级。
+     */
+    const DEFAULT_DIFFICULTY_LEVELS = [
+        '日常琐事',
+        '小麻烦',
+        '正经事件',
+        '重大危机',
+        '生死关头',
+    ];
+
+    // 子项的「交还给上层」选项：难度等级没选时按当前剧情判断，
+    // 选了难度等级就改成按那个等级推导
+    const PREF_AUTO_BY_LEVEL = '根据难度等级自行设定';
     const PREF_AUTO_BY_NONE = '根据当前情况自行设定';
+
+    /** 当前生效的难度档位列表（用户可在设置里自定义，为空则用内置默认） */
+    function getDifficultyLevels() {
+        const s = getSettings();
+        const custom = (s.preset && Array.isArray(s.preset.difficultyLevels)) ? s.preset.difficultyLevels : null;
+        const list = (custom || []).map(x => String(x || '').trim()).filter(Boolean);
+        return list.length ? list : DEFAULT_DIFFICULTY_LEVELS.slice();
+    }
 
     /** 某个子项此刻该用哪句「自行设定」文案 */
     function autoByText(prefs) {
-        const lv = String((prefs && prefs.commissionLevel) || '').trim();
+        const lv = String((prefs && prefs.difficultyLevel) || '').trim();
         const hasLevel = lv && lv !== PREF_AUTO_NEW;
         return hasLevel ? PREF_AUTO_BY_LEVEL : PREF_AUTO_BY_NONE;
+    }
+
+    /**
+     * 旧档位名到新默认档位的映射。
+     * 旧版本叫「委托等级」，档位是村中琐事/城镇委托/王国要务/禁忌事件，
+     * 已存进事件卡的 prefs.commissionLevel 里。改档位体系后不能把旧值丢掉，
+     * 按量级对到新档，用户回看旧事件时不至于变成空白。
+     */
+    const LEGACY_LEVEL_MAP = {
+        '村中琐事': '日常琐事',
+        '城镇委托': '小麻烦',
+        '王国要务': '重大危机',
+        '禁忌事件': '生死关头',
+    };
+
+    /**
+     * 把事件卡里的旧字段迁到新结构。
+     * 只做一次性读取时的补齐，不改写已存在的字段。
+     */
+    function normalizePrefs(prefs) {
+        if (!prefs || typeof prefs !== 'object') return prefs;
+        if (!prefs.difficultyLevel && prefs.commissionLevel) {
+            const old = String(prefs.commissionLevel).trim();
+            prefs.difficultyLevel = LEGACY_LEVEL_MAP[old] || old || PREF_AUTO_NEW;
+            debug(`偏好迁移：旧字段 commissionLevel「${old}」-> difficultyLevel「${prefs.difficultyLevel}」`);
+        }
+        // 旧的「根据委托等级自行设定」文案统一换成新说法
+        for (const g of PREF_GROUPS) {
+            const v = prefs[g.key];
+            if (typeof v === 'string' && v.indexOf('委托等级') >= 0) {
+                prefs[g.key] = v.replace(/委托等级/g, '难度等级');
+            }
+        }
+        return prefs;
     }
 
     /** 生成子项选项：两个「自行设定」合并成一个动态文案 */
@@ -899,9 +962,11 @@
 
     const PREF_GROUPS = [
         {
-            key: 'commissionLevel',
-            label: '委托等级',
-            options: [PREF_AUTO_NEW, '村中琐事', '城镇委托', '王国要务', '禁忌事件'],
+            key: 'difficultyLevel',
+            label: '难度等级',
+            // 选项来自设置里的自定义档位，这里留空由界面动态填充
+            options: [],
+            dynamic: 'difficulty',
         },
         {
             key: 'clueSufficiency',
@@ -986,7 +1051,7 @@
     function autoPreset(groupName, prefs) {
         const items = PREF_GROUPS.filter(x => x.group === groupName);
         const values = {};
-        // 值用当前正确的「自行设定」文案（委托等级定了就是「根据委托等级自行设定」）
+        // 值用当前正确的「自行设定」文案（难度等级定了就是「根据难度等级自行设定」）
         const text = autoByText(prefs);
         for (const g of items) values[g.key] = text;
         return { key: 'auto', label: text, desc: '这一组交给模型自行配一套合理的，你不用逐项挑', values };
@@ -1088,7 +1153,7 @@
         lines.push(`- 主类型：${hasMain ? main : '未指定，请根据当前剧情判断该事件属于哪一类'}`);
         // 「自行设定」在提示词里要写清楚是按什么推导，避免模型理解成「随便来」
         const autoText = autoByText(prefs);
-        const lv = String(prefs.commissionLevel || '').trim();
+        const lv = String(prefs.difficultyLevel || '').trim();
         const useByLevel = autoText === PREF_AUTO_BY_LEVEL;
         let curGroup = null;
         for (const g of PREF_GROUPS) {
@@ -1100,15 +1165,15 @@
             // 残留的旧文案统一归一化
             if (v === PREF_AUTO_BY_NONE || v === PREF_AUTO_BY_LEVEL || v === SUB_AUTO) v = autoText;
             if (g.group && useByLevel && v === PREF_AUTO_BY_LEVEL) {
-                v = `根据委托等级「${lv}」自行设定`;
+                v = `根据难度等级「${lv}」自行设定`;
             }
             const indent = g.group ? '  · ' : '- ';
             lines.push(`${indent}${g.label}：${v}`);
         }
         if (useByLevel) {
-            lines.push(`说明：委托等级已定为「${lv}」，凡写「根据委托等级自行设定」的子项，请按该等级应有的难度、危险程度与时间压力成套推导，同一组内要互相匹配。`);
+            lines.push(`说明：难度等级已定为「${lv}」，凡写「根据难度等级自行设定」的子项，请按该等级应有的难度、危险程度与时间压力成套推导，同一组内要互相匹配。`);
         } else {
-            lines.push('说明：委托等级未指定，凡写「根据当前情况自行设定」的子项，请结合当前剧情阶段与该角色所处处境，自己配一套合理的取值。');
+            lines.push('说明：难度等级未指定，凡写「根据当前情况自行设定」的子项，请结合当前剧情阶段与该角色所处处境，自己配一套合理的取值。');
         }
         // 次类型：没选就让模型自己配
         if (subs.length) {
@@ -1117,6 +1182,23 @@
             lines.push('- 次类型：未指定，请按主类型与当前剧情自行搭配 1-3 个次要性质');
         }
         lines.push(`- 额外要求：${prefs.extra || '无'}`);
+        // 用户手填的两项：目的（想达成什么）与提示词（大致框架）。填了就当硬约束
+        const goal = String(prefs.goal || '').trim();
+        if (goal) {
+            lines.push('');
+            lines.push('【事件目的（用户亲手填写，必须围绕它设计）】');
+            lines.push(goal);
+            lines.push('说明：这是用户希望这个事件最终达成的目标。核心真相、信息节点与推进路径都要服务于它，');
+            lines.push('但不要把它直白写进大纲让玩家一眼看穿，仍要经由信息节点逐步展开。');
+        }
+        const hint = String(prefs.promptHint || '').trim();
+        if (hint) {
+            lines.push('');
+            lines.push('【事件框架提示（用户亲手填写的想法，尽量采纳）】');
+            lines.push(hint);
+            lines.push('说明：这是用户自己构思的大致框架或想要的桥段。能融进结构就融进去；');
+            lines.push('与公平性、信息节点可获得性冲突时，优先保证结构完整，再尽量保留用户的意图。');
+        }
         return lines.join('\n');
     }
 
@@ -1816,12 +1898,24 @@
     // ==================== 11. 事件流程 ====================
 
     let busy = false;
+    // 忙碌提示文案随操作变：废弃/完结是本地操作，不该显示「正在请求模型」
+    let busyText = '处理中…';
 
-    function setBusy(on, keepProgress) {
+    /**
+     * 切换忙碌状态。
+     * @param on 是否忙碌
+     * @param keepProgress 结束时是否保留进度列表（生成/盘点用）
+     * @param text 忙碌提示文案。不传就沿用上一次的，避免文案互相覆盖
+     */
+    function setBusy(on, keepProgress, text) {
         busy = on;
+        if (text) busyText = text;
         if (panelEl) {
             const b = panelEl.querySelector('#eo_busy');
-            if (b) b.style.display = on ? 'block' : 'none';
+            if (b) {
+                if (text) b.textContent = text;
+                b.style.display = on ? 'block' : 'none';
+            }
         }
         if (!on && !keepProgress) {
             resetProgress();
@@ -2137,7 +2231,7 @@
         const book = getCharacterBookName();
         if (!book) throw new Error('当前角色未绑定世界书');
 
-        setBusy(true);
+        setBusy(true, false, '正在生成大纲，请稍候…');
         try {
             startProgress('正在生成事件大纲');
             step('准备提示词');
@@ -2227,7 +2321,7 @@
         if (!event) throw new Error('当前没有进行中的事件');
         if (event.status !== 'active') throw new Error('该事件已结束');
 
-        setBusy(true);
+        setBusy(true, false, '正在盘点事件状态，请稍候…');
         try {
             startProgress('正在盘点事件状态');
             step('准备提示词');
@@ -2317,7 +2411,8 @@
     async function closeEvent(abandoned) {
         const event = getCurrentEvent();
         if (!event) throw new Error('当前没有事件');
-        setBusy(true);
+        // 废弃/完结是纯本地操作：删世界书条目、改状态、清历史，不碰模型
+        setBusy(true, false, abandoned ? '正在废弃事件并清理世界书条目…' : '正在完结事件并清理世界书条目…');
         try {
             if (event.entryUid != null && event.worldBook) {
                 await deleteEventEntry(event.worldBook, event.entryUid);
@@ -2537,6 +2632,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-input{padding:6px 10px;border-radius:8px;border:1px solid rgba(184,134,11,.45);
   background:#fffdf7;color:#3c2f14;font-size:13px;flex:1;min-width:0;}
 .eo-input:focus{outline:2px solid rgba(184,134,11,.28);outline-offset:0;}
+.eo-textarea{width:100%;box-sizing:border-box;resize:vertical;line-height:1.6;
+  font-family:inherit;margin-bottom:9px;}
 
 /* 节点行 */
 .eo-node{padding:4px 6px;cursor:pointer;border-radius:6px;line-height:1.55;}
@@ -2947,7 +3044,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
   <span class="eo-hint" id="eo_ver">v${VERSION}</span>
   <span class="eo-close" id="eo_close">✕ 关闭</span>
 </div>
-<div class="eo-busy" id="eo_busy">正在请求模型，请稍候…</div>
+<div class="eo-busy" id="eo_busy">处理中…</div>
 <div class="eo-body" id="eo_body"></div>`;
         document.body.appendChild(panelEl);
         panelEl.querySelector('#eo_close').addEventListener('click', () => togglePanel(false));
@@ -2991,6 +3088,15 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const body = panelEl && panelEl.querySelector('#eo_body');
         if (!body) return;
         body.innerHTML = '';
+
+        // 面板重建后按钮和提示都是新造的，按当前 busy 状态恢复，否则切页回来就像没在忙
+        if (busy) {
+            const bb = panelEl.querySelector('#eo_busy');
+            if (bb) {
+                bb.textContent = busyText;
+                bb.style.display = 'block';
+            }
+        }
 
         const context = ctx();
         if (!context) {
@@ -3271,7 +3377,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         }
 
         let curGroup = null;
-        // 各组内容区的重绘函数，供委托等级变化时统一刷新「自行设定」文案
+        // 各组内容区的重绘函数，供难度等级变化时统一刷新「自行设定」文案
         const groupPainters = {};
         function repaintAllGroups() {
             for (const name of Object.keys(groupPainters)) {
@@ -3282,15 +3388,18 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             const isGrouped = !!g.group && !!PREF_PRESETS[g.group];
 
             if (!isGrouped) {
-                // 独立项：直接一行（委托等级在这里）
+                // 独立项：直接一行（难度等级在这里，选项来自设置里的自定义档位）
+                const opts = g.dynamic === 'difficulty'
+                    ? [PREF_AUTO_NEW].concat(getDifficultyLevels())
+                    : g.options;
                 const row = el('div', 'eo-row');
                 makeSelect(row, g.label,
-                    g.options.map(o => ({ value: o, label: o })),
+                    opts.map(o => ({ value: o, label: o })),
                     prefs[g.key] || PREF_AUTO_NEW,
                     (v) => {
                         prefs[g.key] = v;
-                        // 委托等级变了，下面各组的「自行设定」文案要跟着变
-                        if (g.key === 'commissionLevel') repaintAllGroups();
+                        // 难度等级变了，下面各组的「自行设定」文案要跟着变
+                        if (g.key === 'difficultyLevel') repaintAllGroups();
                     });
                 page.appendChild(row);
                 continue;
@@ -3335,7 +3444,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
                 paintModes();
                 paintGroup(g.group, body, hintSpan);
-                // 登记，供委托等级切换时刷新文案（重绘内容区，折叠壳不动）
+                // 登记，供难度等级切换时刷新文案（重绘内容区，折叠壳不动）
                 groupPainters[g.group] = () => paintGroup(g.group, body, hintSpan);
             }
         }
@@ -3349,6 +3458,28 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         extraInput.style.flex = '1';
         extraRow.appendChild(extraInput);
         page.appendChild(extraRow);
+
+        // 事件目的：用户想达成什么
+        page.appendChild(el('div', 'eo-sec eo-sec-inline', '事件目的'));
+        page.appendChild(el('div', 'eo-hint',
+            '你想让这个事件最终达成什么。留空则由模型按当前剧情自行判断。填了会成为硬约束，大纲会围绕它展开。'));
+        const goalInput = el('textarea', 'eo-input eo-textarea');
+        goalInput.rows = 3;
+        goalInput.placeholder = '例如：让主角彻底接受自己已是女校学生这一事实，主动去办完剩下的两枚印章';
+        goalInput.value = prefs.goal || '';
+        goalInput.addEventListener('input', () => { prefs.goal = goalInput.value; });
+        page.appendChild(goalInput);
+
+        // 事件提示词：用户自己想的框架
+        page.appendChild(el('div', 'eo-sec eo-sec-inline', '事件框架提示'));
+        page.appendChild(el('div', 'eo-hint',
+            '你自己构思的大致框架、想要的桥段或细节。留空则完全由模型设计。填了会尽量采纳。'));
+        const hintInput = el('textarea', 'eo-input eo-textarea');
+        hintInput.rows = 4;
+        hintInput.placeholder = '例如：开场在活动室里，千夏带主角看名册；中途有人敲门要找人，制造一次被打断的紧张；结尾主角因为害怕选择自己动手盖章';
+        hintInput.value = prefs.promptHint || '';
+        hintInput.addEventListener('input', () => { prefs.promptHint = hintInput.value; });
+        page.appendChild(hintInput);
 
         // 上下文预览
         const ctxBox = el('div', 'eo-box eo-ctx-preview');
@@ -3370,6 +3501,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             const name = String(nameInput.value || '').trim();
             // 事件名可以留空：留空就由模型根据当前剧情自己起名
             prefs.extra = String(extraInput.value || '无').trim() || '无';
+            prefs.goal = String(goalInput.value || '').trim();
+            prefs.promptHint = String(hintInput.value || '').trim();
+            if (prefs.goal) log(`本次生成带事件目的（${prefs.goal.length} 字）：${prefs.goal.slice(0, 40)}${prefs.goal.length > 40 ? '…' : ''}`);
+            if (prefs.promptHint) log(`本次生成带框架提示（${prefs.promptHint.length} 字）`);
             btnGo.disabled = true;
             btnGo.textContent = '正在生成…';
             opOut.className = 'eo-hint';
@@ -4390,6 +4525,51 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         bookRow.appendChild(btnTest);
         bookRow.appendChild(btnClean);
         page.appendChild(bookRow);
+
+        // --- 难度档位 ---
+        page.appendChild(el('div', 'eo-sec', '难度档位'));
+        page.appendChild(el('div', 'eo-hint',
+            '生成事件时「难度等级」下拉里可选的档位。留空则使用内置默认档：'
+            + DEFAULT_DIFFICULTY_LEVELS.join(' / ')
+            + '。如果你的角色卡自带一套分级（比如从 F 到 SSS、或「见习/正式/精英」），在这里整组填成你卡里的说法即可。'));
+        const lvInput = el('textarea', 'eo-input eo-textarea');
+        lvInput.rows = 5;
+        lvInput.placeholder = '每行一个档位，从低到高。例如：\nF 级\nE 级\nD 级\nC 级\nB 级';
+        const custom = (s.preset && Array.isArray(s.preset.difficultyLevels)) ? s.preset.difficultyLevels : [];
+        lvInput.value = custom.join('\n');
+        page.appendChild(lvInput);
+
+        const lvRow = el('div', 'eo-row');
+        const btnLvSave = el('button', 'eo-btn eo-primary', '保存档位');
+        const btnLvReset = el('button', 'eo-btn', '恢复默认');
+        const lvOut = el('div', 'eo-hint');
+        btnLvSave.addEventListener('click', () => {
+            const list = String(lvInput.value || '').split('\n')
+                .map(x => x.trim()).filter(Boolean);
+            // 去重但保留顺序
+            const seen = new Set();
+            const clean = [];
+            for (const x of list) { if (!seen.has(x)) { seen.add(x); clean.push(x); } }
+            getSettings().preset.difficultyLevels = clean;
+            saveSettings();
+            lvOut.className = 'eo-ok';
+            lvOut.textContent = clean.length
+                ? `已保存 ${clean.length} 个档位：${clean.join(' / ')}`
+                : '已清空，将使用内置默认档位';
+            log(`难度档位已更新：${clean.length ? clean.join(' / ') : '（恢复默认）'}`);
+        });
+        btnLvReset.addEventListener('click', () => {
+            lvInput.value = '';
+            getSettings().preset.difficultyLevels = [];
+            saveSettings();
+            lvOut.className = 'eo-ok';
+            lvOut.textContent = '已恢复默认档位：' + DEFAULT_DIFFICULTY_LEVELS.join(' / ');
+            log('难度档位已恢复默认');
+        });
+        lvRow.appendChild(btnLvSave);
+        lvRow.appendChild(btnLvReset);
+        page.appendChild(lvRow);
+        page.appendChild(lvOut);
         page.appendChild(checkOut);
 
         const foot = el('div', 'eo-hint', `扩展 v${VERSION}｜日志前缀 ${LOG_PREFIX}`);
