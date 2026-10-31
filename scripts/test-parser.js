@@ -11,8 +11,36 @@ function check(name, cond, extra) {
 }
 
 const sandbox = {};
-const runner = new Function('exports', `
-// 日志函数在扩展里是模块级函数，测试沙箱里补成空实现（这里只测解析逻辑）
+// checkOutlineQuality 里带花括号，用配平扫描取完整函数体，正则截不准
+const qualitySrc = (() => {
+    const s = src.indexOf('function checkOutlineQuality');
+    let i = src.indexOf('{', s), d = 0, e = -1;
+    for (; i < src.length; i++) {
+        if (src[i] === '{') d++;
+        else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
+    }
+    return src.slice(s, e);
+})();
+
+// 节点字段统一读取，checkOutlineQuality 依赖
+const nodeHelpersSrc = (() => {
+    const parts = ['NODE_TEXT_KEYS', 'NODE_TRIGGER_KEYS'].map((name) => {
+        const s = src.indexOf('const ' + name);
+        return src.slice(s, src.indexOf('];', s) + 2);
+    });
+    for (const fn of ['nodeText', 'nodeTrigger', 'nodeId']) {
+        const s = src.indexOf('function ' + fn);
+        let i = src.indexOf('{', s), d = 0, e = -1;
+        for (; i < src.length; i++) {
+            if (src[i] === '{') d++;
+            else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
+        }
+        parts.push(src.slice(s, e));
+    }
+    return parts.join('\n');
+})();
+
+const runner = new Function('exports', `// 日志函数在扩展里是模块级函数，测试沙箱里补成空实现（这里只测解析逻辑）
 function log() {}
 function warn() {}
 function error() {}
@@ -21,8 +49,14 @@ ${src.match(/function extractCodeBlock[\s\S]*?\n    }/)[0]}
 ${src.match(/function parseSimpleYaml[\s\S]*?\n    }\n\n    function parseOutline/)[0].replace(/\n\n    function parseOutline[\s\S]*$/, '')}
 ${src.match(/function parseOutline[\s\S]*?\n    }/)[0]}
 ${src.match(/function parseInventory[\s\S]*?\n    }/)[0]}
+${qualitySrc}
+${nodeHelpersSrc}
 exports.extractCodeBlock = extractCodeBlock;
 exports.parseSimpleYaml = parseSimpleYaml;
+exports.checkOutlineQuality = checkOutlineQuality;
+exports.nodeText = nodeText;
+exports.nodeTrigger = nodeTrigger;
+exports.nodeId = nodeId;
 exports.parseOutline = parseOutline;
 exports.parseInventory = parseInventory;
 `);
@@ -137,6 +171,53 @@ check('尾逗号容错', inv2.structured !== null && inv2.structured.triggeredNo
 // ---- parseInventory 无 JSON ----
 const inv3 = sandbox.parseInventory('只有文字报告，没有 JSON');
 check('无 JSON 时不崩', inv3.structured === null && typeof inv3.raw === 'string');
+
+// ---- 大纲完整性检查 ----
+// 这套检查存在的理由：块标量那个 bug 把 nodes 整块吞掉，当时只落一句 warn，
+// 事件卡看起来跟正常的一样，用户以为「就是这么设计的」。现在结构缺陷要能自报。
+{
+    const good = {
+        event_brief: '简介', core_truth: '真相',
+        nodes: [{ id: 1, type: '物证', info: '内容' }],
+        min_nodes_for_deduction: [1],
+        characters: { helpers: [{ name: '甲' }] },
+    };
+    const q = sandbox.checkOutlineQuality(good);
+    check('完整大纲判定通过', q.ok === true, JSON.stringify(q.missing));
+    check('完整大纲统计正确', q.summary.includes('节点 1 个'), q.summary);
+}
+{
+    // 块标量 bug 的真实产物：只有 4 个标量键
+    const broken = { event_name: 'x', event_brief: '简介', event_type: '案件', core_truth: '真相' };
+    const q = sandbox.checkOutlineQuality(broken);
+    check('缺节点判定失败', q.ok === false);
+    check('缺失项列出节点', q.missing.some(m => m.includes('nodes')), q.missing.join('；'));
+    check('缺失项列出角色', q.missing.some(m => m.includes('characters')), q.missing.join('；'));
+    check('缺失项列出推理节点', q.missing.some(m => m.includes('min_nodes_for_deduction')), q.missing.join('；'));
+}
+{
+    const q = sandbox.checkOutlineQuality({ nodes: [], characters: {}, min_nodes_for_deduction: [] });
+    check('空节点列表判定失败', q.ok === false);
+    check('节点没有内容也报出', sandbox.checkOutlineQuality({
+        event_brief: 'b', core_truth: 'c', min_nodes_for_deduction: [1], characters: { helpers: [] },
+        nodes: [{ id: 1 }],
+    }).missing.some(m => m.includes('没有内容')));
+}
+{
+    // 实机回归：「入学首日」那次模型用 points_to 写节点正文，旧规则只认 info/desc/content，
+    // 于是 8 个节点全被判成「没有内容」，事件详情页挂着红色警示
+    const withPointsTo = {
+        event_brief: 'b', core_truth: 'c', min_nodes_for_deduction: [1],
+        characters: { helpers: [{ name: '甲' }] },
+        nodes: [
+            { id: 1, type: '环境', trigger: '走廊', points_to: '校规像普通女校', is_misleading: true, refute_by: [4] },
+            { id: 2, type: '物证', trigger: '看证', points_to: '印位全空' },
+        ],
+    };
+    const q = sandbox.checkOutlineQuality(withPointsTo);
+    check('points_to 也算有内容', q.ok === true, JSON.stringify(q.missing));
+    check('points_to 节点被正确识别', sandbox.nodeText(withPointsTo.nodes[0]) === '校规像普通女校');
+}
 
 console.log('');
 console.log(fail === 0 ? '全部通过' : fail + ' 项失败');

@@ -40,6 +40,12 @@
             jiyaoOverviewMax: 60,
             jiyaoRecentRows: 30,
         },
+        worldbook: {
+            // 是否把角色世界书的常驻条目（蓝灯）拼进生成上下文
+            enabled: true,
+            // 字数上限，超出按 order 顺序截断；0 = 不限
+            maxChars: 30000,
+        },
     };
 
     const TRACKER_MODES = {
@@ -77,6 +83,8 @@
      */
     const RUNTIME_LOG_MAX = 500;
     const runtimeLog = [];
+    // 未读错误数：日志页标签上挂红点用，点进日志页就清零
+    let unreadErrors = 0;
 
     // 日志级别：info / warn / error 默认都收；debug 只在设置里打开开关后才收
     const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
@@ -118,11 +126,14 @@
 
     function warn(...args) {
         pushRuntimeLog('warn', args);
+        // 警告也算未读：结构缺失这类问题以前只落 warn，没人看见就等于没报
+        unreadErrors++;
         console.warn(LOG_PREFIX, ...args);
     }
 
     function error(...args) {
         pushRuntimeLog('error', args);
+        unreadErrors++;
         console.error(LOG_PREFIX, ...args);
     }
 
@@ -184,14 +195,42 @@
     function listEvents() {
         const m = getMeta();
         if (!m) return [];
-        return Object.values(m.events).sort((a, b) =>
+        return Object.values(m.events).map(healOutline).sort((a, b) =>
             String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
     }
 
     function getCurrentEvent() {
         const m = getMeta();
         if (!m || !m.currentEventId) return null;
-        return m.events[m.currentEventId] || null;
+        return healOutline(m.events[m.currentEventId] || null);
+    }
+
+    /**
+     * 修复旧事件卡：早期版本的 YAML 解析器不认识 `key: |` 块标量，
+     * 解析结果只剩几个标量键，nodes / characters / paths 全丢。
+     * 原始输出一直完整保存着，这里发现结构不完整就重新解析一次。
+     */
+    function healOutline(event) {
+        if (!event) return event;
+        // 质量判定规则变了（例如模型的节点正文键名是 points_to 而旧规则只认 info），
+        // 旧结论可能已经不成立，按当前规则重判一次，避免红色警示一直挂着
+        if (event.outline) event.parseQuality = checkOutlineQuality(event.outline);
+        if (!event.outlineRaw) return event;
+        const o = event.outline || {};
+        const looksBroken = !Array.isArray(o.nodes) || o.nodes.length === 0;
+        if (!looksBroken) return event;
+        try {
+            const re = parseOutline(event.outlineRaw).parsed;
+            const n = (re && Array.isArray(re.nodes)) ? re.nodes.length : 0;
+            if (n > 0) {
+                event.outline = re;
+                event.parseQuality = checkOutlineQuality(re);
+                log(`事件「${event.name}」的大纲已按新解析器重建：${n} 个信息节点`);
+            }
+        } catch (e) {
+            warn(`事件「${event.name}」的大纲重建失败：${e && e.message || e}`);
+        }
+        return event;
     }
 
     // ==================== 3. 世界书 ====================
@@ -443,6 +482,122 @@
         return ext.world || null;
     }
 
+    // ---------- 世界书常驻条目（生成上下文用） ----------
+
+    /**
+     * 判断一条世界书条目是否该拼进生成上下文。
+     * 只取蓝灯（constant: true，无条件常驻），并剔除三类：
+     *   - TavernDB-ACU-*：shujuku 自动导出的表格副本与包裹标记，
+     *     扩展已通过 collectSheetsFromChat 单独读表，拼进来是重复
+     *   - [mvu_update]* / 变量列表：变量更新格式说明，只服务于主对话的 MVU，不产生剧情设定
+     *   - ▸事件｜*：本扩展自己写的事件条目，拼进去会自我循环
+     * 外加入口带 EJS 条件模板的「状态渲染」条目：它们是按当前变量动态展开的，
+     * 原文里所有分支都在，直接拼会让模型看到没生效的分支。
+     */
+    function shouldIncludeWorldEntry(entry) {
+        if (!entry) return false;
+        if (!entry.constant) return false;
+        if (entry.disable) return false;
+        const comment = String(entry.comment || '');
+        const content = String(entry.content || '');
+        if (comment.startsWith(ENTRY_PREFIX) || content.startsWith(ENTRY_PREFIX)) return false;
+        if (comment.startsWith('TavernDB-ACU-') || content.trim().startsWith('TavernDB-ACU-')) return false;
+        if (content.includes(SHUJUKU_EXPORT_PREFIX)) return false;
+        if (comment.startsWith('[mvu_update]')) return false;
+        if (comment === '变量列表') return false;
+        // EJS 条件模板：原始内容里带 <% %> 说明是按变量展开的状态描述
+        if (content.includes('<%')) return false;
+        if (!content.trim()) return false;
+        return true;
+    }
+
+    /** 从世界书数据里筛出常驻条目，按 order 升序，返回 {entries, dropped} */
+    function pickWorldEntries(data) {
+        const all = Object.values((data && data.entries) || {});
+        const kept = [];
+        let dropped = 0;
+        for (const e of all) {
+            if (shouldIncludeWorldEntry(e)) {
+                kept.push({
+                    uid: e.uid,
+                    comment: String(e.comment || ''),
+                    order: Number(e.order) || 0,
+                    content: String(e.content || '').trim(),
+                });
+            } else if (e && e.constant && !e.disable) {
+                dropped++;
+            }
+        }
+        kept.sort((a, b) => (a.order - b.order) || (a.uid - b.uid));
+        return { entries: kept, dropped };
+    }
+
+    /** 把常驻条目拼成一段文本，超字数上限时按 order 顺序截断 */
+    function buildWorldBookBlock(entries, maxChars) {
+        const lines = [];
+        let used = 0;
+        let kept = 0;
+        let truncated = false;
+        const cap = Number(maxChars) || 0;
+        for (const e of entries) {
+            const piece = `〔${e.comment || '未命名'}〕\n${e.content}`;
+            if (cap > 0 && used + piece.length > cap) { truncated = true; break; }
+            lines.push(piece);
+            used += piece.length;
+            kept++;
+        }
+        return { text: lines.join('\n\n'), used, kept, truncated };
+    }
+
+    /**
+     * 读角色世界书的常驻条目，失败返回 null 并写 warn。
+     * 返回 {bookName, text, kept, dropped, truncated, used}
+     */
+    async function loadWorldBookContext() {
+        const s = getSettings();
+        if (!s.worldbook || s.worldbook.enabled === false) {
+            debug('世界书：设置里已关闭，本次不带设定');
+            return null;
+        }
+        const bookName = getCharacterBookName();
+        if (!bookName) {
+            debug('世界书：当前角色没有绑定世界书');
+            return null;
+        }
+        let data;
+        try {
+            data = await readWorldBook(bookName);
+        } catch (e) {
+            error(`角色世界书「${bookName}」读取失败，本次生成将不含任何设定：${e.message}。`
+                + '生成结果很可能与世界观不符，请检查世界书是否存在或酒馆接口是否正常');
+            return null;
+        }
+        const total = Object.keys((data && data.entries) || {}).length;
+        const picked = pickWorldEntries(data);
+        debug(`世界书「${bookName}」共 ${total} 条，筛选后保留 ${picked.entries.length} 条、剔除 ${picked.dropped} 条`);
+        if (!picked.entries.length) {
+            warn(`角色世界书「${bookName}」有 ${total} 条但筛不出可用的常驻条目，本次生成不含设定`);
+            return null;
+        }
+        const built = buildWorldBookBlock(picked.entries, s.worldbook.maxChars);
+        log(`世界书「${bookName}」带入 ${built.kept} 条常驻设定，共 ${built.used} 字`
+            + (picked.dropped ? `，剔除 ${picked.dropped} 条技术或重复条目` : '')
+            + (built.truncated ? `，已达 ${s.worldbook.maxChars} 字上限并截断` : ''));
+        if (built.truncated) {
+            warn(`世界书超出 ${s.worldbook.maxChars} 字上限，后面的条目没有带进去，可在设置里调高上限或精简条目`);
+        }
+        debug(`世界书带入条目：${built.kept ? '' : '（空）'}` + picked.entries.slice(0, built.kept)
+            .map(e => e.comment).join('、'));
+        return {
+            bookName,
+            text: built.text,
+            kept: built.kept,
+            dropped: picked.dropped,
+            truncated: built.truncated,
+            used: built.used,
+        };
+    }
+
     // ==================== 4. 记忆适配器 ====================
 
     const MODE_LABEL = {
@@ -475,7 +630,9 @@
                     for (const e of sorted) {
                         for (const op of (e.operations || [])) {
                             if (op && op.sheetKey && op.sheet && op.sheet.content) {
-                                result.set(op.sheetKey, op.sheet);
+                                // 楼层是从新到旧遍历的，第一次遇到即最新快照；
+                                // 后面更旧的楼层会带同一张表的旧版本，不能覆盖
+                                if (!result.has(op.sheetKey)) result.set(op.sheetKey, op.sheet);
                             }
                         }
                     }
@@ -522,7 +679,10 @@
     /** 解析纪要表二维数组 -> [{code, span, summary, text}] */
     function parseChronicle(sheet) {
         const content = sheet && sheet.content;
-        if (!Array.isArray(content) || content.length < 2) return [];
+        if (!Array.isArray(content) || content.length < 2) {
+            debug('纪要表解析：没有表数据或只有表头，跳过');
+            return [];
+        }
         const header = content[0].map(x => String(x || '').trim());
         const idx = name => header.findIndex(h => h.includes(name));
         const iCode = idx('编码');
@@ -530,12 +690,26 @@
         const iSum = idx('概览');
         const iText = idx('纪要');
 
+        // 表头认不出来是严重问题：字段会按错误的列取，纪要内容会串行
+        if (iCode < 0) {
+            error(`纪要表表头里找不到「编码」列，当前表头：${header.join('｜') || '（空）'}。`
+                + '列会按位置兜底取，纪要内容可能取错列');
+        }
+        const missingCols = [];
+        if (iSpan < 0) missingCols.push('时间跨度');
+        if (iSum < 0) missingCols.push('概览');
+        if (iText < 0) missingCols.push('纪要');
+        if (missingCols.length) {
+            warn(`纪要表缺少列：${missingCols.join('、')}，这些字段会按位置兜底取。表头：${header.join('｜')}`);
+        }
+
         const rows = [];
+        let skipped = 0;
         for (let i = 1; i < content.length; i++) {
             const r = content[i];
-            if (!Array.isArray(r)) continue;
+            if (!Array.isArray(r)) { skipped++; continue; }
             const code = String(r[iCode >= 0 ? iCode : 1] || '').trim();
-            if (!code) continue;
+            if (!code) { skipped++; continue; }
             rows.push({
                 code,
                 span: String(r[iSpan >= 0 ? iSpan : 2] || '').trim(),
@@ -543,6 +717,11 @@
                 text: String(r[iText >= 0 ? iText : 4] || '').trim(),
             });
         }
+        const emptyText = rows.filter(r => !r.text).length;
+        if (emptyText) {
+            warn(`纪要表有 ${emptyText} 条记录的「纪要」列是空的，这些条目对生成没有参考价值`);
+        }
+        debug(`纪要表解析：共 ${content.length - 1} 行数据，采用 ${rows.length} 条，跳过 ${skipped} 行（无编码或不是数组）`);
         return rows;
     }
 
@@ -949,7 +1128,7 @@
         ].join('\n');
     }
 
-    function buildOutlinePrompt(eventName, prefs) {
+    function buildOutlinePrompt(eventName, prefs, worldBook, contextText) {
         const named = String(eventName || '').trim();
         const head = named
             ? `OOC: 暂停扮演。为即将开始的【${named}】生成完整结构大纲，用 YAML 输出，包含：`
@@ -963,6 +1142,7 @@
             nameLine,
             '1. 事件类型与核心真相：判断本事件属于哪类（案件/谈判/探险/危机/社交博弈/其他），写出核心真相或隐情（仅记录，后续不得直接透露）',
             '2. 信息节点清单：按发现顺序列 5-8 条，每条含编号（从 1 开始）、类型（物证/证言/环境/时间线/关系）、触发关键词、指向的信息或后果',
+            '   节点字段名固定用：id（编号，数字）、type（类型）、trigger（触发关键词或触发条件）、info（指向的信息或后果）、refute_by（可选，这条是误导时填可推翻它的节点编号数组）',
             '   另外单独输出「推进所需最少信息节点编号」：只列出推理必需的最少节点编号',
             '3. 参与角色：按立场分类——',
             '   a. 助力者：每个助力者的动机须各不相同（利益一致/情感羁绊/交易/被迫/其他），并标明是否有条件或代价。同阵营且利益一致者可以无条件；交易或被迫者须写明代价。按实际情况判断，不要为所有助力者统一附加条件',
@@ -980,7 +1160,32 @@
             '- 允许根据当前情况设计大纲之外的合理路径，但每条必须标注「【大纲外】」并说明为什么现在会出现这条路径',
             '',
             '输出格式：只输出一个 YAML 代码块，顶层键为 event_name / event_brief / event_type / core_truth / nodes / min_nodes_for_deduction / characters / paths / forbidden。',
+            '',
+            '---',
+            '【世界观设定】（角色世界书的常驻条目，本世界的规则与设定，所有内容必须与之相容）',
+            worldBook || '（未加载）',
+            '',
+            '【当前剧情】',
+            contextText || '（无）',
         ].join('\n');
+    }
+
+    /** 生成大纲时的剧情上下文：纪要（概览或正文）+ 最近楼层 */
+    function buildOutlineContextText(ctxParts) {
+        const parts = [];
+        if (ctxParts.jiyaoList) {
+            parts.push('【纪要概览】（shujuku 纪要，编号 AMxxxx）');
+            parts.push(ctxParts.jiyaoList);
+        }
+        if (ctxParts.jiyaoDetail) {
+            parts.push('【纪要正文】');
+            parts.push(ctxParts.jiyaoDetail);
+        }
+        if (ctxParts.recentChat) {
+            parts.push('【最近剧情】');
+            parts.push(ctxParts.recentChat);
+        }
+        return parts.join('\n\n') || '（无）';
     }
 
     function buildInventorySystemPrompt() {
@@ -1017,6 +1222,9 @@
         parts.push('```');
         parts.push('');
         parts.push('---');
+        parts.push('【世界观设定】（角色世界书的常驻条目，本世界的规则与设定，所有内容必须与之相容）');
+        parts.push(ctxParts.worldBook || '（未加载）');
+        parts.push('');
         parts.push('【事件状态卡】');
         parts.push(ctxParts.stateCard || '（无）');
         if (ctxParts.jiyaoList) {
@@ -1097,10 +1305,10 @@
             const triggered = new Set(event.tracker && event.tracker.triggeredNodes || []);
             lines.push('节点清单：');
             for (const n of nodes) {
-                const id = n.id != null ? n.id : n.index;
+                const id = nodeId(n);
                 const mark = triggered.has(Number(id)) ? '已触发' : '未触发';
-                lines.push(` ${id}. ${n.type || ''}${n.desc || n.info || n.content || ''} —— ${mark}`
-                    + (n.keyword || n.keywords ? `（触发词：${n.keyword || n.keywords}）` : ''));
+                lines.push(` ${id}. ${n.type || ''}${nodeText(n)} —— ${mark}`
+                    + (nodeTrigger(n) ? `（触发词：${nodeTrigger(n)}）` : ''));
             }
         }
         if (event.outline && event.outline.min_nodes_for_deduction) {
@@ -1124,14 +1332,31 @@
         debug(`拼装上下文：适配器=${resolved.adapter.id}，降级=${!!resolved.degraded}`);
         const out = {
             stateCard: buildStateCard(event),
+            worldBook: '',
             jiyaoList: '',
             jiyaoDetail: '',
             recentChat: '',
             adapterId: resolved.adapter.id,
         };
 
+        // 第一层半：角色世界书的常驻设定（蓝灯）。generateRaw 不自动带世界书，必须自己拼
+        step('读取角色世界书');
+        try {
+            const wb = await loadWorldBookContext();
+            if (wb) {
+                out.worldBook = wb.text;
+                step(`世界书已载入：${wb.kept} 条常驻设定，${wb.used} 字`);
+            } else {
+                step('世界书：未启用或没有可用条目');
+            }
+        } catch (e) {
+            warn('世界书带入失败，本次不带设定', e);
+            step('世界书读取失败，已跳过');
+        }
+
         // 第二层：记忆召回
         if (resolved.adapter.id === 'shujuku-jiyao' && resolved.adapter.rows) {
+            step('读取 shujuku 纪要');
             try {
                 const rows = resolved.adapter.rows();
                 const mode = resolved.adapter.mode ? resolved.adapter.mode() : null;
@@ -1142,21 +1367,38 @@
                     const head = rows.slice(0, Math.max(1, Number(s.memory.jiyaoOverviewMax) || 60));
                     out.jiyaoList = head.map(r => `${r.code}｜${r.span}｜${r.summary}`).join('\n');
                     out.jiyaoDetail = '';
+                    log(`纪要召回：LLM 模式，共 ${rows.length} 条，带入前 ${head.length} 条概览供点名`);
                 } else {
                     // 固定窗口：直接给最近 N 条正文
                     const tail = rows.slice(-recentRows);
                     out.jiyaoList = '';
                     out.jiyaoDetail = tail.map(r => `${r.code}｜${r.span}\n${r.text}`).join('\n\n');
+                    log(`纪要召回：${MODE_LABEL[mode] || mode || '未知'}模式，共 ${rows.length} 条，带入最近 ${tail.length} 条正文`);
                 }
             } catch (e) {
                 warn('纪要读取失败，降级为纯楼层', e);
+                step('纪要读取失败，已降级为纯楼层');
             }
         }
 
         // 第三层：最近楼层
         const floors = Math.max(1, Number(s.memory.recentFloors) || 15);
+        step(`读取最近 ${floors} 楼`);
         out.recentChat = await collectRecentFloors(floors);
-        debug(`上下文规模：纪要概览 ${out.jiyaoList.length} 字、纪要正文 ${out.jiyaoDetail.length} 字、最近楼层 ${floors} 楼共 ${out.recentChat.length} 字`);
+        step(`最近剧情已载入：${out.recentChat.length} 字`);
+        if (!out.recentChat.length) {
+            error('上下文的最近楼层是空的，模型将只能凭世界书和纪要发挥；请确认当前对话有内容');
+        }
+
+        // 汇总一行，一眼看清这次到底喂了什么
+        const total = out.worldBook.length + out.stateCard.length
+            + out.jiyaoList.length + out.jiyaoDetail.length + out.recentChat.length;
+        log(`上下文汇总：世界书 ${out.worldBook.length} 字、事件卡 ${out.stateCard.length} 字、`
+            + `纪要概览 ${out.jiyaoList.length} 字、纪要正文 ${out.jiyaoDetail.length} 字、`
+            + `最近楼层 ${floors} 楼共 ${out.recentChat.length} 字，合计 ${total} 字`);
+        if (total < 500) {
+            warn(`上下文总量只有 ${total} 字，模型可参考的信息很少，生成结果可能凭空发挥`);
+        }
         return out;
     }
 
@@ -1189,13 +1431,18 @@
             || { id: 'main', name: '跟随酒馆主连接', mode: 'main' };
         const t0 = Date.now();
         debug(`调用模型：配置「${profile.name || profile.id}」（mode=${profile.mode || 'main'}），system ${String(systemPrompt).length} 字，prompt ${String(prompt).length} 字`);
+        if (busy && progress.startedAt) {
+            step(`请求模型（「${profile.name || profile.id}」，输入约 ${Math.round((String(systemPrompt).length + String(prompt).length) / 1000)} 千字）`);
+        }
 
         const finish = (out) => {
             log(`模型返回：${String(out || '').length} 字，耗时 ${((Date.now() - t0) / 1000).toFixed(1)} 秒`);
+            if (busy && progress.startedAt) step(`模型已返回 ${String(out || '').length} 字`);
             return out;
         };
         const failed = (e) => {
             error(`调用模型失败（耗时 ${((Date.now() - t0) / 1000).toFixed(1)} 秒）：${e && e.message || e}`);
+            if (busy && progress.startedAt) step(`模型调用失败：${(e && e.message) || e}`);
             throw e;
         };
 
@@ -1341,8 +1588,44 @@
             lines.push({ indent: s.length - s.trimStart().length, text: trimmed });
         }
 
+        // 块标量（| 或 >）的后续行必须以原样保留缩进与空行，不能走上面的通用预处理。
+        // 先标记出哪些行属于块标量正文，后面统一跳过。
+        const isBlockHeader = (t) => /^[|>][+-]?\d*$/.test(t) || /^[|>][+-]?$/.test(t);
+        const blockBody = new Array(lines.length).fill(false);
+        for (let i = 0; i < lines.length; i++) {
+            const kv = lines[i].text.match(/^[^:]+:\s*([|>][+-]?)\s*$/);
+            if (!kv) continue;
+            const baseIndent = lines[i].indent;
+            for (let j = i + 1; j < lines.length; j++) {
+                if (lines[j].indent <= baseIndent) break;
+                blockBody[j] = true;
+            }
+        }
+
         // 找某层第一个真实子节点类型，决定容器是 map 还是 list
         let pos = 0;
+
+        /**
+         * 读取块标量正文：从当前 pos 起，把所有缩进大于 baseIndent 的行原样取出。
+         * 去掉公共缩进，| 保留换行、> 折成空格。
+         */
+        function readBlockScalar(baseIndent, marker) {
+            const buffer = [];
+            while (pos < lines.length && lines[pos].indent > baseIndent) {
+                buffer.push(lines[pos]);
+                pos++;
+            }
+            if (!buffer.length) return '';
+            const minIndent = Math.min.apply(null, buffer.map(l => l.indent));
+            const texts = buffer.map(l => ' '.repeat(Math.max(0, l.indent - minIndent)) + l.text);
+            if (marker.startsWith('>')) {
+                return texts.join(' ').replace(/\s+/g, ' ').trim();
+            }
+            return texts.join('\n').replace(/\s+$/, '');
+        }
+
+        /** 值是否为块标量标记 */
+        const isBlockMarker = (v) => /^[|>][+-]?\d*$/.test(String(v || '').trim());
 
         function parseBlock(parentIndent) {
             // 窥探首个有效子行的缩进与形态
@@ -1381,6 +1664,8 @@
                         if (valStr === '') {
                             const child = parseBlock(childIndent);
                             itemObj[key] = child === null ? null : child;
+                        } else if (isBlockMarker(valStr)) {
+                            itemObj[key] = readBlockScalar(childIndent, String(valStr).trim());
                         } else {
                             itemObj[key] = unquote(valStr);
                         }
@@ -1397,6 +1682,8 @@
                             if (v2 === '') {
                                 const child = parseBlock(subIndent);
                                 itemObj[k2] = child === null ? null : child;
+                            } else if (isBlockMarker(v2)) {
+                                itemObj[k2] = readBlockScalar(subIndent, String(v2).trim());
                             } else {
                                 itemObj[k2] = unquote(v2);
                             }
@@ -1422,6 +1709,8 @@
                 if (valStr === '') {
                     const child = parseBlock(childIndent);
                     obj[key] = child === null ? null : child;
+                } else if (isBlockMarker(valStr)) {
+                    obj[key] = readBlockScalar(childIndent, String(valStr).trim());
                 } else {
                     obj[key] = unquote(valStr);
                 }
@@ -1438,15 +1727,64 @@
         const parsed = parseSimpleYaml(block);
         const hasYaml = !!extractCodeBlock(raw, 'yaml');
         const nodeCount = (parsed && Array.isArray(parsed.nodes)) ? parsed.nodes.length : 0;
+        const keys = Object.keys(parsed || {});
+        const quality = checkOutlineQuality(parsed);
+
+        debug(`大纲解析：原文 ${String(raw || '').length} 字，YAML 块${hasYaml ? '命中' : '未命中（整段兜底）'}，`
+            + `顶层键 ${keys.length} 个：${keys.join('、') || '无'}，节点 ${nodeCount} 个`);
         if (hasYaml) {
-            debug(`大纲解析：命中 yaml 代码块，节点 ${nodeCount} 个，顶层键 ${Object.keys(parsed || {}).join('、') || '无'}`);
+            log(`大纲解析成功：节点 ${nodeCount} 个，顶层键 ${keys.length} 个`);
         } else {
             warn(`大纲解析：模型没有返回 yaml 代码块，已把整段回复当 YAML 兜底解析，节点 ${nodeCount} 个`);
         }
-        if (!nodeCount) {
-            warn('大纲解析结果里没有节点（nodes 为空或缺失），这次生成的大纲可能不可用');
+
+        // 结构缺陷逐条报出：以前这里只报「没有节点」一句，键整块丢失不吭声，出了问题查不出来
+        if (quality.missing.length) {
+            warn(`大纲结构缺失：${quality.missing.join('；')}。这通常意味着模型没按格式输出，或解析器不认识某种写法`);
         }
-        return { parsed: parsed || {}, raw: String(raw || ''), fromFallback: !hasYaml };
+        if (!nodeCount) {
+            error('大纲里没有解析出任何信息节点，这次生成的事件卡将无法跟踪进度。'
+                + `原始输出前 200 字：${String(raw || '').slice(0, 200)}`);
+        }
+        if (quality.ok) {
+            log(`大纲完整性检查通过：${quality.summary}`);
+        } else {
+            error(`大纲完整性检查未通过：${quality.summary}`);
+        }
+        return { parsed: parsed || {}, raw: String(raw || ''), fromFallback: !hasYaml, quality };
+    }
+
+    /**
+     * 检查大纲结构是否完整。返回 {ok, missing[], summary}。
+     * 这里只判断，不修复——解析器出错时要让用户立刻看见，而不是静默降级。
+     */
+    function checkOutlineQuality(parsed) {
+        const o = parsed || {};
+        const missing = [];
+        const nodes = Array.isArray(o.nodes) ? o.nodes : null;
+        if (!nodes) missing.push('信息节点（nodes）缺失或不是列表');
+        else if (!nodes.length) missing.push('信息节点（nodes）是空列表');
+        else {
+            const badId = nodes.filter(n => nodeId(n) == null);
+            if (badId.length) missing.push(`${badId.length} 个节点没有编号`);
+            const noInfo = nodes.filter(n => !nodeText(n));
+            if (noInfo.length) missing.push(`${noInfo.length} 个节点没有内容`);
+        }
+        const minNodes = o.min_nodes_for_deduction;
+        if (!minNodes) missing.push('推理必需节点（min_nodes_for_deduction）缺失');
+        const chars = o.characters;
+        if (!chars) missing.push('参与角色（characters）缺失');
+        else if (typeof chars === 'object' && !Object.keys(chars).length) missing.push('参与角色是空对象');
+        if (!o.event_brief) missing.push('事件简介（event_brief）缺失');
+        if (!o.core_truth) missing.push('核心真相（core_truth）缺失');
+
+        const nodeN = nodes ? nodes.length : 0;
+        const charN = (chars && typeof chars === 'object')
+            ? Object.values(chars).reduce((a, v) => a + (Array.isArray(v) ? v.length : 0), 0) : 0;
+        const summary = `节点 ${nodeN} 个、角色 ${charN} 人、`
+            + `推理必需节点 ${Array.isArray(minNodes) ? minNodes.length : 0} 个、`
+            + `顶层键 ${Object.keys(o).length} 个`;
+        return { ok: missing.length === 0, missing, summary };
     }
 
     function parseInventory(raw) {
@@ -1479,12 +1817,292 @@
 
     let busy = false;
 
-    function setBusy(on) {
+    function setBusy(on, keepProgress) {
         busy = on;
         if (panelEl) {
             const b = panelEl.querySelector('#eo_busy');
             if (b) b.style.display = on ? 'block' : 'none';
         }
+        if (!on && !keepProgress) {
+            resetProgress();
+        } else if (!on && keepProgress) {
+            // 跑完了：停掉计时器，保留进度列表让人看清各步耗时，几秒后变淡
+            if (progress.timer) { clearInterval(progress.timer); progress.timer = null; }
+            const box = panelEl && panelEl.querySelector('#eo_progress');
+            if (box) {
+                const t = box.querySelector('.eo-progress-timer');
+                if (t) t.textContent = `共用时 ${Math.floor((Date.now() - progress.startedAt) / 1000)} 秒`;
+            }
+        }
+    }
+
+    // ---------- 字段中文对照（界面展示用，模型返回的键名不暴露给用户） ----------
+
+    const OUTLINE_KEY_LABEL = {
+        event_name: '事件名',
+        event_brief: '事件简介',
+        event_type: '事件类型',
+        core_truth: '核心真相',
+        nodes: '信息节点',
+        min_nodes_for_deduction: '推理必需节点',
+        characters: '参与角色',
+        paths: '推进路径',
+        forbidden: '禁止事项',
+        helpers: '助力者',
+        obstructers: '阻碍者',
+        informants: '知情者',
+        behind_scenes: '幕后方',
+        name: '名字',
+        role: '身份',
+        motive_type: '动机类型',
+        motive_detail: '动机详述',
+        conditions: '条件与代价',
+        note: '备注',
+        reason: '阻碍理由',
+        resolvable_by: '化解方式',
+        info_known: '掌握的信息',
+        reveal: '揭示条件',
+        reveal_condition: '揭示条件',
+        id: '编号',
+        type: '类型',
+        trigger: '触发条件',
+        info: '信息内容',
+        consequence: '后果',
+        refute_by: '可被节点推翻',
+        keyword: '触发词',
+        keywords: '触发词',
+        desc: '描述',
+        step: '步骤',
+        detail: '说明',
+        required_nodes: '必经节点',
+        optional_nodes: '可跳过节点',
+        risk: '风险',
+        failure: '失败后果',
+    };
+
+    const NODE_TYPE_LABEL = {
+        物证: '物证', 证言: '证言', 环境: '环境', 时间线: '时间线', 关系: '关系',
+        evidence: '物证', testimony: '证言', environment: '环境', timeline: '时间线', relation: '关系',
+    };
+
+    const EVENT_TYPE_LABEL = {
+        案件: '案件', 谈判: '谈判', 探险: '探险', 危机: '危机', 社交博弈: '社交博弈', 其他: '其他',
+        case: '案件', negotiation: '谈判', exploration: '探险', crisis: '危机', social: '社交博弈', other: '其他',
+    };
+
+    /** 键名转中文，认不出就保留原样 */
+    function labelOf(key) {
+        const k = String(key || '');
+        return OUTLINE_KEY_LABEL[k] || OUTLINE_KEY_LABEL[k.toLowerCase()] || k;
+    }
+
+    /**
+     * 把大纲结构渲染成人类可读的中文文本块，替代直接展示原始 YAML。
+     * 解析失败时返回 null，由调用方退回显示原文。
+     */
+    function renderOutlineText(outline) {
+        if (!outline || typeof outline !== 'object') return null;
+        const lines = [];
+
+        if (outline.event_brief) lines.push(`一句话简介：${outline.event_brief}`);
+        const et = outline.event_type;
+        if (et) {
+            if (typeof et === 'string') {
+                lines.push(`事件类型：${EVENT_TYPE_LABEL[et] || et}`);
+            } else {
+                const main = et.primary || et.main || '';
+                const subs = Array.isArray(et.secondary) ? et.secondary : (Array.isArray(et.sub) ? et.sub : []);
+                const mainText = EVENT_TYPE_LABEL[main] || main;
+                lines.push(`事件类型：${mainText}${subs.length ? '（兼 ' + subs.join('、') + '）' : ''}`);
+            }
+        }
+        if (outline.core_truth) {
+            lines.push('');
+            lines.push('核心真相（仅你知道，不会被透露给角色）：');
+            lines.push(String(outline.core_truth).trim());
+        }
+
+        const nodes = Array.isArray(outline.nodes) ? outline.nodes : [];
+        if (nodes.length) {
+            lines.push('');
+            lines.push(`信息节点（共 ${nodes.length} 条，按发现顺序）：`);
+            for (const n of nodes) {
+                const id = nodeId(n);
+                const type = NODE_TYPE_LABEL[n.type] || n.type || '';
+                lines.push(`${id}.〔${type}〕${nodeText(n)}`);
+                if (nodeTrigger(n)) {
+                    lines.push(`   触发：${nodeTrigger(n)}`);
+                }
+                if (n.consequence) lines.push(`   后果：${n.consequence}`);
+                if (n.refute_by != null) lines.push(`   可推翻误导：指向节点 ${Array.isArray(n.refute_by) ? n.refute_by.join('、') : n.refute_by}`);
+            }
+        }
+
+        const minNodes = outline.min_nodes_for_deduction;
+        if (minNodes) {
+            const arr = Array.isArray(minNodes) ? minNodes : [minNodes];
+            lines.push('');
+            lines.push(`推理必需节点：${arr.join('、')}（集齐这些就足以推出核心真相）`);
+        }
+
+        const chars = outline.characters;
+        if (chars && typeof chars === 'object') {
+            lines.push('');
+            lines.push('参与角色：');
+            for (const [side, list] of Object.entries(chars)) {
+                const sideLabel = labelOf(side);
+                if (!Array.isArray(list) || !list.length) continue;
+                lines.push(`  ${sideLabel}：`);
+                for (const c of list) {
+                    const head = [c.name || c.角色 || '未命名', c.role ? `（${c.role}）` : ''].join('');
+                    lines.push(`    · ${head}`);
+                    if (c.motive_detail || c.motive_type) {
+                        lines.push(`      动机：${[c.motive_type, c.motive_detail].filter(Boolean).join('——')}`);
+                    }
+                    if (c.reason) lines.push(`      阻碍理由：${c.reason}`);
+                    if (c.resolvable_by) lines.push(`      化解方式：${c.resolvable_by}`);
+                    if (c.conditions) lines.push(`      条件：${c.conditions}`);
+                    if (c.info_known) lines.push(`      掌握信息：${c.info_known}`);
+                    if (c.note) lines.push(`      备注：${c.note}`);
+                }
+            }
+        }
+
+        const paths = Array.isArray(outline.paths) ? outline.paths : [];
+        if (paths.length) {
+            lines.push('');
+            lines.push(`推进路径（共 ${paths.length} 步）：`);
+            paths.forEach((p, i) => {
+                if (typeof p === 'string') { lines.push(`  ${i + 1}. ${p}`); return; }
+                const title = p.step || p.desc || p.name || `第 ${i + 1} 步`;
+                lines.push(`  ${i + 1}. ${title}`);
+                if (p.detail) lines.push(`     ${p.detail}`);
+                if (p.required_nodes) lines.push(`     必经节点：${Array.isArray(p.required_nodes) ? p.required_nodes.join('、') : p.required_nodes}`);
+                if (p.risk) lines.push(`     风险：${p.risk}`);
+                if (p.failure) lines.push(`     失败后果：${p.failure}`);
+            });
+        }
+
+        if (outline.forbidden) {
+            lines.push('');
+            const f = outline.forbidden;
+            lines.push('禁止事项：');
+            const list = Array.isArray(f) ? f : String(f).split('\n');
+            for (const x of list) if (String(x).trim()) lines.push(`  - ${String(x).trim()}`);
+        }
+
+        return lines.length ? lines.join('\n') : null;
+    }
+
+    // 模型给节点正文起的键名不稳定（info / desc / content / points_to…），统一取
+    const NODE_TEXT_KEYS = ['info', 'desc', 'content', 'points_to', 'point_to', 'pointsTo', 'detail', 'description', 'what', 'reveal'];
+    const NODE_TRIGGER_KEYS = ['trigger', 'keyword', 'keywords', 'trigger_keyword', 'when'];
+
+    /** 取节点正文，取不到返回空串 */
+    function nodeText(n) {
+        if (!n || typeof n !== 'object') return '';
+        for (const k of NODE_TEXT_KEYS) {
+            const v = n[k];
+            if (v != null && String(v).trim()) return String(v).trim();
+        }
+        return '';
+    }
+
+    /** 取节点触发条件，取不到返回空串 */
+    function nodeTrigger(n) {
+        if (!n || typeof n !== 'object') return '';
+        for (const k of NODE_TRIGGER_KEYS) {
+            const v = n[k];
+            if (v != null && String(v).trim()) {
+                return Array.isArray(v) ? v.join('、') : String(v).trim();
+            }
+        }
+        return '';
+    }
+
+    /** 取节点编号 */
+    function nodeId(n) {
+        if (!n || typeof n !== 'object') return null;
+        const v = n.id != null ? n.id : n.index;
+        return v == null ? null : Number(v);
+    }
+
+    /** HTML 转义，进度条等少量需要拼字符串的地方用 */
+    function escapeHtml(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    // ---------- 生成进度 ----------
+    // 生成一次大纲要跑好几步（读世界书、读纪要、拉楼层、请模型、解析），
+    // 每步耗时从几毫秒到几十秒不等，只显示「生成中」用户无法判断卡没卡死。
+    const progress = { steps: [], startedAt: 0, timer: null };
+
+    function resetProgress() {
+        progress.steps = [];
+        progress.startedAt = 0;
+        if (progress.timer) { clearInterval(progress.timer); progress.timer = null; }
+    }
+
+    /** 开始一次带进度的操作，返回 step 函数 */
+    function startProgress(title) {
+        resetProgress();
+        progress.startedAt = Date.now();
+        progress.title = title;
+        renderProgress();
+        // 每秒刷新一次耗时，让用户看到时间在走
+        progress.timer = setInterval(() => {
+            const box = panelEl && panelEl.querySelector('#eo_progress');
+            if (!box) return;
+            const sec = Math.floor((Date.now() - progress.startedAt) / 1000);
+            const el2 = box.querySelector('.eo-progress-timer');
+            if (el2) el2.textContent = `已用时 ${sec} 秒`;
+        }, 1000);
+        return step;
+    }
+
+    /** 推进到某一步。done=true 表示该步完成，否则标记为进行中 */
+    function step(text, done) {
+        const last = progress.steps[progress.steps.length - 1];
+        if (last && !last.done) {
+            last.done = true;
+            last.ms = Date.now() - last.at;
+        }
+        if (text) progress.steps.push({ text, at: Date.now(), done: !!done });
+        renderProgress();
+    }
+
+    function renderProgress() {
+        if (!panelEl) return;
+        // 进度条挂在操作按钮下方：找当前页的锚点，找不到才退回面板顶部
+        const host = panelEl.querySelector('#eo_progress_host');
+        let box = document.getElementById('eo_progress');
+        if (!box) {
+            box = document.createElement('div');
+            box.id = 'eo_progress';
+            box.className = 'eo-progress';
+        }
+        if (host) {
+            if (box.parentNode !== host) host.appendChild(box);
+        } else if (box.parentNode !== panelEl.querySelector('#eo_body')) {
+            const busyEl = panelEl.querySelector('#eo_busy');
+            if (busyEl && busyEl.parentNode) busyEl.parentNode.insertBefore(box, busyEl);
+        }
+        box.innerHTML = buildProgressHtml();
+        box.style.display = progress.steps.length ? 'block' : 'none';
+    }
+
+    function buildProgressHtml() {
+        const sec = Math.floor((Date.now() - progress.startedAt) / 1000);
+        const rows = progress.steps.map((s) => {
+            const mark = s.done ? '✓' : '⋯';
+            const cost = s.done && s.ms != null ? `　${(s.ms / 1000).toFixed(1)} 秒` : '';
+            return `<div class="eo-progress-row${s.done ? ' eo-progress-done' : ''}">`
+                + `<span class="eo-progress-mark">${mark}</span>${escapeHtml(s.text)}${cost}</div>`;
+        }).join('');
+        return `<div class="eo-progress-head">${escapeHtml(progress.title || '处理中')}`
+            + `　<span class="eo-progress-timer">已用时 ${sec} 秒</span></div>${rows}`;
     }
 
     function genEventId() {
@@ -1521,10 +2139,23 @@
 
         setBusy(true);
         try {
+            startProgress('正在生成事件大纲');
+            step('准备提示词');
             const systemPrompt = buildOutlineSystemPrompt();
-            const prompt = buildOutlinePrompt(eventName, prefs);
+            // 生成大纲同样需要剧情上下文与世界设定：楼层 + 纪要 + 世界书
+            const ctxParts = await gatherContext(null);
+            step('组装最终 prompt');
+            const prompt = buildOutlinePrompt(eventName, prefs, ctxParts.worldBook, buildOutlineContextText(ctxParts));
             const raw = await callModel(systemPrompt, prompt);
-            const { parsed, raw: rawText } = parseOutline(raw);
+            step('解析模型返回的大纲');
+            const { parsed, raw: rawText, quality } = parseOutline(raw);
+            const nodeCount = (parsed && Array.isArray(parsed.nodes)) ? parsed.nodes.length : 0;
+            step(`解析完成：${nodeCount} 个信息节点`
+                + (nodeCount ? '' : '（未识别到节点，原始输出可在日志页查看）'));
+            // 结构残缺时，「解析完成」后面要跟一条醒目的步骤，让用户当场看见
+            if (quality && !quality.ok) {
+                step(`⚠ 结构不完整：${quality.missing.join('；')}`);
+            }
 
             const id = genEventId();
             const meta = getMeta();
@@ -1558,6 +2189,8 @@
                 })(),
                 outline: parsed,
                 outlineRaw: rawText,
+                // 解析质量留档：事后在事件详情页能看到这次生成到底缺了什么
+                parseQuality: quality,
                 tracker: {
                     triggeredNodes: [],
                     pendingNodes: [],
@@ -1585,7 +2218,7 @@
             saveMeta();
             return event;
         } finally {
-            setBusy(false);
+            setBusy(false, true);
         }
     }
 
@@ -1596,11 +2229,15 @@
 
         setBusy(true);
         try {
+            startProgress('正在盘点事件状态');
+            step('准备提示词');
             const parts = await gatherContext(event);
             const systemPrompt = buildInventorySystemPrompt();
             const prompt = buildInventoryPrompt(parts);
             const raw = await callModel(systemPrompt, prompt);
+            step('解析盘点结果');
             const { structured, raw: rawText } = parseInventory(raw);
+            step(structured ? '结构化结果解析成功' : '未解析到结构化结果，仅保留文字报告');
 
             const round = (event.inventories || []).length + 1;
             const record = {
@@ -1673,7 +2310,7 @@
             saveMeta();
             return { record, event };
         } finally {
-            setBusy(false);
+            setBusy(false, true);
         }
     }
 
@@ -1835,6 +2472,14 @@
 }
 .eo-busy{display:none;padding:8px 12px;background:#fff3d6;border-bottom:1px solid rgba(184,134,11,.3);
   color:#8a5b00;font-size:12px;text-align:center;}
+.eo-progress{display:none;padding:8px 12px;background:#f6f8fa;border-bottom:1px solid rgba(0,0,0,.08);
+  font-size:12px;transition:opacity .6s;}
+.eo-progress-head{color:#333;font-weight:600;margin-bottom:4px;}
+.eo-progress-timer{color:#888;font-weight:400;}
+.eo-progress-row{color:#666;line-height:1.7;padding-left:2px;}
+.eo-progress-mark{display:inline-block;width:14px;color:#b8860b;}
+.eo-progress-done{color:#38761d;}
+.eo-progress-done .eo-progress-mark{color:#38761d;}
 .eo-head{display:flex;align-items:center;gap:8px;padding:12px 20px;user-select:none;
   background:linear-gradient(160deg,#fff3d6,#f5d080);border-bottom:1px solid rgba(184,134,11,.4);}
 .eo-title{font-weight:700;flex:1;}
@@ -1856,6 +2501,8 @@
   border-radius:8px;padding:7px 9px;margin-bottom:9px;font-size:12px;}
 .eo-ok{color:#2c6e2c;}
 .eo-bad{color:#a11;font-size:12px;}
+.eo-bad-box{color:#8b0000;background:#fdecea;border:1px solid #e7a9a3;
+  border-radius:8px;padding:8px 10px;margin-bottom:9px;font-size:12px;line-height:1.6;}
 select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11,.45);
   background:#fffdf7;color:#3c2f14;font-size:13px;}
 .eo-sec{border-top:1px dashed rgba(184,134,11,.35);margin:10px 0 6px;padding-top:8px;
@@ -1871,6 +2518,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
   font-weight:700;border-bottom:2px solid #b8860b;margin-bottom:-1px;}
 .eo-badge{background:#b8860b;color:#fff;border-radius:9px;padding:0 6px;
   font-size:11px;line-height:16px;min-width:16px;text-align:center;font-weight:600;}
+.eo-badge-err{background:#c0392b;}
 .eo-page{display:block;}
 
 /* 折叠块 */
@@ -2362,8 +3010,15 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     b.appendChild(badge);
                 }
             }
+            // 日志页出错时挂红点：不能等人自己去翻日志才发现解析失败
+            if (t.key === 'log' && unreadErrors > 0) {
+                const badge = el('span', 'eo-badge eo-badge-err');
+                badge.textContent = unreadErrors > 99 ? '99+' : String(unreadErrors);
+                b.appendChild(badge);
+            }
             b.addEventListener('click', () => {
                 activeTab = t.key;
+                if (t.key === 'log') unreadErrors = 0;
                 renderPanel();
             });
             tabBar.appendChild(b);
@@ -2443,10 +3098,28 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             page.appendChild(row);
             page.appendChild(opOut);
 
-            // 大纲原文折叠
+            // 大纲正文：优先展示中文渲染结果，原文折叠备查
+            // 解析质量有问题时，先在顶上摆一条红色警示——不能让残缺的大纲看起来像正常的
+            const q = ev.parseQuality;
+            if (q && !q.ok) {
+                const bad = el('div', 'eo-bad-box');
+                bad.textContent = '⚠ 这次生成的大纲结构不完整：' + q.missing.join('；')
+                    + '。节点进度将无法正常跟踪。可点「重新生成」，或到日志页查看模型原始输出。';
+                page.appendChild(bad);
+            }
+            const outlineText = renderOutlineText(ev.outline);
+            if (outlineText) {
+                const det = el('details', 'eo-details');
+                det.open = true;
+                det.appendChild(el('summary', null, '事件大纲'));
+                const ob = el('div', 'eo-box');
+                ob.textContent = outlineText;
+                det.appendChild(ob);
+                page.appendChild(det);
+            }
             if (ev.outlineRaw) {
                 const det = el('details', 'eo-details');
-                const sum = el('summary', null, '大纲原文（点击展开）');
+                const sum = el('summary', null, '模型原始输出（排查用，含英文字段名）');
                 det.appendChild(sum);
                 const ob = el('div', 'eo-box');
                 ob.textContent = ev.outlineRaw;
@@ -2686,17 +3359,25 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const opOut = el('div', 'eo-hint');
         const goRow = el('div', 'eo-row');
         const btnGo = el('button', 'eo-btn eo-primary', '开始生成大纲');
+        // 生成中 / 切页回来后恢复按钮状态：busy 是模块级变量，切换标签页不会丢，
+        // 但每次 renderPanel 都会新建按钮，所以要按 busy 重新禁用
+        if (busy) {
+            btnGo.disabled = true;
+            btnGo.textContent = '正在生成…';
+        }
         btnGo.addEventListener('click', async () => {
+            if (busy) return;
             const name = String(nameInput.value || '').trim();
             // 事件名可以留空：留空就由模型根据当前剧情自己起名
             prefs.extra = String(extraInput.value || '无').trim() || '无';
             btnGo.disabled = true;
+            btnGo.textContent = '正在生成…';
             opOut.className = 'eo-hint';
             opOut.textContent = '正在生成大纲，请稍候…';
             try {
                 const event = await createEvent(name, prefs);
-                const nodeCount = (event.outline && event.outline.nodes || []).length;
-                log(`生成大纲成功：${event.name}，节点 ${nodeCount} 个，世界书条目 uid=${event.entryUid}`);
+                const nodeN = (event.outline && event.outline.nodes || []).length;
+                log(`生成大纲成功：${event.name}，节点 ${nodeN} 个，世界书条目 uid=${event.entryUid}`);
                 resetDraftPrefs();
                 opOut.className = 'eo-ok';
                 opOut.textContent = `已生成：${event.name}，世界书条目 uid=${event.entryUid}`;
@@ -2706,11 +3387,19 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 error('生成大纲失败：', e);
                 opOut.className = 'eo-bad';
                 opOut.textContent = '生成失败：' + (e && e.message || e);
-            } finally { btnGo.disabled = false; }
+            } finally {
+                btnGo.disabled = false;
+                btnGo.textContent = '开始生成大纲';
+            }
         });
         goRow.appendChild(btnGo);
         page.appendChild(goRow);
         page.appendChild(opOut);
+        // 进度条挂在这里，紧跟按钮下方
+        const ph = el('div');
+        ph.id = 'eo_progress_host';
+        page.appendChild(ph);
+        if (progress.steps.length) renderProgress();
     }
 
     async function refreshCtxPreview(box) {
@@ -2748,8 +3437,11 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const opOut = el('div', 'eo-hint');
         const row = el('div', 'eo-row');
         const btnInv = el('button', 'eo-btn eo-primary', '开始盘点');
+        if (busy) { btnInv.disabled = true; btnInv.textContent = '正在盘点…'; }
         btnInv.addEventListener('click', async () => {
+            if (busy) return;
             btnInv.disabled = true;
+            btnInv.textContent = '正在盘点…';
             opOut.className = 'eo-hint';
             opOut.textContent = '正在盘点…';
             try {
@@ -2762,7 +3454,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 error('盘点失败：', e);
                 opOut.className = 'eo-bad';
                 opOut.textContent = '盘点失败：' + (e && e.message || e);
-            } finally { btnInv.disabled = false; }
+            } finally {
+                btnInv.disabled = false;
+                btnInv.textContent = '开始盘点';
+            }
         });
         row.appendChild(btnInv);
 
@@ -2770,6 +3465,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         row.appendChild(el('span', 'eo-hint', `打勾模式：${TRACKER_MODES[mode] || mode}`));
         page.appendChild(row);
         page.appendChild(opOut);
+        const invPh = el('div');
+        invPh.id = 'eo_progress_host';
+        page.appendChild(invPh);
+        if (progress.steps.length) renderProgress();
 
         // 节点进度
         const nodes = (ev.outline && ev.outline.nodes) || [];
@@ -2785,9 +3484,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     '这些是模型在这一轮剧情里认为碰到的节点。点「确认」才算真正打勾，点「忽略」就不算；不处理的话，下次盘点会被新建议覆盖。'));
                 const pb = el('div', 'eo-box');
                 for (const id of Array.from(pending).sort((a, b) => a - b)) {
-                    const node = nodes.find(n => Number(n.id != null ? n.id : n.index) === id);
+                    const node = nodes.find(n => nodeId(n) === id);
                     const row = el('div', 'eo-suggest');
-                    const txt = el('span', null, `${id}. ${(node && (node.type || '')) || ''} ${(node && (node.desc || node.info || node.content)) || '（大纲里找不到这个节点）'}`);
+                    const txt = el('span', null, `${id}. ${(node && (node.type || '')) || ''} ${(node && nodeText(node)) || '（大纲里找不到这个节点）'}`);
                     row.appendChild(txt);
                     const bOk = el('button', 'eo-btn eo-primary', '确认');
                     bOk.addEventListener('click', (e) => {
@@ -2811,12 +3510,12 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             page.appendChild(el('div', 'eo-sec', `节点进度（${triggered.size}/${nodes.length}，点击切换）`));
             const nb = el('div', 'eo-box');
             for (const n of nodes) {
-                const id = Number(n.id != null ? n.id : n.index);
+                const id = nodeId(n);
                 const on = triggered.has(id);
                 const isPending = pending.has(id);
                 const line = el('div', 'eo-node' + (on ? ' eo-node-on' : '') + (isPending ? ' eo-node-suggest' : ''));
-                line.textContent = `${on ? '☑' : (isPending ? '◐' : '☐')} ${id}. ${n.type || ''} ${n.desc || n.info || n.content || ''}`
-                    + (n.keyword || n.keywords ? `（${n.keyword || n.keywords}）` : '')
+                line.textContent = `${on ? '☑' : (isPending ? '◐' : '☐')} ${id}. ${n.type || ''} ${nodeText(n)}`
+                    + (nodeTrigger(n) ? `（${nodeTrigger(n)}）` : '')
                     + (isPending ? '　← 模型建议，待确认' : '');
                 line.addEventListener('click', () => {
                     toggleNode(id);
@@ -3333,6 +4032,50 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         flRow.appendChild(flIn);
         flRow.appendChild(el('span', 'eo-hint', '楼'));
         page.appendChild(flRow);
+
+        // --- 角色世界书 ---
+        const wbBox = el('div', 'eo-row');
+        const wbChk = el('input');
+        wbChk.type = 'checkbox';
+        wbChk.checked = !(s.worldbook && s.worldbook.enabled === false);
+        wbChk.addEventListener('change', () => {
+            getSettings().worldbook.enabled = wbChk.checked;
+            saveSettings();
+            log(`读取角色世界书：${wbChk.checked ? '开' : '关'}`);
+            renderPanel();
+        });
+        wbBox.appendChild(wbChk);
+        wbBox.appendChild(el('span', null, '读取角色世界书'));
+        page.appendChild(wbBox);
+
+        const wbBook = getCharacterBookName();
+        const wbHint = el('div', 'eo-hint');
+        if (!wbBook) {
+            wbHint.textContent = '当前角色未绑定世界书，此项无效';
+        } else if (s.worldbook && s.worldbook.enabled === false) {
+            wbHint.textContent = `已关闭，生成时不带「${wbBook}」的任何设定`;
+        } else {
+            wbHint.textContent = `将带入「${wbBook}」的常驻条目（蓝灯），`
+                + '自动剔除 shujuku 导出表、变量格式说明、本扩展事件条目与 EJS 条件模板';
+        }
+        page.appendChild(wbHint);
+
+        const wbCapRow = el('div', 'eo-row');
+        wbCapRow.appendChild(el('label', null, '设定字数上限'));
+        const wbCap = el('input', 'eo-input');
+        wbCap.type = 'number';
+        wbCap.min = '0';
+        wbCap.value = String((s.worldbook && s.worldbook.maxChars) || 0);
+        wbCap.style.width = '86px';
+        wbCap.addEventListener('change', () => {
+            const v = Math.max(0, Number(wbCap.value) || 0);
+            wbCap.value = String(v);
+            getSettings().worldbook.maxChars = v;
+            saveSettings();
+        });
+        wbCapRow.appendChild(wbCap);
+        wbCapRow.appendChild(el('span', 'eo-hint', '字，0 = 不限'));
+        page.appendChild(wbCapRow);
 
         // --- shujuku 接入诊断：记忆来源的子项 ---
         // 判定看「实际解析到的适配器」，不是看设置值：
