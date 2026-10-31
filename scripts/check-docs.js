@@ -10,6 +10,8 @@ function fail(msg) { console.log('[问题] ' + msg); problems++; }
 function ok(msg) { console.log('[ok]   ' + msg); }
 
 // ---- 1. 所有文档存在 ----
+// 协作文档只在本地存在，不入库；缺失不算错，存在就照常检查
+const optional = ['docs/协作约定.md'];
 const expected = [
     'README.md',
     'docs/需求.md',
@@ -28,6 +30,10 @@ for (const f of expected) {
     const p = path.join(root, f);
     if (fs.existsSync(p)) ok('存在 ' + f);
     else fail('缺失 ' + f);
+}
+for (const f of optional) {
+    const p = path.join(root, f);
+    if (fs.existsSync(p)) ok('存在 ' + f + '（可选，未入库）');
 }
 
 // ---- 2. 文档内提到的 scripts/ 路径是否真实存在 ----
@@ -88,6 +94,7 @@ checkSections('docs/设计.md');
 checkSections('docs/决策记录.md');
 checkSections('docs/设计-记忆插件适配-shujuku.md');
 checkSections('docs/规范.md');
+if (fs.existsSync(path.join(root, 'docs/协作约定.md'))) checkSections('docs/协作约定.md');
 
 // ---- 5. 版本号一致性 ----
 const mf = JSON.parse(fs.readFileSync(path.join(root, 'src/event-outline/manifest.json'), 'utf8'));
