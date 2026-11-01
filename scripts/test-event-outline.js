@@ -717,7 +717,110 @@ exports.n = normalizePrefs;
     check('有待选区样式', src.includes('.eo-drafts{'));
     check('待选项有采用按钮', src.includes("'采用'"));
     check('待选项有丢弃按钮', src.includes("'丢弃'"));
-    check('待选项有看大纲按钮', src.includes("'看大纲'"));
+    check('待选项有展示大纲按钮', src.includes("'展示大纲'"));
+}
+
+// ---- 23.1 待选草稿可编辑（2026-11-01 追加） ----
+{
+    check('存在保存草稿编辑函数', src.includes('function saveDraftEdit('));
+    check('存在大纲引用自检函数', src.includes('function checkOutlineRefs('));
+    check('存在结构转 YAML 函数', src.includes('function outlineToYaml('));
+    // 2026-11-01 改版：编辑 = 直接改大纲原文，保存时校验格式，不再走表单
+    check('编辑框是可改的文本框', src.includes('eo-outline-editor'));
+    check('编辑框行数字数实时显示', src.includes('eo-editor-stat'));
+    check('有格式检查按钮', src.includes("'检查格式'"));
+    check('表单那套已移除', !src.includes('function outlineToForm(') && !src.includes('function formToOutline('));
+
+    const saveStart = src.indexOf('function saveDraftEdit(');
+    const saveBody = src.slice(saveStart, saveStart + 3000);
+    // 只能编草稿：已采用的大纲写进了世界书，中途改口径不可追溯
+    check('只允许编辑 draft', saveBody.includes("event.status !== 'draft'"));
+    // 只吃原文，不再接受结构对象（表单已删）
+    check('保存只收原文', saveBody.includes('p.raw') && !saveBody.includes('p.outline'));
+    check('保存后重新解析原文', saveBody.includes('parseOutline(rawText)'));
+    check('解析结果整体替换 outline', saveBody.includes('event.outline = r.parsed'));
+    check('保存不写世界书', !saveBody.includes('upsertEventEntry'));
+    // 硬错（解析不出结构）必须拒绝保存，不能把坏内容落盘
+    check('格式硬错拒绝保存', saveBody.includes('throw new Error') && saveBody.includes('fatal'));
+    // 软错（编号跳号/引用对不上）只警告不拦
+    check('引用问题只警告', saveBody.includes('checkOutlineRefs') && !/issues\.length\)?\s*throw/.test(saveBody));
+
+    // ---- 硬错/软错的真实判定：抽 checkEditedRaw 跑一遍 ----
+    const grabRaw = (() => {
+        const s = src.indexOf('function checkEditedRaw(');
+        let i = src.indexOf('{', s), d = 0, e = -1;
+        for (; i < src.length; i++) {
+            if (src[i] === '{') d++;
+            else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
+        }
+        return src.slice(s, e);
+    })();
+    const box2 = {};
+    new Function('exports', `
+function log(){} function warn(){} function error(){} function debug(){}
+function parseOutline(raw){ try { return { parsed: JSON.parse(raw) }; } catch (e) { return { parsed: {} }; } }
+function checkOutlineRefs(){ return []; }
+${grabRaw}
+exports.f = checkEditedRaw;
+`)(box2);
+    const chk = box2.f;
+    check('空内容判硬错', chk('').ok === false && chk('   ').ok === false);
+    check('非 YAML 判硬错', chk('这不是 YAML').ok === false && chk('这不是 YAML').fatal.length > 0);
+    check('没有信息节点判硬错', chk('{"event_name":"x"}').ok === false);
+    check('合法结构不判硬错', chk('{"nodes":[{"id":1}]}').ok === true);
+    check('硬错时没有软错列表', chk('坏内容').issues.length === 0);
+    // 2026-11-01 实测踩到：编辑框里还套着 ```yaml 围栏，看着像英文；底色是浏览器默认深灰
+    check('编辑框剥掉代码围栏', src.includes('function stripCodeFence('));
+    check('保存时围栏包回去', src.includes('wrapCodeFence(keysToEnglish(buf.text, buf.backMap), buf.fenced)'));
+    check('编辑框显示中文键', src.includes('function keysToChinese(') && src.includes('keysToChinese(stripped.text)'));
+    check('保存前换回英文键', src.includes('function keysToEnglish(') && src.includes('keysToEnglish(buf.text, buf.backMap)'));
+    // ---- 结构规范化：模型把键写成中文时，解析结果统一成英文 ----
+    check('有规范化函数', src.includes('function normalizeOutline(') && src.includes('function normalizeKeys('));
+    check('解析时就走规范化', src.includes('normalizeOutline(parseSimpleYaml(block))'));
+    check('中文键表有主要字段', /事件名: 'event_name'/.test(src) && /信息节点: 'nodes'/.test(src) && /推进路径: 'paths'/.test(src));
+
+    check('中文键表覆盖常用键', /event_name: '事件名'/.test(src) && /nodes: '信息节点'/.test(src) && /paths: '推进路径'/.test(src));
+    check('编辑框有底色样式', /\.eo-outline-editor\{[^}]*background:#fffdf7/.test(src));
+    check('编辑框用等宽字', /\.eo-outline-editor\{[^}]*monospace/.test(src));
+
+    // ---- 面板页面不出滑动条（2026-11-02 危晓定）：整页只由浏览器窗口滚动 ----
+    check('面板高度随内容生长', /#eo_panel\{[^}]*height:auto/.test(src));
+    check('面板不裁剪溢出', /#eo_panel\{[^}]*overflow:visible/.test(src));
+    check('正文区不自己滚动', /#eo_panel \.eo-body\{[^}]*overflow:visible/.test(src));
+    check('内容框无高度上限', /\.eo-box\{[^}]*max-height:none/.test(src));
+    check('面板页面里没有内嵌滚动条', !/\.eo-(body|box|logbox|draft-yaml|outline-editor)\{[^}]*overflow(-y)?:(auto|scroll|hidden)/.test(src));
+
+    // ---- 待选事件按钮的文案与高亮（2026-11-02 危晓定）----
+    check('看大纲改名为展示大纲', src.includes("'eo-btn' + (previewDraftId === d.id ? ' eo-on' : ''), '展示大纲'") && !src.includes("'看大纲'"));
+    check('编辑按钮不再改名收起编辑', src.includes(", '编辑')") && !src.includes('收起编辑'));
+    check('采用不高亮、按住才亮', src.includes("'eo-btn eo-press', '采用'") && /\n\.eo-btn\.eo-press:active\{[^}]*background/.test(src));
+    check('丢弃同采用，按住才亮', src.includes("'eo-btn eo-press', '丢弃'"));
+    check('展示大纲开着高亮', /previewDraftId === d\.id \? ' eo-on' : ''/.test(src) && /\.eo-btn\.eo-on\{[^}]*background/.test(src));
+
+    // ---- 围栏剥离的真实往返 ----
+    const grabFence = (n) => {
+        const st = src.indexOf('function ' + n + '(');
+        let i = src.indexOf('{', st), d = 0, e = -1;
+        for (; i < src.length; i++) {
+            if (src[i] === '{') d++;
+            else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
+        }
+        return src.slice(st, e);
+    };
+    const fbox = {};
+    new Function('exports', grabFence('stripCodeFence') + grabFence('wrapCodeFence')
+        + 'exports.s=stripCodeFence; exports.w=wrapCodeFence;')(fbox);
+    const fencedRaw = ['```yaml', 'nodes:', '  - id: 1', '    info: A', '```', ''].join(String.fromCharCode(10));
+    const st1 = fbox.s(fencedRaw);
+    check('围栏被剥掉', st1.fenced === true && !st1.text.includes('```'));
+    check('剥掉后首行是正文', st1.text.split(String.fromCharCode(10))[0] === 'nodes:');
+    check('包回去与原文一致', fbox.w(st1.text, st1.fenced).trim() === fencedRaw.trim());
+    const plainRaw = 'nodes:' + String.fromCharCode(10) + '  - id: 1';
+    const st2 = fbox.s(plainRaw);
+    check('无围栏时原样不动', st2.fenced === false && st2.text === plainRaw);
+
+    // 缩进改乱时解析器很宽容，节点认不出来就必须拦，不能存成空壳
+    check('保存也拦没有节点的内容', /一个信息节点都没有解析出来/.test(saveBody));
 }
 
 // ---- 24. 推进路径的字段名容错 ----
@@ -782,6 +885,52 @@ exports.r = renderOutlineText;
     check('不再有记忆来源统计行', !src.includes('`记忆来源：${resolved.adapter.describe()}'),
         '仍存在该统计行');
     check('不再有 eo-ctx-preview 样式', !src.includes('.eo-ctx-preview{'));
+}
+
+// ---- 25.1 生成页表单落盘（2026-11-01 危晓要求）----
+// 规矩：填好的配置在两项动作之外不能丢 —— 刷新、切页、关浏览器都要还在
+{
+    check('有表单落盘函数', src.includes('function persistGenForm('));
+    check('有表单读回函数', src.includes('function loadGenForm('));
+    check('有清空落盘函数', src.includes('function clearGenForm('));
+    check('表单存进扩展设置', /genForm\s*=/.test(src));
+    check('事件名变化即落盘', src.includes('draftName = nameInput.value; persistGenForm();'));
+    check('事件目的变化即落盘', src.includes('prefs.goal = goalInput.value; persistGenForm();'));
+    check('框架提示变化即落盘', src.includes('prefs.promptHint = hintInput.value; persistGenForm();'));
+    check('额外要求变化即落盘', src.includes('prefs.extra = extraInput.value; persistGenForm();'));
+    check('主类型变化即落盘', src.includes('prefs.eventMainType = mainSel.value; persistGenForm();'));
+    check('次类型变化即落盘', /prefs\.eventSubTypes = Array\.from\(selSet\);[\s\S]{0,80}persistGenForm\(\)/.test(src));
+    check('粗细模式变化即落盘', /groupMode\[g\.group\] = mk;[\s\S]{0,40}persistGenForm\(\)/.test(src));
+    // 读回：模块变量为空时从存盘恢复
+    const loadBody = src.slice(src.indexOf('function getDraftPrefs('), src.indexOf('function getDraftPrefs(') + 400);
+    check('空表单时从存盘恢复', loadBody.includes('loadGenForm()'));
+    const modeBody = src.slice(src.indexOf('function getGroupModes('), src.indexOf('function getGroupModes(') + 600);
+    check('粗细模式从存盘恢复', modeBody.includes('saved.groupModes'));
+    // 只有两个出口会清
+    check('重置时清掉落盘', /function resetDraftPrefs\(\)[\s\S]{0,240}clearGenForm\(\)/.test(src));
+    check('采用时清掉落盘', src.includes('clearGenFormOnAdopt()'));
+    const commitBody = src.slice(src.indexOf('async function commitDraft('), src.indexOf('async function commitDraft(') + 2000);
+    check('采用成功后清空表单', commitBody.includes('clearGenFormOnAdopt()'));
+
+    // 重置按钮的问号移到按钮外面（危晓 2026-11-01 要求）
+    const resetIdx = src.indexOf("const btnReset = el('button', 'eo-btn', '重置为默认')");
+    const resetChunk = src.slice(resetIdx, resetIdx + 900);
+    check('重置按钮里不再嵌问号', !resetChunk.includes('attachHelp(btnReset'),
+        '问号仍挂在按钮上');
+    check('问号挂在按钮外的行容器上', resetChunk.includes('attachHelp(rstRow'),
+        'reset 行里没有 attachHelp(rstRow)');
+}
+
+// ---- 25.2 打勾模式说明不再标「当前」（2026-11-01 危晓要求）----
+{
+    check('说明里不再有「当前」标记', !src.includes("'eo-mode-cur'"),
+        '仍会给当前档位挂标记');
+    check('当前标记样式已删除', !src.includes('.eo-mode-cur{'));
+    const modeIdx = src.indexOf('const modeList = el');
+    const modeChunk = src.slice(modeIdx, modeIdx + 700);
+    check('三档说明都会渲染', ["['auto', 'semi', 'manual']"].every(x => modeChunk.includes(x)),
+        '循环明细变了，核对一下');
+    check('下拉框仍显示当前档位', src.includes('trSel.value = s.tracker.mode'));
 }
 
 // ---- 26. 大纲正文的换行与排版 ----
@@ -954,6 +1103,113 @@ exports.r = renderOutlineText;
     check('角色 identity 可读', out.includes('千夏（2班班长）'), '');
     check('时间压力会显示', out.includes('时间压力：') && out.includes('倒计时：傍晚前'), '');
     check('危险程度会显示', out.includes('危险程度：') && out.includes('致死性：低'), '');
+}
+
+// ---- 31. 条目位置定位（世界书被重排后仍能找到） ----
+{
+    const cut = (name) => {
+        const s = src.indexOf('function ' + name);
+        let i = src.indexOf('{', s), d = 0, e = -1;
+        for (; i < src.length; i++) {
+            if (src[i] === '{') d++;
+            else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
+        }
+        return src.slice(s, e);
+    };
+    const box = {};
+    new Function('exports', 'ENTRY_PREFIX',
+        `${cut('commentNameOf')}${cut('commentMatchesEvent')}${cut('findEventEntryUid')}
+exports.find = findEventEntryUid;
+exports.match = commentMatchesEvent;
+exports.nameOf = commentNameOf;
+`)(box, '▸事件｜');
+
+    const CHAT = '七情蛛网 - 2026-10-31';
+    const makeBook = (entries) => ({ entries });
+
+    // 记录 uid 正确时直接命中
+    {
+        const data = makeBook({
+            49: { comment: `▸事件｜末潮回抽｜chatId=${CHAT}` },
+        });
+        const ev = { name: '末潮回抽', chatId: CHAT, entryUid: 49 };
+        check('31.1 记录 uid 正确时直接命中', box.find(data, ev) === '49', box.find(data, ev));
+    }
+
+    // 记录 uid 被别人占了（真实事故：49 变成 shujuku 纪要，事件挪到 51）
+    {
+        const data = makeBook({
+            49: { comment: 'TavernDB-ACU-CustomExport-纪要-包裹-下' },
+            50: { comment: '▸事件｜测试条目（可删）' },
+            51: { comment: `▸事件｜末潮回抽｜chatId=${CHAT}` },
+        });
+        const ev = { name: '末潮回抽', chatId: CHAT, entryUid: 49 };
+        check('31.2 uid 被占时按 chatId+名字找到真实条目', box.find(data, ev) === '51', box.find(data, ev));
+    }
+
+    // 事件改过名，只能靠 chatId 认
+    {
+        const data = makeBook({
+            51: { comment: `▸事件｜旧名字｜chatId=${CHAT}` },
+        });
+        const ev = { name: '新名字', chatId: CHAT, entryUid: 49 };
+        check('31.3 改名后按 chatId 找到', box.find(data, ev) === '51', box.find(data, ev));
+    }
+
+    // 两个事件同 chatId 时不猜，避免删错别人的条目
+    {
+        const data = makeBook({
+            51: { comment: `▸事件｜甲｜chatId=${CHAT}` },
+            52: { comment: `▸事件｜乙｜chatId=${CHAT}` },
+        });
+        const ev = { name: '丙', chatId: CHAT, entryUid: 99 };
+        check('31.4 同 chatId 多条时不乱猜', box.find(data, ev) === null, box.find(data, ev));
+    }
+
+    // 同名的另一个 chat 不能被我方抢走
+    {
+        const data = makeBook({
+            51: { comment: '▸事件｜末潮回抽｜chatId=别人的对话' },
+        });
+        const ev = { name: '末潮回抽', chatId: CHAT, entryUid: 49 };
+        check('31.5 不认别的对话下的同名事件', box.find(data, ev) === null, box.find(data, ev));
+    }
+
+    // 什么都没有时返回 null
+    {
+        const data = makeBook({ 1: { comment: '无关条目' } });
+        const ev = { name: '末潮回抽', chatId: CHAT, entryUid: 49 };
+        check('31.6 找不到时返回 null', box.find(data, ev) === null, box.find(data, ev));
+    }
+
+    // commentMatchesEvent：前缀、名字、chatId 三者都要对
+    {
+        check('31.7 前缀不符判否',
+            box.match('普通条目｜chatId=' + CHAT, '末潮回抽', CHAT) === false, '');
+        check('31.8 名字不符判否',
+            box.match('▸事件｜别的名字｜chatId=' + CHAT, '末潮回抽', CHAT) === false, '');
+        check('31.9 chatId 不符判否',
+            box.match('▸事件｜末潮回抽｜chatId=别的', '末潮回抽', CHAT) === false, '');
+        check('31.10 三者都对判真',
+            box.match(`▸事件｜末潮回抽｜chatId=${CHAT}`, '末潮回抽', CHAT) === true, '');
+    }
+
+    // 老条目没写 chatId 时退回名字匹配，但必须唯一
+    {
+        const data = makeBook({
+            51: { comment: '▸事件｜老事件' },
+        });
+        const ev = { name: '老事件', chatId: '新对话', entryUid: 99 };
+        check('31.11 旧条目无 chatId 时按唯一名字找到', box.find(data, ev) === '51', box.find(data, ev));
+    }
+    {
+        const data = makeBook({
+            51: { comment: '▸事件｜老事件' },
+            52: { comment: '▸事件｜老事件' },
+        });
+        const ev = { name: '老事件', chatId: '新对话', entryUid: 99 };
+        check('31.12 同名两条时不按名字乱选', box.find(data, ev) === null, box.find(data, ev));
+    }
 }
 
 console.log('');

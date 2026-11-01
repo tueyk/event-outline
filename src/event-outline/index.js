@@ -11,6 +11,8 @@
     // 待选事件最多留几个：生成不再直接写世界书，草稿得有个上限
     const MAX_DRAFTS = 3;
     const LOG_PREFIX = '[事件大纲]';
+    // 换行符常量：正则里的字面换行在编辑路径里容易被吃掉，统一走这个
+    const NL = String.fromCharCode(10);
 
     // ==================== 0. 常量 ====================
 
@@ -389,7 +391,7 @@
      * 写入或更新事件条目。返回 {uid, snapshotKey}
      * 只在 entries 里新增/更新 ▸事件｜ 前缀条目，其余严格不动。
      */
-    async function upsertEventEntry(bookName, content, comment, existingUid) {
+    async function upsertEventEntry(bookName, content, comment, existingUid, event) {
         return withWriteLock(async () => {
             const data = await readWorldBook(bookName);
             if (!data || !data.entries) throw new Error('世界书数据无效');
@@ -411,6 +413,18 @@
 
             const foreignBefore = snapshotForeignEntries(data);
             let uid = existingUid;
+
+            // 传了事件对象就重新定位：世界书可能被别的插件重排过 uid，
+            // 记下的编号未必还指着自己那条，照着旧编号写会覆盖别人的条目。
+            if (event) {
+                const found = findEventEntryUid(data, event);
+                if (found != null && String(found) !== String(existingUid)) {
+                    warn(`事件「${event.name}」的条目位置变了：记录 uid=${existingUid}，实际 uid=${found}，按实际位置写入`);
+                    uid = found;
+                } else if (found != null) {
+                    uid = found;
+                }
+            }
 
             if (uid != null && data.entries[uid] &&
                 String(data.entries[uid].comment || '').startsWith(ENTRY_PREFIX)) {
@@ -470,8 +484,63 @@
         });
     }
 
-    /** 列出当前世界书里本扩展的条目 */
-    async function listEventEntries(bookName) {
+    /**
+     * 删掉某个事件在世界书里的条目，位置由 findEventEntryUid 现查，
+     * 不信 event.entryUid——它可能已经被别的插件重排成了别人的编号。
+     */
+    async function deleteEventEntryForEvent(bookName, event) {
+        const data = await readWorldBook(bookName);
+        const found = findEventEntryUid(data, event);
+        if (found == null) {
+            warn(`事件「${event.name}」在世界书里找不到对应条目，跳过删除`);
+            return { deleted: false, reason: '条目不存在' };
+        }
+        if (String(event.entryUid) !== String(found)) {
+            warn(`事件「${event.name}」的条目位置与记录不符：记录 uid=${event.entryUid}，实际 uid=${found}，按实际位置删除`);
+        }
+        return deleteEventEntry(bookName, found);
+    }
+
+    /**
+     * 校正事件卡里记的世界书条目位置。
+     * 世界书被别的插件整本重写后，entryUid 会指到别人身上，
+     * 这里读一次世界书，把每个进行中/待选事件的 uid 纠正回真实位置。
+     * 只改本地事件卡，不动世界书内容。
+     */
+    async function healEntryUids() {
+        const meta = getMeta();
+        if (!meta || !meta.events) return 0;
+        const books = new Set();
+        for (const ev of Object.values(meta.events)) {
+            if (ev && ev.worldBook && ev.entryUid != null) books.add(ev.worldBook);
+        }
+        if (!books.size) return 0;
+
+        let fixed = 0;
+        for (const book of books) {
+            let data;
+            try {
+                data = await readWorldBook(book);
+            } catch (e) {
+                warn(`校正条目位置时读取世界书「${book}」失败`, e);
+                continue;
+            }
+            if (!data || !data.entries) continue;
+            for (const ev of Object.values(meta.events)) {
+                if (!ev || ev.worldBook !== book || ev.entryUid == null) continue;
+                const found = findEventEntryUid(data, ev);
+                if (found != null && String(found) !== String(ev.entryUid)) {
+                    log(`事件「${ev.name}」的条目位置已校正：uid ${ev.entryUid} → ${found}`);
+                    ev.entryUid = found;
+                    fixed++;
+                }
+            }
+        }
+        if (fixed) saveMeta();
+        return fixed;
+    }
+
+    /** 列出当前世界书里本扩展的条目 */    async function listEventEntries(bookName) {
         const data = await readWorldBook(bookName);
         const out = [];
         for (const [uid, entry] of Object.entries((data && data.entries) || {})) {
@@ -491,6 +560,83 @@
         if (chid == null || !chars[chid]) return null;
         const ext = (chars[chid].data && chars[chid].data.extensions) || {};
         return ext.world || null;
+    }
+
+    /**
+     * 在已读出的世界书数据里，给一个事件找到它的条目，返回 uid（找不到返回 null）。
+     *
+     * 为什么不能只信 event.entryUid：世界书是别的东西也能整本重写的，
+     * shujuku 这类插件导入条目时会重排 uid，我们记下的编号就指到别人身上去了。
+     * 2026-10-31 真实发生过一次：事件记的 uid=49 后来成了 shujuku 的纪要条目，
+     * 真正的大纲被挤到 51，下次盘点就会去改别人的条目。
+     *
+     * 查找按可信度依次降级：
+     *   1. 记下的 uid 还在，且注释确实是这个事件的（前缀 + 名字 + chatId 都对得上）
+     *   2. 按注释里的 chatId + 事件名精确匹配（uid 被重排过）
+     *   3. 按注释里的 chatId 匹配（事件改过名）
+     *   4. 只有前缀 + chatId 对不上时，退回名字匹配（极老的条目可能没写 chatId）
+     */
+    function findEventEntryUid(data, event) {
+        const entries = (data && data.entries) || {};
+        const name = String(event && event.name || '');
+        const chatId = String(event && event.chatId || '');
+
+        // 1. 记下的 uid 仍然有效
+        if (event && event.entryUid != null) {
+            const hit = entries[event.entryUid];
+            if (hit && commentMatchesEvent(hit.comment, name, chatId)) {
+                return String(event.entryUid);
+            }
+        }
+
+        const mine = [];
+        for (const [uid, entry] of Object.entries(entries)) {
+            const comment = String(entry && entry.comment || '');
+            if (comment.startsWith(ENTRY_PREFIX)) mine.push({ uid, comment });
+        }
+
+        // 2. chatId + 事件名都命中
+        if (chatId && name) {
+            const exact = mine.find(m => m.comment.includes(`chatId=${chatId}`) &&
+                commentNameOf(m.comment) === name);
+            if (exact) return exact.uid;
+        }
+
+        // 3. 只有 chatId 命中（事件可能改过名）
+        if (chatId) {
+            const byChat = mine.filter(m => m.comment.includes(`chatId=${chatId}`));
+            if (byChat.length === 1) return byChat[0].uid;
+        }
+
+        // 4. 退回名字匹配，仅当恰好一条且它没带别的 chatId（极老的条目可能没写 chatId）
+        if (name) {
+            const byName = mine.filter(m => commentNameOf(m.comment) === name &&
+                !m.comment.includes('chatId='));
+            if (byName.length === 1) return byName[0].uid;
+        }
+
+        return null;
+    }
+
+    function commentMatchesEvent(comment, name, chatId) {
+        const c = String(comment || '');
+        if (!c.startsWith(ENTRY_PREFIX)) return false;
+        if (name && commentNameOf(c) !== name) return false;
+        if (chatId && !c.includes(`chatId=${chatId}`)) return false;
+        return !!(name || chatId);
+    }
+
+    /**
+     * 从条目注释里取出事件名。
+     * 格式是 `▸事件｜<名字>｜chatId=<对话>`；最早的条目只写了 `▸事件｜<名字>`，
+     * 没有第二个分隔符，所以遇到「｜」取第一段，遇不到就整段当名字。
+     */
+    function commentNameOf(comment) {
+        const c = String(comment || '');
+        if (!c.startsWith(ENTRY_PREFIX)) return '';
+        const rest = c.slice(ENTRY_PREFIX.length);
+        const bar = rest.indexOf('｜');
+        return bar < 0 ? rest : rest.slice(0, bar);
     }
 
     // ---------- 世界书常驻条目（生成上下文用） ----------
@@ -881,7 +1027,7 @@
 
     // ==================== 8. OOC 词与偏好 ====================
 
-    // 原文存档：运维/VPS/酒馆/OOC词-伊瑟利亚-兰开斯特-事件大纲与状态盘点.md
+    // 原文存档：事务/运维/酒馆/OOC词-伊瑟利亚-兰开斯特-事件大纲与状态盘点.md
     // 第 12-45 行 = 大纲词，51-63 行 = 盘点词。此处为改良版，差异见设计文档。
 
     const PREF_AUTO_NEW = '根据当前情况自行设定';
@@ -1206,15 +1352,76 @@
     // 事件名单独存：它不在 prefs 里，但「重置为默认」也要一起清掉
     let draftName = '';
 
+    /**
+     * 生成页表单的落盘（2026-11-01）。
+     * 以前这些只活在模块级变量里：刷新页面、切走再切回、关掉浏览器就全没了，
+     * 填了半天的偏好和框架提示白填。现在每填一格就写进扩展设置（服务端存盘），
+     * 打开面板时读回来接着填。
+     *
+     * 生命周期只有三个出口会清：
+     *   1. 点「重置为默认」；
+     *   2. 点「采用」待选事件（说明这一套已经用掉了）；
+     *   3. 生成成功后自动清掉（已有的既定行为，保持不动）。
+     * 注意：这里只在存盘数据里保留，用户主动清空某个格子时按空值存，不做"空值即默认"的兜底。
+     */
+    function loadGenForm() {
+        const s = getSettings();
+        const f = s.genForm || {};
+        return {
+            name: String(f.name || ''),
+            goal: String(f.goal || ''),
+            promptHint: String(f.promptHint || ''),
+            extra: f.extra == null ? '' : String(f.extra),
+            prefs: (f.prefs && typeof f.prefs === 'object')
+                ? Object.assign(defaultPrefs(), f.prefs)
+                : (f.extra != null || f.goal || f.promptHint
+                    ? Object.assign(defaultPrefs(), { goal: f.goal, promptHint: f.promptHint, extra: f.extra })
+                    : null),
+            groupModes: (f.groupModes && typeof f.groupModes === 'object') ? Object.assign({}, f.groupModes) : null,
+        };
+    }
+
+    function persistGenForm() {
+        const s = getSettings();
+        s.genForm = {
+            name: draftName || '',
+            goal: (draftPrefs && draftPrefs.goal) || '',
+            promptHint: (draftPrefs && draftPrefs.promptHint) || '',
+            extra: (draftPrefs && draftPrefs.extra != null) ? draftPrefs.extra : '',
+            prefs: draftPrefs ? Object.assign({}, draftPrefs) : null,
+            groupModes: draftGroupModes ? Object.assign({}, draftGroupModes) : null,
+        };
+        saveSettings();
+    }
+
+    /** 清掉落盘的生成页表单（重置 / 采用时调） */
+    function clearGenForm() {
+        const s = getSettings();
+        s.genForm = null;
+        saveSettings();
+    }
+
     function getDraftPrefs() {
-        if (!draftPrefs) draftPrefs = defaultPrefs();
+        if (!draftPrefs) {
+            const saved = loadGenForm();
+            draftPrefs = saved.prefs || defaultPrefs();
+            if (!draftName && saved.name) draftName = saved.name;
+        }
         return draftPrefs;
     }
 
     function getGroupModes() {
         if (!draftGroupModes) {
+            // 先看存盘的，用户上次选的粗细程度刷新后要还在
+            const saved = loadGenForm();
+            if (saved.groupModes) draftGroupModes = Object.assign({}, saved.groupModes);
+        }
+        if (!draftGroupModes) {
             draftGroupModes = {};
             for (const name of Object.keys(PREF_PRESETS)) draftGroupModes[name] = 'rough';
+        }
+        for (const name of Object.keys(PREF_PRESETS)) {
+            if (!draftGroupModes[name]) draftGroupModes[name] = 'rough';
         }
         return draftGroupModes;
     }
@@ -1224,6 +1431,20 @@
         draftPrefs = null;
         draftGroupModes = null;
         draftName = '';
+        clearGenForm();
+    }
+
+    /**
+     * 采用待选事件时清空生成页表单（2026-11-01 危晓要求）。
+     * 他给的规矩是：填好的配置只在两个动作后消失 —— 点「重置为默认」，或点「采用」。
+     * 采用说明这一套设置已经落地成事件，下次该重新想。
+     */
+    function clearGenFormOnAdopt() {
+        draftPrefs = null;
+        draftGroupModes = null;
+        draftName = '';
+        clearGenForm();
+        log('待选事件已采用，生成页配置已清空');
     }
 
     function buildPrefsBlock(prefs) {
@@ -1972,9 +2193,136 @@
         return root === null ? {} : root;
     }
 
+    // ---------- 结构规范化 ----------
+
+    // 中文键 → 英文键。和 OUTLINE_KEY_LABEL 方向相反，但那张表是给显示用的、
+    // 这里要处理的是模型把键写成中文的情况，所以单独维护，遇到新的再补。
+    // 值冲突的（比如「内容」在 paths 里是 route、在 nodes 里是 info）不放在这张表，
+    // 由 normalizeOutline 按上下文判断。
+    const CN_TO_EN_KEY = {
+        事件名: 'event_name', 事件简介: 'event_brief', 事件类型: 'event_type',
+        核心真相: 'core_truth', 信息节点: 'nodes', 推理必需节点: 'min_nodes_for_deduction',
+        参与角色: 'characters', 推进路径: 'paths', 禁止事项: 'forbidden',
+        助力者: 'helpers', 阻碍者: 'obstructers', 知情者: 'informants', 幕后方: 'behind_scenes',
+        名称: 'name', 名字: 'name', 角色名: 'name', 姓名: 'name',
+        身份: 'identity', 职衔: 'identity', 动机: 'motive', 动机类型: 'motive_type',
+        动机详述: 'motive_detail', 条件与代价: 'condition_or_cost', 条件: 'condition',
+        代价: 'cost', 备注: 'note', 理由: 'reason', 阻碍理由: 'reason',
+        化解方式: 'resolvable_by', 掌握信息: 'info_known', 掌握的信息: 'info_known',
+        掌握: 'info_known', 知道什么: 'knows', 不肯说的: 'wont_tell', 获取限制: 'how_to_get',
+        获取方式: 'how_to_get', 揭示条件: 'reveal', 暴露路径: 'exposure_path', 暴露方式: 'exposure_path',
+        暴露: 'exposure_path', 知情者关键人物: 'informants',
+        编号: 'id', 类型: 'type', 触发条件: 'trigger', 触发词: 'keyword', 触发时机: 'trigger',
+        信息内容: 'info', 指向信息: 'info', 后果: 'consequence', 可被节点推翻: 'refute_by',
+        可推翻: 'refute_by', 是否误导: 'is_misleading', 类别: 'kind',
+        步骤: 'step', 对应节点: 'node', 对应节点编号: 'node', 路径正文: 'route',
+        是否必经: 'must', 失败后果: 'fail', 失败情形: 'fail',
+        时间压力: 'time_pressure', 危险程度: 'danger', 倒计时: 'countdown', 时长: 'duration',
+        超时后果: 'timeout_result', 主类型: 'primary', 次类型: 'secondary',
+        结果: 'outcomes', 大纲外走向: 'out_of_plan_paths', 必需节点: 'required_nodes',
+        可跳过节点: 'optional_nodes', 风险: 'risk',
+        拖延代价: 'delay_cost', 致死性: 'lethality', 容错率: 'tolerance', 威胁来源: 'threat_source',
+        条件或代价: 'condition_or_cost', 标注: 'note', '知情者/关键人物': 'informants',
+    };
+
+    // 「节点」这个词在 paths 里模型常用来写「必经/可跳过」，在别处才是编号。
+    // 这正是中文键最麻烦的地方：同名不同义，只能看上下文。
+    const MUST_WORDS = /必经|可跳过|可选|跳过|必须|optional|required/i;
+    const NODE_REF = /^\s*(\d+|\[(?:\s*\d+\s*,?\s*)*\])\s*$/;
+
+    /**
+     * 把解析结果里的中文键就地规范化成英文键，返回 {obj, renamed, lost}。
+     * renamed 是改掉的键数（用来在日志里记一笔「模型又没按格式来」），
+     * lost 是同名冲突被合并掉的信息。
+     */
+    function normalizeKeys(obj, ctx) {
+        if (Array.isArray(obj)) {
+            // 数组元素沿用上层上下文（角色数组成员、节点数组成员都靠这个），
+            // 并且要收拢元素里的改名数与冲突，否则统计不到、冲突也不记日志
+            let n = 0;
+            const lost = [];
+            for (let i = 0; i < obj.length; i++) {
+                const r = normalizeKeys(obj[i], ctx);
+                obj[i] = r.obj;
+                n += r.renamed;
+                lost.push(...r.lost);
+            }
+            return { obj, renamed: n, lost };
+        }
+        if (!obj || typeof obj !== 'object') return { obj, renamed: 0, lost: [] };
+
+        let renamed = 0;
+        const lost = [];
+        const out = {};
+
+        for (const [rawKey, val] of Object.entries(obj)) {
+            let key = rawKey;
+            if (!/^[A-Za-z_]/.test(rawKey)) {
+                // 中文键：先看是不是 paths 里那个「节点: 必经」的特殊情况
+                if (ctx === 'path' && (rawKey === '节点' || rawKey === '必经')) {
+                    const sv = String(val == null ? '' : val).trim();
+                    if (MUST_WORDS.test(sv) && !NODE_REF.test(sv)) {
+                        key = 'must';
+                    } else {
+                        key = 'node';
+                    }
+                } else if (ctx === 'node' && (rawKey === '内容' || rawKey === '正文')) {
+                    key = 'info';
+                } else if (rawKey === '内容' || rawKey === '正文') {
+                    key = 'route';
+                } else {
+                    // 长句子不是键名（正文里带全角冒号时会被误当键），原样留着
+                    key = rawKey.length <= 12 ? (CN_TO_EN_KEY[rawKey] || rawKey) : rawKey;
+                }
+                if (key !== rawKey) renamed++;
+            }
+
+            // 子层级的上下文，决定「内容」「节点」这些多义键怎么解释。
+            // 注意：不管什么键都要往下递归，否则 event_type / characters / time_pressure
+            // 这些层级里的中文键会被漏掉（2026-11-01 实测踩到）。
+            const SIDE_KEYS = ['helpers', 'obstructers', 'informants', 'behind_scenes',
+                'blockers', '助力者', '阻碍者', '知情者', '幕后方'];
+            const childCtx = key === 'paths' ? 'path'
+                : key === 'nodes' ? 'node'
+                : SIDE_KEYS.includes(key) ? 'character'
+                : (ctx === 'path' || ctx === 'node') ? ctx
+                : 'plain';
+
+            let value = val;
+            if (val && typeof val === 'object') {
+                const r = normalizeKeys(val, childCtx);
+                value = r.obj;
+                renamed += r.renamed;
+                lost.push(...r.lost);
+            }
+
+            if (Object.prototype.hasOwnProperty.call(out, key)) {
+                // 同一个键中英文都写了（比如 node 和 对应节点），留先出现的那个
+                lost.push(rawKey);
+                continue;
+            }
+            out[key] = value;
+        }
+        return { obj: out, renamed, lost };
+    }
+
+    /** 规范化整份大纲：中文键转英文，冲突的记日志 */
+    function normalizeOutline(parsed) {
+        if (!parsed || typeof parsed !== 'object') return parsed;
+        // 角色立场那几个键下面是数组，数组元素各自规范化
+        const r = normalizeKeys(parsed, null);
+        if (r.renamed || r.lost.length) {
+            debug(`大纲键名规范化：改掉中文键 ${r.renamed} 个`
+                + (r.lost.length ? `，同名冲突合并 ${r.lost.length} 个（${r.lost.join('、')}）` : ''));
+        }
+        return r.obj;
+    }
+
     function parseOutline(raw) {
         const block = extractCodeBlock(raw, 'yaml') || extractCodeBlock(raw) || raw;
-        const parsed = parseSimpleYaml(block);
+        // 模型时不时把个别键写成中文（step 是英文、内容/风险 是中文），
+        // 这里统一规范化成英文，后面所有代码只面对一套键名，不用到处写 p['内容'] 兼容
+        const parsed = normalizeOutline(parseSimpleYaml(block));
         const hasYaml = !!extractCodeBlock(raw, 'yaml');
         const nodeCount = (parsed && Array.isArray(parsed.nodes)) ? parsed.nodes.length : 0;
         const keys = Object.keys(parsed || {});
@@ -2138,7 +2486,12 @@
         informants: '知情者',
         behind_scenes: '幕后方',
         name: '名字',
+        // 身份/动机/代价在提示词骨架里用短键（identity/motive/cost），
+        // 早期模型输出用的是长键（role/motive_type/conditions），两套都认
         role: '身份',
+        identity: '身份',
+        motive: '动机',
+        cost: '条件与代价',
         motive_type: '动机类型',
         motive_detail: '动机详述',
         conditions: '条件与代价',
@@ -2148,6 +2501,7 @@
         info_known: '掌握的信息',
         reveal: '揭示条件',
         reveal_condition: '揭示条件',
+        exposure_path: '暴露路径',
         id: '编号',
         type: '类型',
         trigger: '触发条件',
@@ -2158,11 +2512,48 @@
         keywords: '触发词',
         desc: '描述',
         step: '步骤',
+        node: '对应节点',
         detail: '说明',
         required_nodes: '必经节点',
         optional_nodes: '可跳过节点',
         risk: '风险',
         failure: '失败后果',
+        fail: '失败情形',
+        must: '是否必经',
+        route: '路径正文',
+        thrust: '推进作用',
+        time_pressure: '时间压力',
+        danger: '危险程度',
+        points_to: '指向信息',
+        content: '内容',
+        when: '触发时机',
+        why: '理由',
+        behind_the_scenes: '幕后方',
+        blockers: '阻碍者',
+        obstructors: '阻碍者',
+        can_resolve: '化解方式',
+        condition: '条件',
+        condition_or_cost: '条件与代价',
+        expose_path: '暴露路径',
+        hidden: '隐藏信息',
+        holds: '掌握的信息',
+        how_to_get: '获取方式',
+        is_misleading: '是否误导',
+        kind: '类别',
+        knows: '知道什么',
+        motivation_type: '动机类型',
+        out_of_plan_paths: '大纲外走向',
+        outcomes: '结果',
+        path: '路径',
+        primary: '主类型',
+        reason_now: '当下的理由',
+        required: '是否必需',
+        resolution: '化解方式',
+        resolvable: '可否化解',
+        secondary: '次类型',
+        steps: '步骤',
+        why_now: '当下的理由',
+        wont_tell: '不肯说的',
     };
 
     const NODE_TYPE_LABEL = {
@@ -2586,12 +2977,15 @@
                 content,
                 `${ENTRY_PREFIX}${event.name}｜chatId=${event.chatId}`,
                 null,
+                event,
             );
             event.entryUid = res.uid;
             event.status = 'active';
             event.floorBase = countFloors();
             meta.currentEventId = id;
             saveMeta();
+            // 采用即视为这套生成设置已经用掉，清空表单（危晓 2026-11-01 的规矩）
+            clearGenFormOnAdopt();
             log(`已采用事件「${event.name}」，世界书条目 uid=${res.uid}`);
             return event;
         } finally {
@@ -2608,6 +3002,242 @@
         saveMeta();
         log(`已丢弃待选事件「${event.name}」`);
         return true;
+    }
+
+    /**
+     * 保存草稿编辑（还没采用的事件）。
+     *
+     * 编辑方式只有一种：直接改大纲原文，像改文档一样。不再拆成表单逐格填。
+     * 落点仍是 outlineRaw —— 改完先把 YAML 重新解析一遍，解析成功就整体替换
+     * event.outline，让它和原本由模型生成的结构走同一条路径，
+     * 后续的「展示大纲」、采用时写的世界书条目、状态卡自然都跟着变。
+     *
+     * 校验分两档：
+     *   硬错（解析不出结构 / 没有节点）→ 抛错，拒绝保存，界面停在编辑框上
+     *   软错（编号跳号、引用对不上）→ 只返回 issues 给界面提示，照常保存
+     * 这样「改坏格式」不会落盘，「改得不完整」可以存一半接着改。
+     *
+     * 已采用（active）的事件不走这里：它的大纲已经写进世界书，中途改口径不可追溯，
+     * 要换大纲请把它废弃后重新生成，再对新草稿做编辑。
+     *
+     * 返回 { event, quality, issues }。
+     */
+    function saveDraftEdit(id, patch) {
+        const meta = getMeta();
+        const event = meta.events[id];
+        if (!event) throw new Error('找不到这个待选事件');
+        if (event.status !== 'draft') {
+            throw new Error('只能编辑还没采用的事件；已采用的大纲已经写进世界书，请废弃后重新生成');
+        }
+        const p = patch || {};
+
+        const rawText = String(p.raw == null ? '' : p.raw);
+        if (!rawText.trim()) throw new Error('大纲内容为空，保存会清空这个事件');
+
+        const r = parseOutline(rawText);
+
+        // ---- 硬错：格式坏到没法用，拒绝保存，原文一个字都不落盘 ----
+        const fatal = [];
+        if (!r.parsed || typeof r.parsed !== 'object' || !Object.keys(r.parsed).length) {
+            fatal.push('解析不出任何字段，这份内容不是合法的 YAML');
+        }
+        if (!String(r.raw || '').trim()) {
+            fatal.push('内容为空');
+        }
+        // 缩进被改乱时解析器很宽容：字段还在，但节点认不出来，存下去就是个空壳。
+        // 大纲没有信息节点等于废了，这一条按硬错处理。
+        if (!fatal.length) {
+            const n = Array.isArray(r.parsed.nodes) ? r.parsed.nodes.length : 0;
+            if (!n) {
+                fatal.push('一个信息节点都没有解析出来，多半是 nodes 下面的缩进或破折号被改坏了');
+            }
+        }
+        if (fatal.length) {
+            warn(`大纲编辑未保存（格式错误）：${fatal.join('；')}`);
+            throw new Error('格式有问题，没有保存：' + fatal.join('；')
+                + '。检查一下缩进、冒号、破折号有没有被删掉。');
+        }
+
+        // ---- 软错：编号跳号 / 引用不存在的节点，只警告不拦 ----
+        const issues = checkOutlineRefs(r.parsed);
+        if (issues.length) warn(`编辑后大纲自检：${issues.join('；')}`);
+
+        event.outline = r.parsed;
+        event.outlineRaw = rawText;
+        // 名字以原文里的 event_name 为准，原文没有才沿用旧的
+        const parsedName = String(r.parsed.event_name || '').trim();
+        if (parsedName && parsedName !== event.name) {
+            event.name = parsedName;
+            event.autoNamed = false;
+        }
+        const brief = String(r.parsed.event_brief || '').trim();
+        if (brief) event.brief = brief;
+
+        event.parseQuality = checkOutlineShape(r.parsed);
+        event.editedAt = new Date().toISOString();
+        event.editedCount = (event.editedCount || 0) + 1;
+
+        saveMeta();
+        log(`已保存待选事件「${event.name}」的大纲编辑（第 ${event.editedCount} 次，${rawText.length} 字）`);
+        return { event, quality: event.parseQuality, issues };
+    }
+
+    /** 结构自检：与 parseOutline 的 quality 保持同一套口径，供表单保存后使用 */
+    function checkOutlineShape(outline) {
+        const missing = [];
+        const o = outline || {};
+        if (!o.event_name) missing.push('事件名');
+        if (!o.nodes || !o.nodes.length) missing.push('信息节点');
+        if (!o.core_truth) missing.push('核心真相');
+        return { ok: missing.length === 0, missing, summary: missing.length ? '' : '结构完整', drift: [] };
+    }
+
+    /**
+     * 大纲引用自检：节点编号是否连续、路径与角色是否引用了不存在的节点。
+     * 只做检查不做修正 —— 编号跳号未必是错，但多半是手改时漏删了别处引用。
+     */
+    function checkOutlineRefs(outline) {
+        if (!outline || typeof outline !== 'object') return [];
+        const issues = [];
+        const nodes = Array.isArray(outline.nodes) ? outline.nodes : [];
+        const ids = nodes.map(n => Number(nodeId(n))).filter(n => Number.isFinite(n));
+        for (let i = 1; i <= ids.length; i++) {
+            if (!ids.includes(i)) { issues.push(`节点编号从 1 到 ${ids.length} 之间缺 ${i}`); break; }
+        }
+        const dup = ids.filter((n, i) => ids.indexOf(n) !== i);
+        if (dup.length) issues.push(`节点编号重复：${[...new Set(dup)].join('、')}`);
+        if (!nodes.length) issues.push('没有识别到任何信息节点');
+
+        const idSet = new Set(ids);
+        (Array.isArray(outline.paths) ? outline.paths : []).forEach((s, i) => {
+            if (!s || typeof s !== 'object') return;
+            const ref = s.node;
+            if (ref == null) return;
+            const refs = Array.isArray(ref) ? ref : [ref];
+            refs.forEach(r => {
+                const v = Number(r);
+                if (Number.isFinite(v) && !idSet.has(v)) {
+                    issues.push(`推进路径第 ${s.step || i + 1} 步引用了不存在的节点 ${r}`);
+                }
+            });
+        });
+        for (const n of nodes) {
+            const rb = n.refute_by;
+            if (rb == null) continue;
+            (Array.isArray(rb) ? rb : [rb]).forEach(r => {
+                const v = Number(r);
+                if (Number.isFinite(v) && !idSet.has(v)) {
+                    issues.push(`节点 ${nodeId(n)} 的反向证据引用了不存在的节点 ${r}`);
+                }
+            });
+        }
+        return issues;
+    }
+
+    /**
+     * 把结构化大纲拼回 YAML 文本。
+     * 只在两处用：草稿编辑框首次展开（原文丢了才走这条，正常永远用 outlineRaw）、
+     * 以及用户把编辑框清空后点「从结构重建」。
+     * 不追求和模型原输出逐字一致 —— 改过的草稿，原文本来就已经变了。
+     */
+    function outlineToYaml(outline) {
+        if (!outline || typeof outline !== 'object') return '';
+        const q = s => {
+            const t = String(s).replace(/\\r/g, '');
+            if (/[\\n"'#:]/.test(t) || /^\\s|\\s$/.test(t) || /^(true|false|null|~|\\d+(\\.\\d+)?)$/.test(t)) {
+                return JSON.stringify(t);
+            }
+            return t;
+        };
+        const scalar = v => {
+            if (v == null) return 'null';
+            if (Array.isArray(v)) return '[' + v.map(x => q(typeof x === 'object' ? JSON.stringify(x) : x)).join(', ') + ']';
+            if (typeof v === 'object') return null;
+            return q(v);
+        };
+        const lines = [];
+        const pushKV = (k, v, indent) => {
+            const pad = ' '.repeat(indent);
+            const s = scalar(v);
+            lines.push(`${pad}${k}: ${s}`);
+        };
+        const pushBlockOrKV = (k, v, indent) => {
+            const pad = ' '.repeat(indent);
+            if (v == null) return;
+            if (typeof v === 'string') {
+                if (v.includes('\\n')) {
+                    lines.push(`${pad}${k}: |`);
+                    v.split('\\n').forEach(l => lines.push(`${pad}  ${l}`));
+                } else pushKV(k, v, indent);
+                return;
+            }
+            if (Array.isArray(v)) {
+                if (!v.length) { lines.push(`${pad}${k}: []`); return; }
+                lines.push(`${pad}${k}:`);
+                for (const item of v) writeListItem(item, indent + 2, '');
+                return;
+            }
+            if (typeof v === 'object') {
+                const entries = Object.entries(v).filter(([, x]) => x !== undefined);
+                if (!entries.length) { lines.push(`${pad}${k}: {}`); return; }
+                lines.push(`${pad}${k}:`);
+                for (const [k2, v2] of entries) pushBlockOrKV(k2, v2, indent + 2);
+                return;
+            }
+            pushKV(k, v, indent);
+        };
+        // item 可以是标量或对象；path 用 '-' 打头，对象的键再缩进两格
+        const writeListItem = (item, indent) => {
+            const pad = ' '.repeat(indent);
+            if (item == null || typeof item !== 'object') {
+                lines.push(`${pad}- ${scalar(item)}`);
+                return;
+            }
+            if (Array.isArray(item)) {
+                lines.push(`${pad}-`);
+                item.forEach(x => writeListItem(x, indent + 2));
+                return;
+            }
+            const entries = Object.entries(item).filter(([, x]) => x !== undefined);
+            if (!entries.length) { lines.push(`${pad}- {}`); return; }
+            entries.forEach(([k, v], idx) => {
+                if (idx === 0) {
+                    const s = scalar(v);
+                    if (s != null) return lines.push(`${pad}- ${k}: ${s}`);
+                    // 第一个键本身是对象/数组/多行：先占一行 `- key:` 再往下展开
+                    lines.push(`${pad}- ${k}:`);
+                } else if (v === null) {
+                    lines.push(`${pad}  ${k}: null`);
+                } else if (typeof v === 'object') {
+                    pushBlockOrKV(k, v, indent + 2);
+                    return;
+                } else {
+                    const s = scalar(v);
+                    lines.push(`${pad}  ${k}: ${s}`);
+                    return;
+                }
+                // 第一个键就是对象/多行时，往下一层展开
+                if (typeof v === 'object') {
+                    if (Array.isArray(v)) {
+                        if (!v.length) lines[lines.length - 1] += ' []';
+                        else v.forEach(x => writeListItem(x, indent + 4));
+                    } else {
+                        const es = Object.entries(v).filter(([, x]) => x !== undefined);
+                        if (!es.length) lines[lines.length - 1] += ' {}';
+                        else es.forEach(([k2, v2]) => pushBlockOrKV(k2, v2, indent + 4));
+                    }
+                } else if (typeof v === 'string' && v.includes('\\n')) {
+                    // 列表项里的多行文本没有块标量，退化成缩进续行
+                    lines.push(`${pad}  ${k}: ${v.split('\\n').join(`\\n${pad}    `)}`);
+                }
+            });
+        };
+
+        for (const [k, v] of Object.entries(outline)) {
+            if (v === undefined) continue;
+            pushBlockOrKV(k, v, 0);
+        }
+        return lines.join('\\n') + '\\n';
     }
 
     async function runInventory() {
@@ -2689,8 +3319,12 @@
                 content,
                 `${ENTRY_PREFIX}${event.name}｜chatId=${event.chatId}`,
                 event.entryUid,
+                event,
             );
-            event.entryUid = res.uid;
+            if (String(event.entryUid) !== String(res.uid)) {
+                // 位置被纠正过，同步回事件卡，避免下次又按旧编号找
+                event.entryUid = res.uid;
+            }
             record.committedToBook = true;
             // 盘点成功即把计数基线挪到当前楼层，下一轮从零开始累计
             event.floorBase = countFloors();
@@ -2708,8 +3342,10 @@
         // 废弃/完结是纯本地操作：删世界书条目、改状态、清历史，不碰模型
         setBusy(true, false, abandoned ? '正在废弃事件并清理世界书条目…' : '正在完结事件并清理世界书条目…');
         try {
-            if (event.entryUid != null && event.worldBook) {
-                await deleteEventEntry(event.worldBook, event.entryUid);
+            if (event.entryUid != null || event.worldBook) {
+                // 位置现查，不用 event.entryUid —— 世界书可能被重排过
+                const book = event.worldBook || getCharacterBookName();
+                if (book) await deleteEventEntryForEvent(book, event);
                 event.entryUid = null;
             }
             event.status = abandoned ? 'abandoned' : 'completed';
@@ -2847,14 +3483,16 @@
 #eo_backdrop{position:fixed;inset:0;z-index:30000;display:none;
   background:rgba(30,22,8,.55);backdrop-filter:blur(2px);}
 #eo_backdrop.eo-open{display:block;}
-#eo_panel{position:fixed;inset:0;z-index:30001;display:none;flex-direction:column;
-  width:100vw;height:100vh;height:100dvh;max-width:none;max-height:none;
-  background:#fffdf7;border:0;border-radius:0;box-shadow:none;overflow:hidden;
-  font-size:14px;color:#3c2f14;}
 #eo_panel.eo-open{display:flex;}
+/* 整页只由浏览器窗口滚动，页面里不再出现第二条滚动条（2026-11-02 危晓定）：
+   面板从左上角全宽铺开、高度随内容生长，.eo-body 只负责排版，不做内部滚动出卷轴 */
+#eo_panel{position:fixed;left:0;top:0;right:0;z-index:30001;display:none;flex-direction:column;
+  width:100%;height:auto;min-height:100vh;min-height:100dvh;
+  background:#fffdf7;border:0;border-radius:0;box-shadow:none;overflow:visible;
+  font-size:14px;color:#3c2f14;}
 #eo_panel .eo-body{max-width:1100px;width:100%;margin:0 auto;padding:16px 20px 48px;
-  overflow-y:auto;-webkit-overflow-scrolling:touch;}
-.eo-box{max-height:320px;}
+  overflow:visible;}
+.eo-box{max-height:none;overflow:visible;}
 @media (max-width:640px){
   #eo_panel .eo-body{padding:12px 12px 40px;}
   .eo-head{padding:10px 12px;}
@@ -2870,11 +3508,13 @@
 .eo-progress-done{color:#38761d;}
 .eo-progress-done .eo-progress-mark{color:#38761d;}
 .eo-head{display:flex;align-items:center;gap:8px;padding:12px 20px;user-select:none;
+  /* 页面交给浏览器窗口滚，标题栏和标签栏跟着吸在窗口顶上，往下翻也能关面板、切页签 */
+  position:sticky;top:0;z-index:50;
   background:linear-gradient(160deg,#fff3d6,#f5d080);border-bottom:1px solid rgba(184,134,11,.4);}
 .eo-title{font-weight:700;flex:1;}
 .eo-close{cursor:pointer;padding:4px 12px;border-radius:8px;background:rgba(255,255,255,.55);font-size:15px;}
 .eo-close:hover{background:rgba(255,255,255,.85);}
-.eo-body{padding:12px;overflow:auto;flex:1;}
+.eo-body{padding:12px;overflow:visible;flex:1;}
 .eo-row{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;}
 .eo-row>label{min-width:78px;color:#6b5424;}
 .eo-btn{padding:5px 12px;border-radius:8px;border:1px solid rgba(184,134,11,.5);
@@ -2882,9 +3522,14 @@
 .eo-btn:hover{background:#fdeec4;}
 .eo-btn:disabled{opacity:.5;cursor:not-allowed;}
 .eo-btn.eo-primary{background:#f0c464;border-color:#b8860b;font-weight:600;}
+/* 待选事件的操作按钮（采用/丢弃）：默认不高亮，只有按住的那一下亮，松开就灭。
+   采用不再用 eo-primary 常亮——列表里好几个草稿时，常亮的按钮容易让人以为是当前选中 */
+.eo-btn.eo-press:active{background:#f0c464;border-color:#b8860b;font-weight:600;}
+/* 看大纲/编辑：开关类按钮，开着高亮、关掉回原样 */
+.eo-btn.eo-on{background:#f5d080;border-color:#b8860b;color:#4a3200;font-weight:700;}
 .eo-box{border:1px solid rgba(184,134,11,.32);border-radius:9px;padding:9px 10px;
   background:#fffaf0;margin-bottom:9px;white-space:pre-wrap;word-break:break-word;
-  max-height:220px;overflow:auto;line-height:1.55;}
+  max-height:none;overflow:visible;line-height:1.55;}
 .eo-hint{color:#8a7333;font-size:12px;line-height:1.5;}
 /* 大纲正文：保留换行与缩进，不加高度上限（大纲本来就有几百行，截断反而看不到全貌） */
 .eo-outline-text{white-space:pre-wrap;word-break:break-word;line-height:1.7;
@@ -2900,7 +3545,9 @@
   border-radius:8px;padding:8px 10px;margin-bottom:9px;font-size:12px;line-height:1.6;}
 select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11,.45);
   background:#fffdf7;color:#3c2f14;font-size:13px;}
-/* 待选事件：列表式排布，每一项带采用/丢弃/看大纲 */
+/* 待选事件：列表式排布，每一项带采用/丢弃/展示大纲/编辑
+   按钮样式（2026-11-02 危晓定）：采用、丢弃平时不高亮，按住那一下才亮；
+   展示大纲、编辑是开关，开着常亮、点一次收起就灭 */
 .eo-drafts{display:flex;flex-direction:column;gap:8px;margin:6px 0 10px;}
 .eo-draft{background:#fffdf7;border:1px solid rgba(184,134,11,.35);border-radius:8px;
   padding:8px 10px;}
@@ -2909,12 +3556,31 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-draft-meta{font-size:11px;color:#9b8a5e;}
 .eo-draft-brief{font-size:12px;color:#5a4a2a;line-height:1.6;margin:4px 0 6px;}
 .eo-draft-body{margin-top:8px;border-top:1px dashed rgba(184,134,11,.3);padding-top:8px;}
+/* 草稿编辑：中文表单，一格一格填，不用看 YAML */
+.eo-draft-edit .eo-form-sec{font-weight:600;color:#6b5424;font-size:13px;margin:12px 0 6px;
+  border-bottom:1px solid rgba(184,134,11,.25);padding-bottom:4px;}
+.eo-draft-edit .eo-list{display:flex;flex-direction:column;gap:8px;}
+.eo-formcard{background:#fffaf0;border:1px solid rgba(184,134,11,.3);border-radius:8px;padding:8px 10px;}
+.eo-formcard-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px;}
+.eo-formcard-title{font-weight:700;color:#6b5424;font-size:12px;flex:1;min-width:60px;}
+.eo-draft-edit .eo-field{display:flex;gap:8px;align-items:flex-start;margin-bottom:6px;}
+.eo-draft-edit .eo-field-label{flex:0 0 96px;font-size:12px;color:#7a6431;padding-top:6px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.eo-draft-edit .eo-field .eo-input{margin-bottom:0;font-size:13px;}
+.eo-draft-edit .eo-field .eo-textarea{min-height:42px;}
+.eo-btn.eo-sm{padding:3px 9px;font-size:12px;}
+.eo-extra-keys summary{font-size:11px;color:#9b8a5e;cursor:pointer;margin:4px 0;}
+/* YAML 编辑框用等宽字，行号对齐、编号一眼能看出跳没跳 */
+.eo-draft-yaml{font-family:ui-monospace,Consolas,"Courier New",monospace;font-size:12px;
+  white-space:pre;overflow:visible;line-height:1.5;min-height:160px;}
+.eo-draft-edit label,.eo-draft-edit .eo-label{font-size:12px;color:#7a6431;white-space:nowrap;}
+.eo-draft-edit .eo-sec-inline{margin-top:6px;}
 .eo-sec{border-top:1px dashed rgba(184,134,11,.35);margin:10px 0 6px;padding-top:8px;
   font-weight:600;color:#6b5424;}
 
 /* 标签栏 */
 .eo-tabs{display:flex;gap:4px;border-bottom:1px solid rgba(184,134,11,.35);
-  margin-bottom:14px;position:sticky;top:0;background:#fffdf7;z-index:2;padding-top:4px;}
+  margin-bottom:14px;position:sticky;top:49px;background:#fffdf7;z-index:40;padding-top:4px;}
 .eo-tab{padding:9px 16px;cursor:pointer;border-radius:9px 9px 0 0;color:#7a6431;
   font-size:14px;display:flex;align-items:center;gap:6px;white-space:nowrap;}
 .eo-tab:hover{background:#fff6e0;color:#5a3e0b;}
@@ -2934,7 +3600,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-details>summary::before{content:"▸ ";color:#b8860b;}
 .eo-details[open]>summary::before{content:"▾ ";}
 .eo-details[open]>summary{border-bottom:1px dashed rgba(184,134,11,.3);margin-bottom:8px;}
-.eo-details .eo-box{max-height:420px;}
+.eo-details .eo-box{max-height:none;}
 .eo-subsec{margin:12px 0 4px;color:#8a6a1e;font-weight:600;font-size:12px;}
 
 /* 输入 */
@@ -2943,6 +3609,21 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-input:focus{outline:2px solid rgba(184,134,11,.28);outline-offset:0;}
 .eo-textarea{width:100%;box-sizing:border-box;resize:vertical;line-height:1.6;
   font-family:inherit;margin-bottom:9px;}
+/* 大纲原文编辑框：整份 YAML 直接改。
+   底色和字色必须显式给——只挂 eo-textarea 不挂 eo-input 时是浏览器默认的深灰底白字，
+   对着这份米黄界面像块补丁（2026-11-01 实测踩到）。等宽字是为了让缩进对齐看得出来。 */
+.eo-outline-editor{
+  background:#fffdf7;color:#3c2f14;
+  border:1px solid rgba(184,134,11,.35);border-radius:9px;
+  padding:10px 12px;margin-bottom:6px;
+  font-family:ui-monospace,Consolas,"Courier New",monospace;
+  font-size:12.5px;line-height:1.65;
+  white-space:pre;overflow:visible;tab-size:2;min-height:320px;
+}
+.eo-outline-editor:focus{outline:2px solid rgba(184,134,11,.28);outline-offset:0;
+  border-color:rgba(184,134,11,.6);}
+.eo-editor-stat{color:#9b8a5e;font-size:12px;margin:0 0 8px;}
+.eo-editor-dirty{color:#b8860b;font-weight:600;}
 
 /* 节点行 */
 .eo-node{padding:4px 6px;cursor:pointer;border-radius:6px;line-height:1.55;}
@@ -2953,7 +3634,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-suggest span{flex:1;}
 
 /* 运行日志框：自己滚动，进来就停在最新一条 */
-.eo-logbox{max-height:340px;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;}
+.eo-logbox{max-height:none;overflow:visible;}
 
 /* 日志级别筛选按钮 */
 .eo-logfilter{display:flex;flex-wrap:wrap;gap:6px;padding:2px 0 4px;}
@@ -2995,14 +3676,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 /* 偏好项里的问号在行内偏右，提示框改成从问号正下方向右展开，
    否则 260px 的框会顶出面板右缘 */
 .eo-help-inline .eo-tip{left:-6px;top:20px;}
+/* 重置按钮旁边的问号：按钮外侧留白，点它只弹说明，不会误触重置 */
+.eo-reset-row{display:flex;align-items:center;gap:8px;}
 
 /* 打勾模式：三档各占一行 */
 .eo-modes{display:flex;flex-direction:column;gap:5px;margin:4px 0;}
 .eo-mode{display:flex;gap:8px;align-items:flex-start;padding:5px 8px;border-radius:6px;
   background:#fdf8ec;font-size:12px;line-height:1.6;color:#5a4a2a;}
-/* 当前档位不用底色和边框，只挂一个小标记，避免看起来像能点的按钮 */
-.eo-mode-cur{flex:0 0 auto;font-size:11px;padding:0 5px;border-radius:3px;
-  background:#e6dcc0;color:#6b5424;}
 .eo-mode-tag{flex:0 0 auto;font-weight:700;color:#7a5a0a;}
 
 `;
@@ -3378,7 +4058,12 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         p.classList.toggle('eo-open', open);
         if (backdropEl) backdropEl.classList.toggle('eo-open', open);
         document.body.style.overflow = open ? 'hidden' : '';
-        if (open) renderPanel();
+        if (open) {
+            renderPanel();
+            // 每次打开面板顺手校正一次条目位置，世界书被重排过也能自动纠正
+            healEntryUids().then(n => { if (n) renderPanel(); })
+                .catch(e => warn('校正条目位置失败', e));
+        }
     }
 
     function el(tag, cls, text) {
@@ -3389,6 +4074,330 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     }
 
     let activeTab = 'gen';
+    // 正在编辑的待选事件 id；非空时该草稿展开成原文编辑框
+    let editingDraftId = null;
+    // 编辑框里的临时值：展开时从事件卡拷一份，取消或换一个草稿就丢
+    let draftEditBuf = null;
+    // 上一次保存的自检警告（节点编号 / 引用对不上），显示在当前草稿下方
+    let draftEditIssues = null;
+
+    /** 展开编辑时把大纲原文拷进编辑缓冲，之后只在缓冲上改，取消就不影响事件卡 */
+    function makeDraftEditBuf(d) {
+        const raw = String((d && d.outlineRaw) || '').trim();
+        // 原文丢了（极老的卡）才从结构重建一份，正常永远走上面这条
+        const text = raw || outlineToYaml((d && d.outline) || {});
+        // 两步预处理，都只为好认好改，不改变落盘内容：
+        //   1. 模型给的原文外面套着 yaml 代码围栏，只留里面的正文
+        //   2. 英文键换成中文键（event_name → 事件名），缩进不动
+        const stripped = stripCodeFence(text);
+        const shown = keysToChinese(stripped.text);
+        return {
+            // 编辑框里显示的中文键版本
+            text: shown.text,
+            // 每行原本用的英文键，保存时按它还原，避免 role/identity 这类多对一的键被改写
+            backMap: shown.backMap,
+            // 打开时的样子，用来判断「有没有改过」
+            original: shown.text,
+            // 打开时有没有围栏，保存时照原样包回去
+            fenced: stripped.fenced,
+            rebuilt: !raw,
+        };
+    }
+
+    /**
+     * 拆掉 ```yaml 代码围栏，返回 {text, fenced}。
+     * 只有整段被一对围栏完整包住才算，中间夹着围栏的（极罕见）原样不动。
+     */
+    function stripCodeFence(raw) {
+        const s = String(raw || '');
+        const m = s.match(/^\s*```[a-zA-Z]*[ \t]*\r?\n([\s\S]*?)\r?\n?[ \t]*```[ \t]*\r?\n?[ \t]*$/);
+        if (!m) return { text: s, fenced: false };
+        return { text: m[1], fenced: true };
+    }
+
+    /** 保存时把围栏包回去，保证 outlineRaw 与模型原输出保持同一种形态 */
+
+    // ---------- 键名中英互转 ----------
+
+    /** 中文键 → 英文键。同一中文对应多个英文键时取第一个登记的 */
+    const CN_KEY_TO_EN = (() => {
+        const m = {};
+        for (const [en, cn] of Object.entries(OUTLINE_KEY_LABEL)) {
+            if (!m[cn]) m[cn] = en;
+        }
+        return m;
+    })();
+
+    /**
+     * 把大纲文本里的英文键换成中文，给编辑框显示用。
+     * 只换行首的「键:」和「- 键:」这种键位，值里的英文（比如节点类型 testimony）不动。
+     * 缩进原样保留，所以换键名不影响 YAML 结构。
+     */
+    // 转成中文后会显示成「助力者:」这样的键，转回时靠 backMap 还原成原稿的写法，
+    // 所以这几个立场键也照转，不用特意保留英文。
+    const KEEP_AS_IS = new Set();
+
+    /**
+     * 把大纲文本里的英文键换成中文，给编辑框显示用。
+     * 只换行首的「键:」和「- 键:」这种键位，值里的英文（比如节点类型 testimony）不动。
+     * 缩进原样保留，所以换键名不影响 YAML 结构。
+     *
+     * 多个英文键可能共用一个中文名（role / identity 都是「身份」），
+     * 为了转回时能对上原稿，这里把每行原来用的英文键记在返回值里。
+     */
+    function keysToChinese(text) {
+        const backMap = [];
+        const out = String(text == null ? '' : text).split(NL).map((line) => {
+            // 键名可以是英文也可以是中文（模型经常直接写中文键），两种都要认出来
+            const m = line.match(/^(\s*(?:-\s+)?)([^\s:][^:]*?)(\s*:)([\s\S]*)$/);
+            if (!m) { backMap.push(null); return line; }
+            const key = m[2].trim();
+            // 本来就是中文键：记下来，保存时原样保留，别翻成英文
+            if (!/^[A-Za-z_]/.test(key)) { backMap.push('__CN__'); return line; }
+            const cn = OUTLINE_KEY_LABEL[key];
+            if (!cn || KEEP_AS_IS.has(key)) { backMap.push(null); return line; }
+            backMap.push(key);
+            return m[1] + cn + m[3] + m[4];
+        }).join(NL);
+        return { text: out, backMap };
+    }
+
+    /**
+     * 保存前把中文键换回英文键，解析器和世界书只认英文。
+     * 传了 backMap 就优先还原成该行原本用的英文键，保证多对一的键（role/identity）不被改写。
+     */
+    function keysToEnglish(text, backMap) {
+        const lines = String(text == null ? '' : text).split(NL);
+        return lines.map((line, idx) => {
+            const m = line.match(/^(\s*(?:-\s+)?)([^\s:][^:]*?)(\s*:)([\s\S]*)$/);
+            if (!m) return line;
+            const name = m[2].trim();
+            if (SIDE_CN.has(name)) return line;
+            // 模型原稿里本来就是中文键，别翻成英文
+            if (Array.isArray(backMap) && backMap[idx] === '__CN__') return line;
+            // 这一行没改过键名，且原来就有英文键，直接还原成原来那个
+            const orig = Array.isArray(backMap) ? backMap[idx] : null;
+            if (orig && OUTLINE_KEY_LABEL[orig] === name) {
+                return m[1] + orig + m[3] + m[4];
+            }
+            const en = CN_KEY_TO_EN[name];
+            return en ? m[1] + en + m[3] + m[4] : line;
+        }).join(NL);
+    }
+    /** 数一数还剩多少英文开头的键（中文换不回去的那种），保存后提示用 */
+    function countEnglishKeys(text) {
+        let n = 0;
+        for (const line of String(text == null ? '' : text).split(String.fromCharCode(10))) {
+            const m = line.match(/^\s*(?:-\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:/);
+            if (m) n++;
+        }
+        return n;
+    }
+    function wrapCodeFence(text, fenced) {
+        const body = String(text == null ? '' : text);
+        return fenced ? '```yaml\n' + body.replace(/\s+$/, '') + '\n```' : body;
+    }
+
+    /**
+     * 草稿编辑框：整份大纲摊成一个可改的文本框，像改文档一样直接编辑。
+     *
+     * 不再拆成表单逐格填 —— 大纲几百行，按字段拆会拆散编号与引用的上下文，
+     * 而改一句话、调一个编号这种动作本来就该在原文上做。
+     *
+     * 编辑缓冲只在内存里，取消就丢；点保存才写回事件卡，且不碰世界书。
+     * 整个函数包一层 try：渲染一旦抛错，不能把整个待选列表拖成空白页。
+     */
+    function renderDraftEditor(d) {
+        try {
+            return buildDraftEditor(d);
+        } catch (e) {
+            error('渲染草稿编辑框失败：', e);
+            const box = el('div', 'eo-draft-body eo-draft-edit');
+            const bad = el('div', 'eo-bad-box', '⚠ 编辑框没渲染出来：' + (e && e.message || e)
+                + '。点「编辑」退出，详情见日志页「错误」档。');
+            box.appendChild(bad);
+            return box;
+        }
+    }
+
+    function buildDraftEditor(d) {
+        const buf = draftEditBuf || makeDraftEditBuf(d);
+        draftEditBuf = buf;
+        const wrap = el('div', 'eo-draft-body eo-draft-edit');
+
+        wrap.appendChild(el('div', 'eo-hint', '直接改下面的文字，像改文档一样。改完点「保存编辑」，'
+            + '只作用于这份待选草稿，不碰世界书。格式改坏了会拒绝保存并告诉你哪儿坏了。'));
+
+        if (buf.rebuilt) {
+            wrap.appendChild(el('div', 'eo-warn', '这份草稿没存下原文，下面是从结构重建的，可能和当初生成的略有出入。'));
+        }
+
+        // ---------- 编辑区 ----------
+        const ta = document.createElement('textarea');
+        ta.className = 'eo-textarea eo-outline-editor';
+        ta.spellcheck = false;
+        ta.value = buf.text;
+        ta.rows = 24;
+        ta.addEventListener('input', () => { buf.text = ta.value; syncDirty(); });
+        // Tab 键插两个空格，而不是跳走焦点 —— 大纲是缩进敏感的 YAML
+        ta.addEventListener('keydown', (e) => {
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                const s = ta.selectionStart, t = ta.selectionEnd;
+                ta.value = ta.value.slice(0, s) + '  ' + ta.value.slice(t);
+                ta.selectionStart = ta.selectionEnd = s + 2;
+                buf.text = ta.value;
+                syncDirty();
+            }
+        });
+        wrap.appendChild(ta);
+
+        // 行数 / 字数 / 是否改过，随时可见
+        const stat = el('div', 'eo-hint eo-editor-stat');
+        const paintStat = () => {
+            const text = buf.text || '';
+            const ls = text ? text.split('\n').length : 0;
+            const changed = text !== buf.original;
+            stat.textContent = ls + ' 行 · ' + text.length + ' 字' + (changed ? ' · 有未保存的改动' : '');
+            stat.className = 'eo-hint eo-editor-stat' + (changed ? ' eo-editor-dirty' : '');
+        };
+        paintStat();
+        ta.addEventListener('input', paintStat);        wrap.appendChild(stat);
+
+        // ---------- 工具行 ----------
+        // 按钮组按需重画：改了字就把尾部按钮换成提示条，免得「保存编辑」躲在编辑框外面看不见
+        const tail = el('div', null);
+        let warned = null;
+
+        const btnCheck = el('button', 'eo-btn', '检查格式');
+        btnCheck.type = 'button';
+        btnCheck.addEventListener('click', () => {
+            const r = checkEditedRaw(wrapCodeFence(keysToEnglish(buf.text, buf.backMap), buf.fenced));
+            draftEditIssues = r.issues.length ? r.issues : null;
+            renderPanel();
+            if (!r.ok) log('格式检查未通过：' + r.fatal.join('；'));
+            else if (!r.issues.length) log('格式检查通过，没有发现问题');
+            else log('格式检查通过，但有 ' + r.issues.length + ' 条提醒');
+        });
+
+        const btnRebuild = el('button', 'eo-btn', '从结构重建');
+        btnRebuild.type = 'button';
+        btnRebuild.addEventListener('click', () => {
+            if (!confirm('用事件卡里已保存的结构重新生成文本？当前框里的改动会丢。')) return;
+            const rebuilt = keysToChinese(stripCodeFence(outlineToYaml(d.outline || {})).text);
+            buf.text = rebuilt.text;
+            buf.backMap = rebuilt.backMap;
+            buf.original = rebuilt.text;
+            pendingDraftEditDirty = false;
+            renderPanel();
+            log('已按结构重建编辑框内容');
+        });
+
+        const toolRow = el('div', 'eo-row');
+        toolRow.appendChild(btnCheck);
+        toolRow.appendChild(btnRebuild);
+        wrap.appendChild(toolRow);
+
+        const paintWarn = () => {
+            if (warned) { warned.remove(); warned = null; }
+            if (draftEditIssues && draftEditIssues.length) {
+                warned = el('div', 'eo-warn', '格式提醒：' + draftEditIssues.join('；')
+                    + '。这类问题不阻断保存，但节点跟踪可能对不上，建议修一下。');
+                if (tail.parentNode) tail.parentNode.insertBefore(warned, tail);
+                else wrap.appendChild(warned);
+            }
+        };
+
+        const paintTail = () => {
+            tail.textContent = '';
+            const btnRow = el('div', 'eo-row');
+            if (pendingDraftEditDirty) {
+                // 正在改：底部按钮收回，只留一句提醒——改完再回来才有「保存编辑」
+                btnRow.appendChild(el('div', 'eo-hint eo-editor-dirty',
+                    '有未保存的改动。翻到编辑框底部就能「保存编辑」，或点上面的「编辑」放弃并关掉。'));
+                tail.appendChild(btnRow);
+                return;
+            }
+            const btnSave = el('button', 'eo-btn eo-primary', '保存编辑');
+            btnSave.type = 'button';
+            btnSave.addEventListener('click', () => {
+                try {
+                    const res = saveDraftEdit(d.id, {
+                        // 编辑框里是中文键，落盘前换回英文键——解析器和世界书只认英文
+                        raw: wrapCodeFence(keysToEnglish(buf.text, buf.backMap), buf.fenced),
+                    });
+                    draftEditIssues = res.issues && res.issues.length ? res.issues : null;
+                    discardPendingEdit();
+                    previewDraftId = d.id;
+                    renderPanel();
+                } catch (e) {
+                    // 格式硬错：不保存、不退出编辑，把原文留在框里让人接着改
+                    error('保存草稿编辑失败：', e);
+                    draftEditIssues = [String(e && e.message || e)];
+                    renderPanel();
+                }
+            });
+            btnRow.appendChild(btnSave);
+
+            const btnCancel = el('button', 'eo-btn', '取消');
+            btnCancel.type = 'button';
+            btnCancel.addEventListener('click', () => {
+                if (buf.text !== buf.original && !confirm('放弃这次编辑？改动不会保存。')) return;
+                discardPendingEdit();
+                renderPanel();
+            });
+            btnRow.appendChild(btnCancel);
+
+            // 没改动时只留「完成」：看完了就关，不用翻回去点「编辑」
+            if (buf.text === buf.original) {
+                const btnDone = el('button', 'eo-btn', '完成');
+                btnDone.type = 'button';
+                btnDone.addEventListener('click', () => {
+                    discardPendingEdit();
+                    renderPanel();
+                });
+                btnRow.appendChild(btnDone);
+            }
+            tail.appendChild(btnRow);
+        };
+
+        // 状态一变就重画尾部：有改动才出现「保存编辑」，改回原样又收回去
+        const syncDirty = () => {
+            const now = buf.text !== buf.original;
+            if (now === pendingDraftEditDirty) return;
+            pendingDraftEditDirty = now;
+            paintTail();
+            paintStat();
+        };
+        paintWarn();
+        paintTail();
+        wrap.appendChild(tail);
+        return wrap;
+    }
+
+    /**
+     * 只检查不保存：返回 { ok, fatal[], issues[] }。
+     * fatal 是格式坏到没法解析的硬错，issues 是编号跳号、引用不存在之类可继续的软错。
+     */
+    function checkEditedRaw(text) {
+        const raw = String(text || '');
+        if (!raw.trim()) return { ok: false, fatal: ['内容为空'], issues: [] };
+        let parsed = null;
+        try {
+            parsed = parseOutline(raw).parsed;
+        } catch (e) {
+            return { ok: false, fatal: ['解析时抛出异常：' + (e && e.message || e)], issues: [] };
+        }
+        if (!parsed || typeof parsed !== 'object' || !Object.keys(parsed).length) {
+            return { ok: false, fatal: ['解析不出任何字段，这份内容不是合法的 YAML'], issues: [] };
+        }
+        // 与 saveDraftEdit 同一口径：没有信息节点也算硬错，否则存下去是空壳
+        const n = Array.isArray(parsed.nodes) ? parsed.nodes.length : 0;
+        if (!n) {
+            return { ok: false, fatal: ['一个信息节点都没有解析出来，多半是 nodes 下面的缩进或破折号被改坏了'], issues: [] };
+        }
+        return { ok: true, fatal: [], issues: checkOutlineRefs(parsed) };
+    }
 
     const TABS = [
         { key: 'gen', label: '生成事件' },
@@ -3513,6 +4522,27 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     // 当前展开预览的待选事件 id；跨重渲染保留，没展开就是 null
     let previewDraftId = null;
 
+    /* ---------- 草稿编辑框的「正在改」状态（2026-11-02）----------
+       「编辑」按钮不随开合改文案，一直是「编辑」，开关只能靠高亮 + 编辑框底部的「完成」。
+       所以编辑框一改字就把编辑框下面那组按钮（保存编辑/取消/完成）换成提示条，
+       免得保存按钮躲在屏幕外面看不见。这个状态是模块级的：renderPanel 重建 DOM 也不会丢。 */
+    let pendingDraftEditDirty = false;
+
+    function discardPendingEdit() {
+        editingDraftId = null;
+        draftEditBuf = null;
+        draftEditIssues = null;
+        pendingDraftEditDirty = false;
+    }
+
+    /** 编辑框开着、但还没改动：直接关，不用问 */
+    function closeDraftEditor() {
+        if (pendingDraftEditDirty) {
+            if (!confirm('这份草稿还有没保存的改动，关掉就丢了。继续？')) return;
+        }
+        discardPendingEdit();
+    }
+
     function renderGenPage(page) {
         const ev = getCurrentEvent();
 
@@ -3557,7 +4587,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 if (d.brief) item.appendChild(el('div', 'eo-draft-brief', d.brief));
 
                 const acts = el('div', 'eo-row');
-                const btnUse = el('button', 'eo-btn eo-primary', '采用');
+                const btnUse = el('button', 'eo-btn eo-press', '采用');
                 btnUse.type = 'button';
                 btnUse.addEventListener('click', async () => {
                     btnUse.disabled = true;
@@ -3575,7 +4605,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 });
                 acts.appendChild(btnUse);
 
-                const btnDrop = el('button', 'eo-btn', '丢弃');
+                const btnDrop = el('button', 'eo-btn eo-press', '丢弃');
                 btnDrop.type = 'button';
                 btnDrop.addEventListener('click', () => {
                     if (!confirm(`丢弃待选事件「${d.name}」？它还没写进世界书，丢弃不会留下任何东西。`)) return;
@@ -3584,14 +4614,48 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 });
                 acts.appendChild(btnDrop);
 
-                const btnLook = el('button', 'eo-btn', '看大纲');
+                // 看大纲 / 编辑是开关：开着就常亮，再点一次收起、灯灭（2026-11-02 危晓定）
+                const btnLook = el('button', 'eo-btn' + (previewDraftId === d.id ? ' eo-on' : ''), '展示大纲');
                 btnLook.type = 'button';
                 btnLook.addEventListener('click', () => {
+                    if (pendingDraftEditDirty) {
+                        if (!confirm('正在编辑的这份还有没保存的改动，切走会丢掉。继续？')) return;
+                        discardPendingEdit();
+                    }
                     previewDraftId = previewDraftId === d.id ? null : d.id;
+                    // 收起预览等于收起这张草稿，正在编辑它也一并退出
+                    if (previewDraftId === null) { editingDraftId = null; draftEditBuf = null; }
                     renderPanel();
                 });
                 acts.appendChild(btnLook);
+
+                const btnEdit = el('button', 'eo-btn' + (editingDraftId === d.id ? ' eo-on' : ''), '编辑');
+                btnEdit.type = 'button';
+                btnEdit.addEventListener('click', () => {
+                    if (editingDraftId === d.id) {
+                        closeDraftEditor();
+                    } else {
+                        // 从别的草稿的编辑框切过来：有未保存改动先问一句，别悄悄丢
+                        if (pendingDraftEditDirty
+                            && !confirm('另一份草稿还有没保存的改动，切走会丢掉。继续？')) return;
+                        discardPendingEdit();
+                        editingDraftId = d.id;
+                        draftEditBuf = makeDraftEditBuf(d);
+                        draftEditIssues = null;
+                        previewDraftId = d.id;
+                    }
+                    renderPanel();
+                });
+                acts.appendChild(btnEdit);
                 item.appendChild(acts);
+
+                if (editingDraftId === d.id) {
+                    item.appendChild(renderDraftEditor(d));
+                    draftBox.appendChild(item);
+                    // 这里用 continue 不是 return：return 会跳出整个 for，
+                    // 后面的草稿全被丢掉，界面看起来就是「一片空白」（2026-11-01 实测踩到）
+                    continue;
+                }
 
                 // 展开时才渲染大纲正文，避免一屏堆几百行
                 if (previewDraftId === d.id) {
@@ -3702,7 +4766,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         nameInput.placeholder = '例如：东方快车谋杀案';
         // 事件名也存进草稿，这样「重置为默认」能把它一起清掉
         nameInput.value = draftName || '';
-        nameInput.addEventListener('input', () => { draftName = nameInput.value; });
+        nameInput.addEventListener('input', () => { draftName = nameInput.value; persistGenForm(); });
+        // 切走或刷新前的最后一道保险：输入法组字中可能没触发 input，失焦时再存一次
+        nameInput.addEventListener('change', persistGenForm);
         nameRow.appendChild(nameInput);
         page.appendChild(nameRow);
         page.appendChild(el('div', 'eo-hint',
@@ -3728,7 +4794,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             mainSel.appendChild(o);
         }
         mainSel.value = prefs.eventMainType || EVENT_TYPE_DEFAULT;
-        mainSel.addEventListener('change', () => { prefs.eventMainType = mainSel.value; });
+        mainSel.addEventListener('change', () => { prefs.eventMainType = mainSel.value; persistGenForm(); });
         mainRow.appendChild(mainSel);
         page.appendChild(mainRow);
 
@@ -3759,6 +4825,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 b.className = 'eo-btn eo-subtype' + (selSet.has(t) ? ' eo-subtype-on' : '');
                 prefs.eventSubTypes = Array.from(selSet);
                 paintCounter();
+                persistGenForm();
             });
             subBox.appendChild(b);
         }
@@ -3776,7 +4843,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         goalInput.rows = 3;
         goalInput.placeholder = '例如：让玩家在最终揭开前，逐步发现车上的乘客都与同一桩旧案有关，并理解他们为何共同动手';
         goalInput.value = prefs.goal || '';
-        goalInput.addEventListener('input', () => { prefs.goal = goalInput.value; });
+        goalInput.addEventListener('input', () => { prefs.goal = goalInput.value; persistGenForm(); });
+        goalInput.addEventListener('change', persistGenForm);
         page.appendChild(goalInput);
 
         page.appendChild(el('div', 'eo-sec eo-sec-inline', '事件框架提示'));
@@ -3786,7 +4854,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         hintInput.rows = 4;
         hintInput.placeholder = '例如：开场列车遭遇暴雪被困，死者身中十二刀；中途每个乘客的证词都互相印证却彼此矛盾；结尾靠一枚被烧焦的信纸残片把所有人的旧案串起来';
         hintInput.value = prefs.promptHint || '';
-        hintInput.addEventListener('input', () => { prefs.promptHint = hintInput.value; });
+        hintInput.addEventListener('input', () => { prefs.promptHint = hintInput.value; persistGenForm(); });
+        hintInput.addEventListener('change', persistGenForm);
         page.appendChild(hintInput);
 
         page.appendChild(el('div', 'eo-sec', '体验偏好'));
@@ -3931,6 +5000,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                         e.stopPropagation();
                         if (groupMode[g.group] === mk) return;
                         groupMode[g.group] = mk;
+                        persistGenForm();
                         paintModes();
                         paintGroup(g.group, body, hintSpan);
                     });
@@ -3954,17 +5024,18 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const extraInput = el('input', 'eo-input');
         extraInput.type = 'text';
         extraInput.value = prefs.extra || '无';
-        extraInput.addEventListener('input', () => { prefs.extra = extraInput.value; });
+        extraInput.addEventListener('input', () => { prefs.extra = extraInput.value; persistGenForm(); });
+        extraInput.addEventListener('change', persistGenForm);
         extraInput.style.flex = '1';
         extraRow.appendChild(extraInput);
         page.appendChild(extraRow);
 
         // 重置按钮：把上面这一整套选项拨回默认，不动待选区
-        const rstRow = el('div', 'eo-row');
+        // 问号放在按钮外面（2026-11-01 危晓要求）：按钮的点击区只负责重置，
+        // 别让「看说明」和「一键清空」挤在一块儿容易误点
+        const rstRow = el('div', 'eo-row eo-reset-row');
         const btnReset = el('button', 'eo-btn', '重置为默认');
         btnReset.type = 'button';
-        attachHelp(btnReset, '把事件名、事件目的、框架提示、额外要求和全部体验偏好拨回默认值。'
-            + '已经生成的待选事件不受影响，它们各自记着自己生成时的那份设置。');
         btnReset.addEventListener('click', () => {
             if (!confirm('把上面所有选项重置为默认？已生成的待选事件不受影响。')) return;
             resetDraftPrefs();
@@ -3972,6 +5043,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             renderPanel();
         });
         rstRow.appendChild(btnReset);
+        attachHelp(rstRow, '把事件名、事件目的、框架提示、额外要求和全部体验偏好拨回默认值。'
+            + '已经生成的待选事件不受影响，它们各自记着自己生成时的那份设置。', true);
         page.appendChild(rstRow);
 
         // 上下文预览
@@ -4776,11 +5849,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         };
         const modeList = el('div', 'eo-modes');
         for (const k of ['auto', 'semi', 'manual']) {
-            const isCur = s.tracker.mode === k;
-            // 不整块高亮：底色加边框看着像按钮，实际点不动。
-            // 改成在档位名后标「当前」，位置固定、不会让人误以为可点
+            // 三档只做说明，不标「当前」：上面那个下拉框已经写着当前选的是哪档，
+            // 再在说明里标一次等于同一件事说两遍（2026-11-01 危晓要求删掉）
             const item = el('div', 'eo-mode');
-            if (isCur) item.appendChild(el('span', 'eo-mode-cur', '当前'));
             const tag = el('span', 'eo-mode-tag', TRACKER_MODES[k]);
             item.appendChild(tag);
             item.appendChild(el('span', null, modeLines[k].replace(TRACKER_MODES[k] + '：', '')));
@@ -5109,6 +6180,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         try {
             context.eventSource.on(context.eventTypes.CHAT_CHANGED, () => {
+                healEntryUids().catch(e => warn('校正条目位置失败', e));
                 if (panelEl && panelEl.classList.contains('eo-open')) renderPanel();
             });
         } catch (e) {
@@ -5171,6 +6243,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         resolveAdapter,
         detectShujukuMode,
         listEventEntries,
+        findEventEntryUid,
+        commentMatchesEvent,
         getCharacterBookName,
         collectSheetsFromChat,
     };

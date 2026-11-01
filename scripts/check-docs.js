@@ -59,8 +59,8 @@ for (const f of mdFiles) {
     for (let ref of new Set(refs)) {
         ref = ref.replace(/`/g, '').trim();
         if (ref.includes('<') || ref.includes('*')) continue;
-        // 仓库外路径不检查：以 运维/ 开头的是文档库其它目录
-        if (ref.startsWith('运维/') || ref.startsWith('/') || ref.includes(':')) continue;
+        // 仓库外路径不检查：以 事务/运维/ 开头的是文档库其它目录
+        if (ref.startsWith('事务/运维/') || ref.startsWith('/') || ref.includes(':')) continue;
         const candidates = [
             path.join(root, ref),
             path.join(root, 'docs', ref),
@@ -181,7 +181,77 @@ for (const ph of needPhrases) {
     if (!reported) ok(`渲染函数未发现未声明局部变量（检查 ${watched.length} 个）`);
 }
 
-// ---- 8. 文档规模合理性（防截断）----
+// ---- 7.5 渲染循环里不许裸 return（2026-11-01 实测：点编辑整页空白）----
+// return 会跳出整个 for/forEach 回调，后面的事件全不渲染；
+// 想跳过当前项只能用 continue。只有字符串里的 return 和真正的 return false/值 才放过。
+{
+    const idxSrc = fs.readFileSync(path.join(root, 'src', 'event-outline', 'index.js'), 'utf8').split(/\r?\n/);
+    let reported = 0;
+    let loops = 0;
+    for (let i = 0; i < idxSrc.length; i++) {
+        const line = idxSrc[i];
+        if (!/for\s*\(\s*(?:const|let|var)\s+[\w$]+\s+of\s/.test(line) && !/\.forEach\s*\(\s*(?:async\s*)?\(/.test(line)) continue;
+        // 跳到循环体结束：跟踪花括号深度
+        let depth = 0, started = false, end = i;
+        for (let j = i; j < idxSrc.length; j++) {
+            const l = idxSrc[j];
+            for (const ch of l) {
+                if (ch === '{') { depth++; started = true; }
+                else if (ch === '}') { depth--; }
+            }
+            end = j;
+            if (started && depth <= 0) break;
+        }
+        // 只认渲染列表的循环：循环体后面紧跟着往容器/页面 append
+        const after = idxSrc.slice(i, Math.min(end + 3, idxSrc.length)).join('\n');
+        if (!/(?:draftBox|page|listBox|container|wrap|body)\.append(?:Child)?\s*\(/.test(after)) { i = end; continue; }
+        loops++;
+        for (let k = i; k <= end; k++) {
+            const cleaned = idxSrc[k].replace(/`[^`]*`/g, '``').replace(/'[^']*'/g, "''");
+            const t = cleaned.trim();
+            if (!(/^return\s*;?$/.test(t) || /;\s*return\s*;$/.test(t))) continue;
+            // 到这一行为止还没闭合的括号说明身处回调内部，那里的 return 不算
+            const seg = idxSrc.slice(i, k).join('\n');
+            let paren = 0;
+            for (const ch of seg) { if (ch === '(') paren++; else if (ch === ')') paren--; }
+            if (paren > 0) continue;
+            fail(`index.js:${k + 1} 渲染循环里有裸 return，会用空白顶掉后面的事件（应改 continue）`);
+            reported++;
+        }
+        i = end;
+    }
+    if (!reported) ok(`渲染循环里没有裸 return（检查 ${loops} 个列表循环）`);
+}
+
+// ---- 8.5 文档版本号必须跟 manifest 一致（2026-11-01 统一口径）----
+// 以前文档用 v8/v11 自己的编号，代码用 0.1.2，两套号各走各的，对不上就没人发现。
+// 现在一律以 src/event-outline/manifest.json 的 version 为准。
+{
+    const mf = path.join(root, 'src', 'event-outline', 'manifest.json');
+    let mv = '';
+    try {
+        mv = String(JSON.parse(fs.readFileSync(mf, 'utf8')).version || '').trim();
+    } catch (e) {
+        fail('manifest.json 读不出 version：' + e.message);
+    }
+    if (mv) {
+        let bad = 0;
+        for (const f of mdFiles) {
+            const head = fs.readFileSync(path.join(root, f), 'utf8').split('\n').slice(0, 8).join('\n');
+            const m = head.match(/版本[:：]\s*([0-9]+\.[0-9]+\.[0-9]+)/);
+            if (!m) {
+                fail(`${f} 头部没有「版本：x.y.z」行`);
+                bad++;
+            } else if (m[1] !== mv) {
+                fail(`${f} 版本 ${m[1]} 与 manifest ${mv} 不一致`);
+                bad++;
+            }
+        }
+        if (!bad) ok(`${mdFiles.length} 份文档版本号均为 ${mv}`);
+    }
+}
+
+// ---- 9. 文档规模合理性（防截断）----
 for (const f of mdFiles) {
     const n = fs.readFileSync(path.join(root, f), 'utf8').split('\n').length;
     if (n < 15) fail(`${f} 只有 ${n} 行，疑似被截断`);
