@@ -780,22 +780,27 @@ exports.f = checkEditedRaw;
     check('中文键表有主要字段', /事件名: 'event_name'/.test(src) && /信息节点: 'nodes'/.test(src) && /推进路径: 'paths'/.test(src));
 
     check('中文键表覆盖常用键', /event_name: '事件名'/.test(src) && /nodes: '信息节点'/.test(src) && /paths: '推进路径'/.test(src));
-    check('编辑框有底色样式', /\.eo-outline-editor\{[^}]*background:#fffdf7/.test(src));
+    // 2026-11-02 起配色走主题变量，这里认变量名；老写法（直接写色值）也认，免得以后改成硬编码时漏检
+    check('编辑框有底色样式', /\.eo-outline-editor\{[^}]*background:(var\(--eo-bg\)|#fffdf7)/.test(src));
     check('编辑框用等宽字', /\.eo-outline-editor\{[^}]*monospace/.test(src));
 
     // ---- 面板页面不出滑动条（2026-11-02 危晓定）：整页只由浏览器窗口滚动 ----
-    check('面板高度随内容生长', /#eo_panel\{[^}]*height:auto/.test(src));
-    check('面板不裁剪溢出', /#eo_panel\{[^}]*overflow:visible/.test(src));
-    check('正文区不自己滚动', /#eo_panel \.eo-body\{[^}]*overflow:visible/.test(src));
+    check('面板钉死视口高度', /#eo_panel\{[^}]*height:100dvh/.test(src) && !/#eo_panel\{[^}]*height:auto/.test(src));
+    check('面板裁掉溢出交给正文区滚', /#eo_panel\{[^}]*overflow:hidden/.test(src));
+    // 2026-11-02 手机回归：面板 fixed 全屏并锁 body 滚动，正文区必须自己滚，否则整页滑动不了
+    check('正文区自己滚动', /#eo_panel \.eo-body\{[^}]*overflow-y:auto/.test(src));
+    check('正文区吃满剩余高度', /#eo_panel \.eo-body\{[^}]*flex:1/.test(src) && /#eo_panel \.eo-body\{[^}]*min-height:0/.test(src));
     check('内容框无高度上限', /\.eo-box\{[^}]*max-height:none/.test(src));
-    check('面板页面里没有内嵌滚动条', !/\.eo-(body|box|logbox|draft-yaml|outline-editor)\{[^}]*overflow(-y)?:(auto|scroll|hidden)/.test(src));
+    check('面板外壳自己不出滚动条', /#eo_panel\{[^}]*overflow:hidden/.test(src));
+    check('内容框与草稿正文不另设滚动条', !/\.eo-(box|logbox|draft-yaml|outline-editor)\{[^}]*overflow(-y)?:(auto|scroll|hidden)/.test(src));
 
     // ---- 待选事件按钮的文案与高亮（2026-11-02 危晓定）----
-    check('看大纲改名为展示大纲', src.includes("'eo-btn' + (previewDraftId === d.id ? ' eo-on' : ''), '展示大纲'") && !src.includes("'看大纲'"));
-    check('编辑按钮不再改名收起编辑', src.includes(", '编辑')") && !src.includes('收起编辑'));
-    check('采用不高亮、按住才亮', src.includes("'eo-btn eo-press', '采用'") && /\n\.eo-btn\.eo-press:active\{[^}]*background/.test(src));
+    // 2026-11-02 4.2 第 4 条：开关态靠文案 + 左侧竖条，不靠底色（底色会和主按钮混在一起）
+    check('展示大纲开关有收起的反向文案', src.includes("showing ? '收起大纲' : '展示大纲'"));
+    check('编辑按钮由状态决定文案', src.includes("editingDraftId === d.id ? '收起编辑' : '编辑'"));
+    check('采用是主按钮且按住才亮', src.includes("'eo-btn eo-primary eo-press', '采用'") && /\n\.eo-btn\.eo-press:active\{[^}]*background/.test(src));
     check('丢弃同采用，按住才亮', src.includes("'eo-btn eo-press', '丢弃'"));
-    check('展示大纲开着高亮', /previewDraftId === d\.id \? ' eo-on' : ''/.test(src) && /\.eo-btn\.eo-on\{[^}]*background/.test(src));
+    check('开关态改用左侧竖条而非底色', /\.eo-btn-toggle\.eo-on\{[^}]*border-left-color/.test(src) && !/\.eo-btn\.eo-on\{[^}]*background/.test(src));
 
     // ---- 围栏剥离的真实往返 ----
     const grabFence = (n) => {

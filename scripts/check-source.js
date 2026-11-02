@@ -181,6 +181,30 @@ for (const ph of needPhrases) {
     }
 }
 
+// ---- 7. 分区编号连续且与物理顺序一致（2026-11-02 A1）----
+// 历史上 8-11 是后加的，插在 4 与 5 之间却没回填编号，
+// 翻代码的人按「5 界面」去找会先翻到错误的行。这条以后不许再出现：
+// 编号从 0 开始、每次 +1、且必须在文件里按顺序出现。
+{
+    const marks = [];
+    idx.split(/\r?\n/).forEach((line, i) => {
+        const m = line.match(/^[ \t]*\/\/ =+ (\d+)\. (.+?) =+/);
+        if (m) marks.push({ n: Number(m[1]), name: m[2].trim(), line: i + 1 });
+    });
+    if (marks.length < 3) {
+        fail(`分区标记只找到 ${marks.length} 个，像是注释被改坏了`);
+    } else {
+        let bad = 0;
+        marks.forEach((mk, i) => {
+            if (mk.n !== i) {
+                fail(`分区编号不连续：第 ${i + 1} 个分区是「${mk.n}. ${mk.name}」(L${mk.line})，应为 ${i}`);
+                bad++;
+            }
+        });
+        if (!bad) ok(`分区编号 0-${marks.length - 1} 连续，顺序与物理位置一致`);
+    }
+}
+
 console.log('');
 console.log(problems === 0 ? '源码检查全部通过' : problems + ' 处问题');
 process.exit(problems === 0 ? 0 : 1);

@@ -1,6 +1,9 @@
 /* 事件大纲 / 状态盘点 扩展
  * 单文件，按分区组织。无构建步骤，不使用 import。
- * 分区：0 常量 1 上下文 2 存储 3 世界书 4 适配器 5 界面 6 设置 7 入口
+ * 分区按实际顺序编号，连续无跳号（check-source 会校验）：
+ *   0 常量   1 上下文   2 存储   3 世界书   4 记忆适配器
+ *   5 表单 helper   6 OOC 词与偏好   7 上下文拼装   8 生成与解析   9 事件流程
+ *   10 界面   11 设置入口   12 入口
  */
 (function () {
     'use strict';
@@ -22,7 +25,6 @@
         debug: false,
         // 模型 API 配置档。三种 mode：
         //   main   = 跟随酒馆主连接（generateRaw 不带 api 参数）
-        //   tavern = 走酒馆已配好的连接源，可指定连接源类型与模型名
         //   direct = 扩展自己直连 OpenAI 兼容接口，自带 base URL / 密钥 / 模型
         apiProfiles: [
             { id: 'main', name: '跟随酒馆主连接', mode: 'main' },
@@ -31,6 +33,8 @@
         ui: {
             floatingEnabled: true,
             floatingPos: { anchor: { x: 4, y: 40 }, dock: 'left' },
+            // 吸附提示只弹一次（2026-11-02）：跟着设置走，换设备不用再看第二遍
+            dockHintShown: false,
         },
         tracker: {
             mode: 'auto',
@@ -53,6 +57,10 @@
             enabled: true,
             // 字数上限，超出按 order 顺序截断；0 = 不限
             maxChars: 30000,
+        },
+        request: {
+            // 直连接口最长等多久（毫秒）。超时就报错并放开 busy，不会一直转圈
+            timeoutMs: 180000,
         },
     };
 
@@ -168,6 +176,14 @@
         if (!s.apiProfiles.some(p => p && p.id === 'main')) {
             s.apiProfiles.unshift(structuredClone(DEFAULT_SETTINGS.apiProfiles[0]));
         }
+        // 「用酒馆里的连接」这一档已取消（2026-11-02）：留着它也选不出正确的连接源，
+        // 所以旧配置直接删掉，只写一条日志说明，不静默处理
+        const deadProfiles = s.apiProfiles.filter(p => p && p.mode === 'tavern');
+        if (deadProfiles.length) {
+            s.apiProfiles = s.apiProfiles.filter(p => !p || p.mode !== 'tavern');
+            log('已移除 ' + deadProfiles.length + ' 个「用酒馆里的连接」旧配置（'
+                + deadProfiles.map(p => p.name || p.id).join('、') + '），该方式已取消');
+        }
         if (!s.activeProfileId || !s.apiProfiles.some(p => p && p.id === s.activeProfileId)) {
             s.activeProfileId = 'main';
         }
@@ -191,11 +207,10 @@
         const context = ctx();
         if (!context) return null;
         if (!context.chatMetadata[MODULE]) {
-            context.chatMetadata[MODULE] = { version: 1, currentEventId: null, events: {}, snapshots: {} };
+            context.chatMetadata[MODULE] = { version: 1, currentEventId: null, events: {} };
         }
         const m = context.chatMetadata[MODULE];
         m.events = m.events || {};
-        m.snapshots = m.snapshots || {};
         return m;
     }
     function saveMeta() {
@@ -388,28 +403,18 @@
     }
 
     /**
-     * 写入或更新事件条目。返回 {uid, snapshotKey}
+     * 写入或更新事件条目。返回 {uid}
      * 只在 entries 里新增/更新 ▸事件｜ 前缀条目，其余严格不动。
+     *
+     * 2026-11-02 去掉了「写前快照」：那份快照写进 sessionStorage 之后全文没有任何读取路径，
+     * 整本世界书（实测这一本 2.7MB 量级）每写一次就多占一份配额，key 还永不清理，
+     * 配额一满就静默失败。真正在保护外部条目的是下面的写后校验（foreignBefore/verifyForeignEntriesUnchanged），
+     * 它逐条比对本次改动之外的所有条目，比一份没人读的快照更能兜住问题。
      */
     async function upsertEventEntry(bookName, content, comment, existingUid, event) {
         return withWriteLock(async () => {
             const data = await readWorldBook(bookName);
             if (!data || !data.entries) throw new Error('世界书数据无效');
-
-            // 写前快照
-            const meta = getMeta();
-            const snapshotKey = 'ts' + Date.now();
-            if (meta) {
-                meta.snapshots[snapshotKey] = { worldBook: bookName, at: new Date().toISOString() };
-                try {
-                    sessionStorage.setItem(
-                        `${MODULE}_snapshot_${snapshotKey}`,
-                        JSON.stringify(data),
-                    );
-                } catch (e) {
-                    warn('快照过大，未能保存到 sessionStorage', e);
-                }
-            }
 
             const foreignBefore = snapshotForeignEntries(data);
             let uid = existingUid;
@@ -438,14 +443,15 @@
 
             await writeWorldBook(bookName, data);
             log(`世界书已写入「${bookName}」：${existingUid != null ? '更新' : '新增'}条目 uid=${uid}，正文 ${String(content).length} 字`);
-            debug(`世界书写入明细：条目总数 ${Object.keys(data.entries).length}，本次改动 uid=${uid}，快照键 ${snapshotKey}`);
+            debug(`世界书写入明细：条目总数 ${Object.keys(data.entries).length}，本次改动 uid=${uid}`);
 
             // 回读校验
             const after = await readWorldBook(bookName);
             const check = verifyForeignEntriesUnchanged(foreignBefore, after);
             if (!check.ok) {
+                // 明细（含 uid）只进日志；界面上说「有别的条目被改动」就够，uid 用户不认识
                 error(`世界书写后校验失败：${check.reason}`);
-                throw new Error(`世界书写后校验失败：${check.reason}`);
+                throw new Error('世界书写后校验失败：有其他条目内容被改动，已中止本次写入');
             }
             if (!after.entries[uid] || String(after.entries[uid].content || '') !== String(content)) {
                 error(`世界书回读内容不一致：uid=${uid}，期望 ${String(content).length} 字，实际 ${String((after.entries[uid] || {}).content || '').length} 字`);
@@ -453,7 +459,7 @@
             }
             debug(`世界书写后校验通过：uid=${uid}，其余 ${Object.keys(foreignBefore).length} 条外部条目零变化`);
 
-            return { uid, snapshotKey };
+            return { uid };
         });
     }
 
@@ -477,7 +483,7 @@
             const check = verifyForeignEntriesUnchanged(foreignBefore, after);
             if (!check.ok) {
                 error(`删除后校验失败：${check.reason}`);
-                throw new Error(`删除后校验失败：${check.reason}`);
+                throw new Error('删除后校验失败：有其他条目内容被改动，已中止本次删除');
             }
             log(`世界书已删除事件条目 uid=${uid}，退回 ${Object.keys(foreignBefore).length} 条外部条目`);
             return { deleted: true };
@@ -726,7 +732,7 @@
             data = await readWorldBook(bookName);
         } catch (e) {
             error(`角色世界书「${bookName}」读取失败，本次生成将不含任何设定：${e.message}。`
-                + '生成结果很可能与世界观不符，请检查世界书是否存在或酒馆接口是否正常');
+                + '生成结果很可能与世界观不符，请检查世界书是否存在，或酒馆本身是否连得上');
             return null;
         }
         const total = Object.keys((data && data.entries) || {}).length;
@@ -1025,7 +1031,364 @@
         return decided;
     }
 
-    // ==================== 8. OOC 词与偏好 ====================
+    // ==================== 5. 通用组件 ====================
+    // 表单控件、确认条、轻提示：界面层与设置页共用，放这里免得两边各写一套
+
+    // ---------- 表单控件 helper（2026-11-02 A2） ----------
+    // 设置页与偏好区以前每家自己建 input/select、自己挂 change、自己 saveSettings，
+    // 光 apiProfiles 的查找就复制了 13 遍。这里收成一组小函数：
+    // 建控件、接事件、写回一次做完，调用处只描述「这个格子改什么」。
+    // 只做「改完不重绘」这一类，需要整页重绘的少数项仍在调用处显式 renderPanel()。
+
+    /** 输入框。onCommit 在 change（失焦或回车）时调用，返回 false 表示不写回 */
+    function inputField(opt) {
+        const o = opt || {};
+        const inp = el('input', 'eo-input' + (o.cls ? ' ' + o.cls : ''));
+        inp.type = o.type || 'text';
+        if (o.placeholder) inp.placeholder = o.placeholder;
+        if (o.value !== undefined && o.value !== null) inp.value = String(o.value);
+        if (o.width) inp.style.maxWidth = o.width;
+        if (o.attrs) for (const k of Object.keys(o.attrs)) inp.setAttribute(k, o.attrs[k]);
+        if (typeof o.onCommit === 'function') {
+            const commit = () => {
+                let v = inp.value;
+                if (typeof o.normalize === 'function') v = o.normalize(v);
+                if (v === false) return;
+                o.onCommit(v);
+            };
+            inp.addEventListener('change', commit);
+            if (o.commitOnInput) inp.addEventListener('input', commit);
+        }
+        return inp;
+    }
+
+    /**
+     * 数字输入框：失焦时把内容规整到 min/max/step，并把规整后的值写回框里。
+     * 空输入按原值处理，不把 0 写进设置——以前直接 Number('') 会得到 0，把用户填过的值抹掉。
+     */
+    function numberField(opt) {
+        const o = opt || {};
+        const inp = el('input', 'eo-input' + (o.cls ? ' ' + o.cls : ''));
+        inp.type = 'number';
+        if (o.placeholder) inp.placeholder = o.placeholder;
+        if (o.value !== undefined && o.value !== null) inp.value = String(o.value);
+        inp.step = o.step || 1;
+        if (o.min !== undefined) inp.min = o.min;
+        if (o.max !== undefined) inp.max = o.max;
+        if (o.width) inp.style.maxWidth = o.width;
+        inp.addEventListener('change', () => {
+            const t = String(inp.value || '').trim();
+            if (t === '') { inp.value = o.value === undefined ? '' : String(o.value); return; }
+            let n = Number(t);
+            if (!isFinite(n)) { inp.value = String(o.value === undefined ? '' : o.value); return; }
+            if (o.min !== undefined && n < o.min) n = o.min;
+            if (o.max !== undefined && n > o.max) n = o.max;
+            if (o.step) n = Math.round(n / o.step) * o.step;
+            n = Math.round(n);
+            inp.value = String(n);
+            if (typeof o.onCommit === 'function') o.onCommit(n);
+        });
+        return inp;
+    }
+
+    /** 下拉框。options 为 [[值, 显示文字], ...] */
+    function selectField(opt) {
+        const o = opt || {};
+        const sel = el('select', 'eo-sel' + (o.cls ? ' ' + o.cls : ''));
+        for (const [v, label] of (o.options || [])) {
+            const op = el('option', null, label);
+            op.value = String(v);
+            sel.appendChild(op);
+        }
+        sel.value = o.value === undefined || o.value === null ? '' : String(o.value);
+        if (typeof o.onChange === 'function') {
+            sel.addEventListener('change', () => o.onChange(sel.value));
+        }
+        return sel;
+    }
+
+    /** 一行：标签 + 控件 + 可选说明（问号气泡或行内小字） */
+    function formRow(label, control, opt) {
+        const o = opt || {};
+        const row = el('div', 'eo-row');
+        if (label) row.appendChild(el('label', null, label));
+        row.appendChild(control);
+        if (o.help) attachHelp(row, o.help);
+        if (o.hint) row.appendChild(el('span', 'eo-hint', o.hint));
+        return row;
+    }
+
+    /** 在 apiProfiles 里按 id 找一套配置并改它。返回 false 表示没找到 */
+    function updateProfile(id, mutate) {
+        const t = (getSettings().apiProfiles || []).find(x => x.id === id);
+        if (!t) return false;
+        mutate(t);
+        saveSettings();
+        return true;
+    }
+
+    // ---------- 无障碍：让可点的块也能用键盘 ----------
+    // 界面里很多可点的东西是 div（标签页、节点行），鼠标能用、键盘用不了。
+    // 这里统一补三件事：可以 Tab 到、有 role、回车和空格等同点击。
+
+    /** 把元素变成键盘可操作的可点块。role 默认 button，列表项可传 "tab" */
+    function makeActivatable(node, role) {
+        if (!node) return node;
+        node.setAttribute('tabindex', '0');
+        node.setAttribute('role', role || 'button');
+        node.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Spacebar') {
+                ev.preventDefault();
+                ev.stopPropagation();
+                node.click();
+            }
+        });
+        return node;
+    }
+
+    /** 重画当前页（密钥改动后 p 快照过期，靠重绘重新取） */
+    function reloadProfileKey() {
+        repaintPage();
+    }
+
+    /**
+     * 密钥掩码（2026-11-02）：设置页原本把完整密钥回填进密码框，
+     * 打开设置页、点一下「显示密码」就能看到整串。这里只露头尾，中间打码。
+     * 注意：掩码只用于回显，任何写盘路径都不许写这个值。
+     */
+    function maskKey(k) {
+        const v = String(k || '');
+        if (!v) return '';
+        if (v.length <= 8) return '••••';
+        return v.slice(0, 3) + '••••' + v.slice(-4);
+    }
+
+    // ---------- 导出一份文本/JSON 文件（2026-11-02：排障不用再截图手抄） ----------
+
+    /**
+     * 复制一段文字到剪贴板（2026-11-02）。
+     * 优先 navigator.clipboard，权限被拒或页面不在安全上下文时退回 execCommand，
+     * 两条都不成返回 false，由调用方提示用户手动选。
+     */
+    async function copyText(text) {
+        const v = String(text == null ? '' : text);
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(v);
+                return true;
+            }
+        } catch (e) { /* 落到下面的兜底 */ }
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = v;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            const ok = document.execCommand('copy');
+            ta.remove();
+            return !!ok;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /** 文件名里的时间戳：20261102-1219，本地时间，排序即时间顺序 */
+    function fileStamp(d) {
+        const t = d || new Date();
+        const p = (n) => String(n).padStart(2, '0');
+        return `${t.getFullYear()}${p(t.getMonth() + 1)}${p(t.getDate())}-${p(t.getHours())}${p(t.getMinutes())}`;
+    }
+    function downloadText(filename, text, mime) {
+        try {
+            const blob = new Blob([text], { type: (mime || 'text/plain') + ';charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 0);
+            return true;
+        } catch (e) {
+            warn('导出失败', e);
+            return false;
+        }
+    }
+
+    // ---------- 确认条与轻提示（2026-11-02 起替代原生 confirm / alert） ----------
+
+    // 正在等的那次模型请求：放弃等待时 abort 掉，并让界面立刻解除忙碌态
+    let pendingRequest = null;
+
+    // 生成页三个偏好折叠组里哪些是展开的（2026-11-02）
+    // 以前每组固定 open = false：开新事件要展开三次才能看全，点一下别的又折回去。
+    const openPrefGroups = new Set();
+
+    // ---------- 重绘时的滚动与焦点保持（2026-11-02 C1 止血版） ----------
+    // 整页重绘会把 #eo_body 整个清空重建，浏览器随之把滚动位置归零、焦点丢到 body。
+    // 这里在重绘前记下「滚到哪」「焦点在哪个关键元素、光标在第几个字」，重绘后按稳定 key 找回来。
+    // 输入框的值另存一份：重绘后新框是空的，不补回去等于把用户正在打的东西抹了。
+
+    /** 给控件挂一个稳定 key，重绘后靠它认回同一个控件 */
+    function markKey(node, key) {
+        if (node && key) node.dataset.eoKey = String(key);
+        return node;
+    }
+
+    /** 记下当前快照：滚动位置、焦点元素、光标位置、各输入框的值、展开着的折叠块 */
+    function captureView() {
+        const body = panelEl && panelEl.querySelector('#eo_body');
+        if (!body) return null;
+        // 滚动的是 #eo_body（面板 fixed 全屏），不是窗口
+        const out = { scrollTop: body.scrollTop || 0, scrollY: window.scrollY || window.pageYOffset || 0, focus: null, inputs: {}, details: [] };
+        const act = document.activeElement;
+        if (act && body.contains(act)) {
+            const key = act.dataset && act.dataset.eoKey;
+            if (key) {
+                out.focus = {
+                    key,
+                    start: typeof act.selectionStart === 'number' ? act.selectionStart : null,
+                    end: typeof act.selectionEnd === 'number' ? act.selectionEnd : null,
+                    scrollTop: typeof act.scrollTop === 'number' ? act.scrollTop : 0,
+                };
+            }
+        }
+        for (const node of body.querySelectorAll('[data-eo-key]')) {
+            const key = node.dataset.eoKey;
+            const tag = node.tagName;
+            if (tag === 'INPUT') {
+                out.inputs[key] = node.type === 'checkbox' ? !!node.checked : node.value;
+            } else if (tag === 'SELECT' || tag === 'TEXTAREA') {
+                out.inputs[key] = node.value;
+            } else if (tag === 'DETAILS') {
+                if (node.open) out.details.push(key);
+            }
+        }
+        return out;
+    }
+
+    /** 把快照找回来。滚动用两帧：内容刚重建，第一帧的布局还不一定算完 */
+    function restoreView(snap) {
+        const body = panelEl && panelEl.querySelector('#eo_body');
+        if (!body || !snap) return;
+        for (const [key, val] of Object.entries(snap.inputs || {})) {
+            const node = body.querySelector('[data-eo-key="' + cssEscape(key) + '"]');
+            if (!node) continue;
+            if (node.type === 'checkbox') node.checked = !!val;
+            else if (node.value !== val) node.value = val;
+        }
+        for (const key of snap.details || []) {
+            const node = body.querySelector('[data-eo-key="' + cssEscape(key) + '"]');
+            if (node) node.open = true;
+        }
+        if (snap.focus) {
+            const node = body.querySelector('[data-eo-key="' + cssEscape(snap.focus.key) + '"]');
+            if (node) {
+                try { node.focus({ preventScroll: true }); } catch (e) { try { node.focus(); } catch (e2) { /* 忽略 */ } }
+                try {
+                    if (snap.focus.start != null && node.setSelectionRange) {
+                        node.setSelectionRange(snap.focus.start, snap.focus.end == null ? snap.focus.start : snap.focus.end);
+                    }
+                } catch (e) { /* 密码框等不支持，忽略 */ }
+                if (node.scrollTop !== undefined && snap.focus.scrollTop) node.scrollTop = snap.focus.scrollTop;
+            }
+        }
+        const st = snap.scrollTop || 0;
+        if (st > 0) {
+            body.scrollTop = st;
+            requestAnimationFrame(() => { if (body.isConnected) body.scrollTop = st; });
+        }
+    }
+
+    /** CSS 属性选择器里 key 的转义：key 都是我们自己写的字母数字与短横，保险起见转一下引号与反斜杠 */
+    function cssEscape(key) {
+        return String(key).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    }
+
+    /** 放弃当前这次模型请求（界面上的「放弃等待」按钮调）。没在等就什么也不做 */
+    function abortPendingRequest() {
+        const p = pendingRequest;
+        if (!p) return false;
+        pendingRequest = null;
+        try { if (p.controller) p.controller.abort(); } catch (e) { /* 老浏览器没有 abort，忽略 */ }
+        p.giveUp();
+        return true;
+    }
+
+    // 同一时刻只允许一条待确认；新的请求直接把旧的判为取消
+    let pendingConfirm = null;
+
+    /** 收起确认条。ok 为真表示点了确定，否则按取消处理 */
+    function settleConfirm(ok) {
+        const p = pendingConfirm;
+        if (!p) return;
+        pendingConfirm = null;
+        const bar = panelEl && panelEl.querySelector('#eo_confirmbar');
+        if (bar) bar.classList.toggle('eo-confirmbar-open', false);
+        document.removeEventListener('keydown', p.onKey, true);
+        p.resolve(!!ok);
+    }
+
+    /**
+     * 面板内确认条，返回 Promise<boolean>。
+     * 以前用原生 confirm：手机上阻塞整个页面、样式与面板脱节、长文案会被截断。
+     * 现在挂在面板标题栏下方，不阻塞渲染，Enter 确认、Esc 取消。
+     */
+    function askConfirm(text, opt) {
+        const o = opt || {};
+        if (pendingConfirm) settleConfirm(false);
+        const p = ensurePanel();
+        const bar = p.querySelector('#eo_confirmbar');
+        const txt = p.querySelector('#eo_confirm_text');
+        const okBtn = p.querySelector('#eo_confirm_ok');
+        const cancelBtn = p.querySelector('#eo_confirm_cancel');
+        if (!bar || !txt || !okBtn || !cancelBtn) return Promise.resolve(false);
+
+        txt.textContent = String(text || '确定继续？');
+        okBtn.textContent = o.okText || '确定';
+        cancelBtn.textContent = o.cancelText || '取消';
+        okBtn.className = 'eo-btn ' + (o.danger === false ? 'eo-primary' : 'eo-btn-danger');
+
+        return new Promise((resolve) => {
+            const onKey = (ev) => {
+                if (ev.key === 'Enter') { ev.preventDefault(); ev.stopPropagation(); settleConfirm(true); }
+                else if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); settleConfirm(false); }
+            };
+            okBtn.onclick = () => settleConfirm(true);
+            cancelBtn.onclick = () => settleConfirm(false);
+            pendingConfirm = { resolve, onKey };
+            // 用捕获阶段拦，避免面板里其他 keydown 监听先吃掉 Esc
+            document.addEventListener('keydown', onKey, true);
+            bar.classList.add('eo-confirmbar-open');
+            // 让用户一眼看到这次要确认什么，不用自己往上翻
+            if (bar.scrollIntoView) {
+                try { bar.scrollIntoView({ block: 'nearest' }); } catch (e) { /* 老浏览器忽略 */ }
+            }
+            okBtn.focus({ preventScroll: true });
+        });
+    }
+
+    /** 右下角轻提示，替代原生 alert。bad 为真时红色、停留更久 */
+    function toast(msg, opt) {
+        const o = opt || {};
+        const p = ensurePanel();
+        const box = p.querySelector('#eo_toasts');
+        if (!box) return;
+        const t = el('div', 'eo-toast' + (o.bad ? ' eo-toast-bad' : ''), String(msg || ''));
+        box.appendChild(t);
+        // 超过 4 条时挤掉最早的，避免堆满屏幕
+        while (box.children.length > 4) box.removeChild(box.firstChild);
+        requestAnimationFrame(() => t.classList.add('eo-toast-in'));
+        // 提示可以指定显示时长（比如首次说明要让人看完），没给就按级别取默认
+        const ms = o.ms || (o.bad ? 6000 : 3000);
+        setTimeout(() => {
+            t.classList.remove('eo-toast-in');
+            setTimeout(() => { if (t.parentNode) t.parentNode.removeChild(t); }, 220);
+        }, ms);
+    }
+
+    // ==================== 6. OOC 词与偏好 ====================
 
     // 原文存档：事务/运维/酒馆/OOC词-伊瑟利亚-兰开斯特-事件大纲与状态盘点.md
     // 第 12-45 行 = 大纲词，51-63 行 = 盘点词。此处为改良版，差异见设计文档。
@@ -1714,7 +2077,7 @@
         return parts.join('\n');
     }
 
-    // ==================== 9. 上下文拼装 ====================
+    // ==================== 7. 上下文拼装 ====================
 
     function getChatMessages() {
         const context = ctx();
@@ -1873,32 +2236,48 @@
         return out;
     }
 
-    // ==================== 10. 生成与解析 ====================
+    // ==================== 8. 生成与解析 ====================
 
-    // 酒馆 generateRaw 支持的连接源类型（api 参数取值）
-    const TAVERN_APIS = [
-        ['openai', 'OpenAI / 兼容接口（openai）'],
-        ['claude', 'Claude（claude）'],
-        ['makersuite', 'Google AI Studio（makersuite）'],
-        ['vertexai', 'Vertex AI（vertexai）'],
-        ['mistralai', 'Mistral（mistralai）'],
-        ['custom', '自定义 OpenAI 兼容（custom）'],
-        ['cohere', 'Cohere（cohere）'],
-        ['deepseek', 'DeepSeek（deepseek）'],
-        ['perplexity', 'Perplexity（perplexity）'],
-        ['groq', 'Groq（groq）'],
-        ['01ai', '01.AI（01ai）'],
-        ['openrouter', 'OpenRouter（openrouter）'],
-    ];
-
+    /**
+     * 发一次模型请求，外面套一层统一处理「超时」和「用户点放弃等待」。
+     * 两条出路都必须让调用方的 finally 跑起来，否则 busy 不解除，界面一直转圈只能刷新页面。
+     * 走酒馆 generateRaw 的那两种模式没法中断，只能等它自己回，所以放弃等待对它们只是先把界面放开。
+     */
     function callModel(systemPrompt, prompt) {
+        let giveUp = () => {};
+        const outer = new Promise((resolve, reject) => {
+            giveUp = () => reject(new Error('已放弃等待模型返回'));
+            doCallModel(systemPrompt, prompt).then(resolve, reject);
+        });
+        // 超时兜底：直连自己还会按配置 abort；走酒馆的没有取消接口，这里只放界面
+        const limit = directTimeoutMs() + 60000;
+        const timer = setTimeout(() => {
+            if (pendingRequest) {
+                log(`模型请求超过 ${Math.round(limit / 1000)} 秒仍未收口，界面先放开，底层请求可能还在跑`);
+                settle();
+            }
+        }, limit);
+        function settle() {
+            clearTimeout(timer);
+            if (pendingRequest) pendingRequest = null;
+        }
+        pendingRequest = { giveUp, controller: null };
+        return outer.finally(settle);
+    }
+
+    /**
+     * 真正发起请求。第三参 overrideProfile 只在「测试连接」这类场景用：
+     * 指定这一次用哪套配置，不读也不改全局 activeProfileId。
+     */
+    function doCallModel(systemPrompt, prompt, overrideProfile) {
         const context = ctx();
         if (!context) {
             error('调用模型失败：取不到酒馆上下文');
             return Promise.reject(new Error('未取到酒馆上下文'));
         }
         const s = getSettings();
-        const profile = (s.apiProfiles || []).find(p => p.id === s.activeProfileId)
+        const profile = overrideProfile
+            || (s.apiProfiles || []).find(p => p.id === s.activeProfileId)
             || { id: 'main', name: '跟随酒馆主连接', mode: 'main' };
         const t0 = Date.now();
         debug(`调用模型：配置「${profile.name || profile.id}」（mode=${profile.mode || 'main'}），system ${String(systemPrompt).length} 字，prompt ${String(prompt).length} 字`);
@@ -1927,14 +2306,72 @@
             error('调用模型失败：当前酒馆上下文没有 generateRaw，无法发起生成');
             return Promise.reject(new Error('generateRaw 不可用'));
         }
-        const params = { prompt, systemPrompt };
-        if (profile.mode === 'tavern') {
-            if (profile.api) params.api = profile.api;
-            if (profile.model) params.model = profile.model;
-            if (Number(profile.responseLength) > 0) params.responseLength = Number(profile.responseLength);
-            debug(`走酒馆连接源：api=${profile.api || '（跟随）'}，model=${profile.model || '（跟随）'}`);
+        // 只剩「跟随酒馆主连接」这一条走 generateRaw 的路：不指定连接源，也不指定模型，
+        // 完全用酒馆当前选中的那套（2026-11-02 去掉了可指定连接源的旧档）
+        return Promise.resolve(context.generateRaw({ prompt, systemPrompt })).then(finish, failed);
+    }
+
+    /** 直连请求的超时时间：设置里配的优先，没配或配坏就用 3 分钟 */
+    function directTimeoutMs() {
+        const n = Number((getSettings().request || {}).timeoutMs);
+        return Number.isFinite(n) && n >= 5000 ? n : 180000;
+    }
+
+    /**
+     * 极简 YAML 解析（2026-11-02）：只覆盖「键: 值」和「键:」两种行。
+     * 请求体这两段本来就是给人手填的简单结构，不需要完整 YAML 能力；
+     * 解析失败只返回空对象，不抛错——填错不该让整次请求失败。
+     */
+    function parseFlatYaml(text) {
+        const out = {};
+        const lines = String(text || '').replace(/\r/g, '').split(NL);
+        for (const raw of lines) {
+            const line = raw.trim();
+            if (!line || line.startsWith('#')) continue;
+            const idx = line.indexOf(':');
+            if (idx <= 0) continue;
+            const key = line.slice(0, idx).trim().replace(/^["']|["']$/g, '');
+            let val = line.slice(idx + 1).trim();
+            if (!key) continue;
+            if (val === '') { out[key] = {}; continue; }
+            if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+                val = val.slice(1, -1);
+            } else if (val === 'true') { out[key] = true; continue; }
+            else if (val === 'false') { out[key] = false; continue; }
+            else if (val === 'null' || val === '~') { out[key] = null; continue; }
+            else if (/^-?\d+$/.test(val)) { out[key] = Number(val); continue; }
+            else if (/^-?\d+\.\d+$/.test(val)) { out[key] = Number(val); continue; }
+            else if (val.startsWith('[') && val.endsWith(']')) {
+                const inner = val.slice(1, -1).trim();
+                out[key] = inner ? inner.split(',').map(x => x.trim().replace(/^["']|["']$/g, '')) : [];
+                continue;
+            }
+            out[key] = val;
         }
-        return Promise.resolve(context.generateRaw(params)).then(finish, failed);
+        return out;
+    }
+
+    /** 把 YAML 文本里的键合并进目标对象（同名覆盖） */
+    function mergeYamlInto(target, text) {
+        if (!text || !String(text).trim()) return target;
+        const parsed = parseFlatYaml(text);
+        for (const k of Object.keys(parsed)) target[k] = parsed[k];
+        return target;
+    }
+
+    /** 按 YAML 文本里的键名从对象里删字段 */
+    function excludeYamlKeys(target, text) {
+        if (!text || !String(text).trim()) return target;
+        for (const raw of String(text).replace(/\r/g, '').split(NL)) {
+            // 一行一个键名是最好填的写法，不用写成 YAML 列表；带冒号的也认
+            let line = raw.trim();
+            if (!line || line.startsWith('#')) continue;
+            if (line.startsWith('- ')) line = line.slice(2).trim();
+            const idx = line.indexOf(':');
+            const key = (idx > 0 ? line.slice(0, idx) : line).trim().replace(/^["']|["']$/g, '');
+            if (key) delete target[key];
+        }
+        return target;
     }
 
     /** 直接调用 OpenAI 兼容的 /chat/completions，不经过酒馆连接源 */
@@ -1956,18 +2393,46 @@
         };
         if (Number(profile.maxTokens) > 0) body.max_tokens = Number(profile.maxTokens);
 
+        // 请求体三段（2026-11-02）：与酒馆里同名设置一个意思
+        //   包含主体参数：往请求体里塞自定义字段，同名覆盖
+        //   排除主体参数：按名字删字段
+        //   包含请求标头：往请求头里塞自定义字段，同名覆盖
+        const extraHeaders = {};
+        mergeYamlInto(body, profile.includeBody);
+        excludeYamlKeys(body, profile.excludeBody);
+        mergeYamlInto(extraHeaders, profile.includeHeaders);
+
+        // 以前这里没有任何超时：接口挂住就永远等下去，busy 不会解除，只能刷新页面
+        const timeoutMs = directTimeoutMs();
+        const controller = typeof AbortController === 'function' ? new AbortController() : null;
+        if (pendingRequest && controller) {
+            pendingRequest.controller = controller;
+            // 「放弃等待」按钮也走这里：abort 之后 fetch 会抛 AbortError
+            const prevGiveUp = pendingRequest.giveUp;
+            pendingRequest.giveUp = () => { prevGiveUp(); try { controller.abort(); } catch (e) { /* 忽略 */ } };
+        }
+        const timer = setTimeout(() => {
+            if (controller) { try { controller.abort(); } catch (e) { /* 忽略 */ } }
+        }, timeoutMs);
+
         let resp;
         try {
             resp = await fetch(url, {
                 method: 'POST',
-                headers: {
+                headers: Object.assign({
                     'Content-Type': 'application/json',
                     'Authorization': 'Bearer ' + profile.apiKey,
-                },
+                }, extraHeaders),
                 body: JSON.stringify(body),
+                signal: controller ? controller.signal : undefined,
             });
         } catch (e) {
+            if (e && (e.name === 'AbortError' || e.code === 20)) {
+                throw new Error(`等了 ${Math.round(timeoutMs / 1000)} 秒没有返回，已放弃`);
+            }
             throw new Error(`无法连接 ${url}：${e && e.message || e}`);
+        } finally {
+            clearTimeout(timer);
         }
         const text = await resp.text();
         if (!resp.ok) {
@@ -1988,10 +2453,14 @@
         return String(out);
     }
 
-    /** 测试连接：发一条极短请求，返回结果文本供界面显示 */
+    /**
+     * 测试连接：发一条极短请求，返回结果文本供界面显示。
+     * 以前这里收着 profile 却不用，内部读全局 activeProfileId，调用处只好临时改全局再改回来；
+     * 测试期间点生成就会用测试配置去请求，白烧一次钱。现在直接用传进来的这套配置。
+     */
     async function testProfile(profile) {
         const t0 = Date.now();
-        const out = await callModel('你是一个连通性测试助手，只回一个字。', '只回复两个字：收到');
+        const out = await callModel('你是一个连通性测试助手，只回一个字。', '只回复两个字：收到', profile);
         return { ok: true, ms: Date.now() - t0, sample: String(out || '').trim().slice(0, 60) };
     }
 
@@ -2434,7 +2903,7 @@
         return { structured, raw: String(raw || '') };
     }
 
-    // ==================== 11. 事件流程 ====================
+    // ==================== 9. 事件流程 ====================
 
     let busy = false;
     // 忙碌提示文案随操作变：废弃/完结是本地操作，不该显示「正在请求模型」
@@ -2452,7 +2921,24 @@
         if (panelEl) {
             const b = panelEl.querySelector('#eo_busy');
             if (b) {
-                if (text) b.textContent = text;
+                // 忙碌条上只放文字和一个「放弃等待」按钮：请求挂住时这是唯一出路，
+                // 以前只能刷新整个页面。按钮点了之后走 abortPendingRequest，busy 随之解除
+                b.innerHTML = '';
+                b.appendChild(document.createTextNode(text || busyText || '处理中…'));
+                if (on) {
+                    const giveUp = el('span', 'eo-giveup', '放弃等待');
+                    giveUp.addEventListener('click', (ev) => {
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        if (!abortPendingRequest()) {
+                            // 没有正在等的请求（比如在写世界书），只提示不假装能打断
+                            toast('当前这一步没有可打断的请求，写完会自己结束');
+                        } else {
+                            log('已放弃等待模型返回');
+                        }
+                    });
+                    b.appendChild(giveUp);
+                }
                 b.style.display = on ? 'block' : 'none';
             }
         }
@@ -2798,6 +3284,17 @@
         renderProgress();
     }
 
+    /** 把当前进行中的那一步标成失败，并保留列表让人看是卡在哪（2026-11-02） */
+    function failProgress(reason) {
+        const last = progress.steps[progress.steps.length - 1];
+        if (last && !last.done && !last.failed) {
+            last.failed = true;
+            last.ms = Date.now() - last.at;
+            if (reason) last.text = last.text + '：' + reason;
+        }
+        renderProgress();
+    }
+
     function renderProgress() {
         if (!panelEl) return;
         // 进度条挂在操作按钮下方：找当前页的锚点，找不到才退回面板顶部
@@ -2821,6 +3318,11 @@
     function buildProgressHtml() {
         const sec = Math.floor((Date.now() - progress.startedAt) / 1000);
         const rows = progress.steps.map((s) => {
+            // 失败那一步单独标红（2026-11-02）：以前失败后就停在 ⋯ 或灰着，看不出卡在哪
+            if (s.failed) {
+                return `<div class="eo-progress-row eo-progress-failed">`
+                    + `<span class="eo-progress-mark">✕</span>${escapeHtml(s.text)}</div>`;
+            }
             const mark = s.done ? '✓' : '⋯';
             const cost = s.done && s.ms != null ? `　${(s.ms / 1000).toFixed(1)} 秒` : '';
             return `<div class="eo-progress-row${s.done ? ' eo-progress-done' : ''}">`
@@ -2947,6 +3449,10 @@
             meta.events[id] = event;
             saveMeta();
             return event;
+        } catch (e) {
+            // 失败也要让人看出卡在哪一步，进度列表留着（2026-11-02）
+            failProgress(e && e.message || String(e));
+            throw e;
         } finally {
             setBusy(false, true);
         }
@@ -2988,6 +3494,9 @@
             clearGenFormOnAdopt();
             log(`已采用事件「${event.name}」，世界书条目 uid=${res.uid}`);
             return event;
+        } catch (e) {
+            failProgress(e && e.message || String(e));
+            throw e;
         } finally {
             setBusy(false, true);
         }
@@ -3331,6 +3840,9 @@
 
             saveMeta();
             return { record, event };
+        } catch (e) {
+            failProgress(e && e.message || String(e));
+            throw e;
         } finally {
             setBusy(false, true);
         }
@@ -3403,6 +3915,41 @@
         event.tracker.pendingNodes = Array.from(pending).sort((a, b) => a - b);
         log(`手动${triggered.has(id) ? '打勾' : '撤销'}节点 ${id}（当前已触发 ${event.tracker.triggeredNodes.length} 个）`);
         saveMeta();
+        // 撤勾的后果不直观：自动盘点以后也不会再勾它。这里说清楚，并给出恢复入口
+        if (!triggered.has(id)) {
+            toast(`已撤销节点 ${id}：自动盘点以后不会再勾选它。要恢复点盘点页的「恢复自动勾选」`, { bad: true });
+        }
+    }
+
+    /**
+     * 恢复被否定的节点（2026-11-02）。
+     * 撤勾这件事有两种来源，不能一把清：直接清掉否决的话，
+     * 模型会连你亲手里撤掉的、已经确认过的节点也重新勾上。所以分开处理：
+     *   1. 自动勾选后又手撤的：从自动记录里摘掉，节点交回模型重新判断；
+     *   2. 纯人工否决的：清掉否决标记即可。
+     */
+    function restoreVetoedNodes() {
+        const event = getCurrentEvent();
+        if (!event) return 0;
+        const t = event.tracker || {};
+        const vetoed = (t.nodeVetoed || []).slice();
+        if (!vetoed.length) return 0;
+        const auto = (t.autoCommitted || []).slice();
+        const hitAuto = auto.filter(a => vetoed.includes(a.node)).map(a => a.node);
+        let n = 0;
+        if (hitAuto.length) {
+            t.autoCommitted = auto.filter(a => !hitAuto.includes(a.node));
+            log(`已撤回 ${hitAuto.length} 个自动勾选并交回模型判断（${hitAuto.join('、')}）`);
+            n += hitAuto.length;
+        }
+        const rest = vetoed.filter(id => !hitAuto.includes(id));
+        if (rest.length) {
+            n += rest.length;
+            log(`已恢复 ${rest.length} 个被否决的节点，自动盘点会重新判断（${rest.join('、')}）`);
+        }
+        t.nodeVetoed = [];
+        saveMeta();
+        return n;
     }
 
     /** 半自动：确认一条模型建议 */
@@ -3438,7 +3985,6 @@
         saveMeta();
     }
 
-    // ==================== 5. 界面 ====================
 
     let panelEl = null;
     let fabEl = null;
@@ -3449,12 +3995,24 @@
         const style = document.createElement('style');
         style.id = 'eo_style';
         style.textContent = `
+:root{
+  /* 主题色板（2026-11-02）：以前这些颜色散在各条规则里、同一色值重复十几遍，
+     改一次配色要全文找替换。现在统一在这里改，别处只用变量。 */
+  --eo-bg:#fffdf7;--eo-bg-soft:#fffaf0;--eo-bg-warm:#fff6e0;--eo-bg-busy:#fff3d6;
+  --eo-accent:#b8860b;--eo-accent-soft:#f5d080;--eo-accent-deep:#8a5b00;
+  --eo-line:rgba(184,134,11,.35);--eo-line-strong:rgba(184,134,11,.55);
+  --eo-text:#3c2f14;--eo-text-2:#6b5424;--eo-text-3:#8a7333;--eo-text-4:#9b8a5e;
+  --eo-dark:#4a3200;--eo-dark-2:#5a3e0b;
+  --eo-ok:#2c6e2c;--eo-bad:#a11;--eo-bad-bg:#fdecea;--eo-bad-line:#e7a9a3;--eo-bad-text:#8b0000;
+  --eo-danger:#c0392b;--eo-danger-deep:#a0301f;--eo-white:#fff;
+  --eo-text-5:var(--eo-text-5);--eo-text-6:var(--eo-text-6);--eo-ok-2:var(--eo-ok-2);--eo-accent-2:var(--eo-accent-2);
+}
 #eo_fab{position:fixed;z-index:30001;display:flex;align-items:center;justify-content:center;
   width:44px;height:44px;border-radius:12px;cursor:grab;box-sizing:border-box;
   user-select:none;-webkit-user-select:none;touch-action:none;
   -webkit-tap-highlight-color:transparent;outline:none;
-  background:linear-gradient(160deg,#fff3d6,#f5d080);border:1px solid rgba(184,134,11,.55);
-  box-shadow:0 2px 10px rgba(0,0,0,.25);color:#5a3e0b;font-size:15px;font-weight:700;
+  background:linear-gradient(160deg,var(--eo-bg-busy),var(--eo-accent-soft));border:1px solid var(--eo-line-strong);
+  box-shadow:0 2px 10px rgba(0,0,0,.25);color:var(--eo-dark-2);font-size:15px;font-weight:700;
   transition:width .16s ease,height .16s ease,left .16s ease,top .16s ease,filter .16s ease;}
 #eo_fab:hover{filter:brightness(1.06);}
 #eo_fab:active{cursor:grabbing;}
@@ -3467,14 +4025,14 @@
   background:transparent;border:0;box-shadow:none;}
 #eo_fab.eo-collapsed .eo-fab-label{display:none;}
 #eo_fab.eo-collapsed::after{content:"";position:absolute;top:50%;transform:translateY(-50%);
-  width:10px;height:100%;background:linear-gradient(160deg,#fff3d6,#f5d080);
-  border:1px solid rgba(184,134,11,.55);box-sizing:border-box;}
+  width:10px;height:100%;background:linear-gradient(160deg,var(--eo-bg-busy),var(--eo-accent-soft));
+  border:1px solid var(--eo-line-strong);box-sizing:border-box;}
 #eo_fab.eo-collapsed.eo-dock-left::after{left:0;border-radius:0 6px 6px 0;border-left:0;}
 #eo_fab.eo-collapsed.eo-dock-right::after{right:0;border-radius:6px 0 0 6px;border-right:0;}
 
 /* 悬停时把竖条撑开成完整图标 */
-#eo_fab.eo-collapsed.eo-hover{background:linear-gradient(160deg,#fff3d6,#f5d080);
-  border:1px solid rgba(184,134,11,.55);box-shadow:0 2px 10px rgba(0,0,0,.25);}
+#eo_fab.eo-collapsed.eo-hover{background:linear-gradient(160deg,var(--eo-bg-busy),var(--eo-accent-soft));
+  border:1px solid var(--eo-line-strong);box-shadow:0 2px 10px rgba(0,0,0,.25);}
 #eo_fab.eo-collapsed.eo-hover .eo-fab-label{display:inline;}
 #eo_fab.eo-collapsed.eo-hover::after{display:none;}
 #eo_fab.eo-collapsed.eo-hover.eo-dock-left{border-radius:0 12px 12px 0;border-left:0;}
@@ -3484,120 +4042,171 @@
   background:rgba(30,22,8,.55);backdrop-filter:blur(2px);}
 #eo_backdrop.eo-open{display:block;}
 #eo_panel.eo-open{display:flex;}
-/* 整页只由浏览器窗口滚动，页面里不再出现第二条滚动条（2026-11-02 危晓定）：
-   面板从左上角全宽铺开、高度随内容生长，.eo-body 只负责排版，不做内部滚动出卷轴 */
-#eo_panel{position:fixed;left:0;top:0;right:0;z-index:30001;display:none;flex-direction:column;
-  width:100%;height:auto;min-height:100vh;min-height:100dvh;
-  background:#fffdf7;border:0;border-radius:0;box-shadow:none;overflow:visible;
-  font-size:14px;color:#3c2f14;}
-#eo_panel .eo-body{max-width:1100px;width:100%;margin:0 auto;padding:16px 20px 48px;
-  overflow:visible;}
+/* 面板铺满整个视口，正文区自己滚（2026-11-02 第二次修）。
+   第一版把面板写成 height:auto 让高度随内容长，但它是 position:fixed——
+   fixed 元素不占文档流，页面不会因它变长，而 body 滚动又被锁了，
+   结果面板再长也没有任何地方能滚，手机滑动和 PC 滚轮全部失效。
+   现在高度钉死在视口，正文区吃掉剩余空间自己滚，内部不出第二条页面滚动条。 */
+#eo_panel{position:fixed;left:0;top:0;right:0;bottom:0;z-index:30001;display:none;flex-direction:column;
+  width:100%;height:100vh;height:100dvh;overflow:hidden;
+  background:var(--eo-bg);border:0;border-radius:0;box-shadow:none;
+  font-size:14px;color:var(--eo-text);}
+/* 正文区：吃掉剩余高度（min-height:0 是关键，否则会被内容撑破），自己滚 */
+/* 上边距为 0：标签栏要贴着头栏，中间不留缝（2026-11-02 危晓指出） */
+#eo_panel .eo-body{flex:1 1 auto;min-height:0;max-width:1100px;width:100%;margin:0 auto;
+  padding:0 20px 48px;overflow-y:auto;overflow-x:hidden;
+  -webkit-overflow-scrolling:touch;overscroll-behavior:contain;}
 .eo-box{max-height:none;overflow:visible;}
+/* 请求体三段（2026-11-02）：三块文本域上下排，别挤成一坨 */
+.eo-yaml-field{margin:8px 0 4px;}
+.eo-yaml-field>textarea{font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.5;
+  resize:vertical;min-height:56px;}
 @media (max-width:640px){
-  #eo_panel .eo-body{padding:12px 12px 40px;}
+  #eo_panel .eo-body{padding:0 12px 40px;}
   .eo-head{padding:10px 12px;}
+  .eo-tabs{margin-left:-12px;margin-right:-12px;padding-left:12px;padding-right:12px;}
 }
-.eo-busy{display:none;padding:8px 12px;background:#fff3d6;border-bottom:1px solid rgba(184,134,11,.3);
-  color:#8a5b00;font-size:12px;text-align:center;}
+.eo-busy{display:none;padding:8px 12px;background:var(--eo-bg-busy);border-bottom:1px solid rgba(184,134,11,.3);
+  color:var(--eo-accent-deep);font-size:12px;text-align:center;}
+.eo-giveup{margin-left:10px;padding:1px 8px;border:1px solid rgba(184,134,11,.6);border-radius:6px;
+  background:rgba(255,255,255,.6);cursor:pointer;font-size:12px;white-space:nowrap;}
+.eo-giveup:hover{background:#fff;}
 .eo-progress{display:none;padding:8px 12px;background:#f6f8fa;border-bottom:1px solid rgba(0,0,0,.08);
   font-size:12px;transition:opacity .6s;}
 .eo-progress-head{color:#333;font-weight:600;margin-bottom:4px;}
 .eo-progress-timer{color:#888;font-weight:400;}
 .eo-progress-row{color:#666;line-height:1.7;padding-left:2px;}
-.eo-progress-mark{display:inline-block;width:14px;color:#b8860b;}
-.eo-progress-done{color:#38761d;}
-.eo-progress-done .eo-progress-mark{color:#38761d;}
+.eo-progress-mark{display:inline-block;width:14px;color:var(--eo-accent);}
+.eo-progress-done{color:var(--eo-ok-2);}
+.eo-progress-done .eo-progress-mark{color:var(--eo-ok-2);}
 .eo-head{display:flex;align-items:center;gap:8px;padding:12px 20px;user-select:none;
   /* 页面交给浏览器窗口滚，标题栏和标签栏跟着吸在窗口顶上，往下翻也能关面板、切页签 */
   position:sticky;top:0;z-index:50;
-  background:linear-gradient(160deg,#fff3d6,#f5d080);border-bottom:1px solid rgba(184,134,11,.4);}
+  background:linear-gradient(160deg,var(--eo-bg-busy),var(--eo-accent-soft));border-bottom:1px solid rgba(184,134,11,.4);}
 .eo-title{font-weight:700;flex:1;}
 .eo-close{cursor:pointer;padding:4px 12px;border-radius:8px;background:rgba(255,255,255,.55);font-size:15px;}
 .eo-close:hover{background:rgba(255,255,255,.85);}
 .eo-body{padding:12px;overflow:visible;flex:1;}
 .eo-row{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;}
-.eo-row>label{min-width:78px;color:#6b5424;}
+.eo-row>label{min-width:78px;color:var(--eo-text-2);}
 .eo-btn{padding:5px 12px;border-radius:8px;border:1px solid rgba(184,134,11,.5);
-  background:#fff8e6;cursor:pointer;color:#5a3e0b;font-size:13px;}
+  background:var(--eo-bg-warm);cursor:pointer;color:var(--eo-dark-2);font-size:13px;}
 .eo-btn:hover{background:#fdeec4;}
 .eo-btn:disabled{opacity:.5;cursor:not-allowed;}
-.eo-btn.eo-primary{background:#f0c464;border-color:#b8860b;font-weight:600;}
+.eo-btn.eo-primary{background:var(--eo-accent-2);border-color:var(--eo-accent);font-weight:600;}
 /* 待选事件的操作按钮（采用/丢弃）：默认不高亮，只有按住的那一下亮，松开就灭。
    采用不再用 eo-primary 常亮——列表里好几个草稿时，常亮的按钮容易让人以为是当前选中 */
-.eo-btn.eo-press:active{background:#f0c464;border-color:#b8860b;font-weight:600;}
+.eo-btn.eo-press:active{background:var(--eo-accent-2);border-color:var(--eo-accent);font-weight:600;}
 /* 看大纲/编辑：开关类按钮，开着高亮、关掉回原样 */
-.eo-btn.eo-on{background:#f5d080;border-color:#b8860b;color:#4a3200;font-weight:700;}
 .eo-box{border:1px solid rgba(184,134,11,.32);border-radius:9px;padding:9px 10px;
-  background:#fffaf0;margin-bottom:9px;white-space:pre-wrap;word-break:break-word;
+  background:var(--eo-bg-soft);margin-bottom:9px;white-space:pre-wrap;word-break:break-word;
   max-height:none;overflow:visible;line-height:1.55;}
-.eo-hint{color:#8a7333;font-size:12px;line-height:1.5;}
+.eo-hint{color:var(--eo-text-3);font-size:12px;line-height:1.5;}
 /* 大纲正文：保留换行与缩进，不加高度上限（大纲本来就有几百行，截断反而看不到全貌） */
 .eo-outline-text{white-space:pre-wrap;word-break:break-word;line-height:1.7;
-  font-size:13px;color:#3c2f14;background:#fffdf7;border:1px solid rgba(184,134,11,.28);
+  font-size:13px;color:var(--eo-text);background:var(--eo-bg);border:1px solid rgba(184,134,11,.28);
   border-radius:9px;padding:10px 12px;margin-bottom:10px;}
 /* 子项语义说明：紧跟在对应下拉框下面，小一号、更淡 */
-.eo-subdesc{font-size:11px;color:#9b8a5e;margin:-2px 0 6px 8px;}
-.eo-warn{color:#a35c00;background:#fff3d6;border:1px solid #e6c37a;
+.eo-subdesc{font-size:11px;color:var(--eo-text-4);margin:-2px 0 6px 8px;}
+.eo-warn{color:#a35c00;background:var(--eo-bg-busy);border:1px solid #e6c37a;
   border-radius:8px;padding:7px 9px;margin-bottom:9px;font-size:12px;}
-.eo-ok{color:#2c6e2c;}
+.eo-ok{color:var(--eo-ok);}
+/* 面板内确认条（2026-11-02：替代原生 confirm，原生框在手机上阻塞且与本面板样式脱节） */
+.eo-confirmbar{display:none;align-items:center;gap:10px;padding:10px 20px;
+  background:var(--eo-bg-busy);border-bottom:1px solid rgba(184,134,11,.45);font-size:13px;color:#6b4a00;}
+.eo-confirmbar.eo-confirmbar-open{display:flex;}
+.eo-confirmbar .eo-confirm-text{flex:1;line-height:1.5;}
+.eo-confirmbar .eo-btn{flex:none;}
+.eo-btn-danger{background:var(--eo-danger);border-color:var(--eo-danger-deep);color:#fff;}
+.eo-btn-danger:hover{background:var(--eo-danger-deep);}
+/* 右下角轻提示（替代 alert）：3 秒自走，失败的留 6 秒 */
+.eo-toasts{position:fixed;right:16px;bottom:16px;z-index:30005;display:flex;
+  flex-direction:column;align-items:flex-end;gap:8px;pointer-events:none;}
+.eo-toast{max-width:min(420px,80vw);padding:9px 14px;border-radius:8px;font-size:13px;line-height:1.5;
+  background:var(--eo-bg);border:1px solid rgba(184,134,11,.5);color:var(--eo-text);
+  box-shadow:0 4px 14px rgba(0,0,0,.16);pointer-events:auto;opacity:0;transform:translateY(6px);
+  transition:opacity .18s,transform .18s;}
+.eo-toast.eo-toast-in{opacity:1;transform:none;}
+.eo-toast.eo-toast-bad{background:var(--eo-bad-bg);border-color:var(--eo-bad-line);color:var(--eo-bad-text);}
 .eo-bad{color:#a11;font-size:12px;}
-.eo-bad-box{color:#8b0000;background:#fdecea;border:1px solid #e7a9a3;
+.eo-bad-box{color:var(--eo-bad-text);background:var(--eo-bad-bg);border:1px solid var(--eo-bad-line);
   border-radius:8px;padding:8px 10px;margin-bottom:9px;font-size:12px;line-height:1.6;}
 select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11,.45);
-  background:#fffdf7;color:#3c2f14;font-size:13px;}
+  background:var(--eo-bg);color:var(--eo-text);font-size:13px;}
 /* 待选事件：列表式排布，每一项带采用/丢弃/展示大纲/编辑
    按钮样式（2026-11-02 危晓定）：采用、丢弃平时不高亮，按住那一下才亮；
    展示大纲、编辑是开关，开着常亮、点一次收起就灭 */
 .eo-drafts{display:flex;flex-direction:column;gap:8px;margin:6px 0 10px;}
-.eo-draft{background:#fffdf7;border:1px solid rgba(184,134,11,.35);border-radius:8px;
+.eo-draft{background:var(--eo-bg);border:1px solid var(--eo-line);border-radius:8px;
   padding:8px 10px;}
 .eo-draft-head{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;}
-.eo-draft-name{font-weight:700;color:#6b5424;font-size:13px;}
-.eo-draft-meta{font-size:11px;color:#9b8a5e;}
-.eo-draft-brief{font-size:12px;color:#5a4a2a;line-height:1.6;margin:4px 0 6px;}
+/* 待选卡片的操作区（2026-11-02）：左边是「只是看看」的开关，右边是真正生效的采用/丢弃。
+   开关态靠左侧竖条与文案表达，不靠底色——底色会和主按钮混在一起，分不清哪个会生效。 */
+.eo-draft-acts{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-top:6px;}
+.eo-draft-acts-look{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
+.eo-draft-acts-use{display:flex;gap:6px;align-items:center;margin-left:auto;}
+/* 设置页顶部锚点（2026-11-02 4.4）：八段平铺太长，手机上一个下拉滚半天 */
+.eo-setnav{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 10px;}
+.eo-setnav-btn{padding:3px 10px;font-size:12px;}
+.eo-anchor{scroll-margin-top:8px;height:0;}
+.eo-keybox{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
+.eo-keymask{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--eo-text-4);}
+.eo-btn-toggle{border-left:3px solid transparent;}
+.eo-btn-toggle.eo-on{border-left-color:var(--eo-accent);font-weight:700;}
+/* 进度条：失败那一步要看得出来是哪一步（2026-11-02） */
+.eo-progress-row.eo-progress-failed{color:var(--eo-danger);}
+.eo-progress-row.eo-progress-failed .eo-progress-mark{color:var(--eo-danger);font-weight:700;}
+.eo-draft-name{font-weight:700;color:var(--eo-text-2);font-size:13px;}
+.eo-draft-meta{font-size:11px;color:var(--eo-text-4);}
+.eo-draft-brief{font-size:12px;color:var(--eo-text-6);line-height:1.6;margin:4px 0 6px;}
 .eo-draft-body{margin-top:8px;border-top:1px dashed rgba(184,134,11,.3);padding-top:8px;}
 /* 草稿编辑：中文表单，一格一格填，不用看 YAML */
-.eo-draft-edit .eo-form-sec{font-weight:600;color:#6b5424;font-size:13px;margin:12px 0 6px;
+.eo-draft-edit .eo-form-sec{font-weight:600;color:var(--eo-text-2);font-size:13px;margin:12px 0 6px;
   border-bottom:1px solid rgba(184,134,11,.25);padding-bottom:4px;}
 .eo-draft-edit .eo-list{display:flex;flex-direction:column;gap:8px;}
-.eo-formcard{background:#fffaf0;border:1px solid rgba(184,134,11,.3);border-radius:8px;padding:8px 10px;}
+.eo-formcard{background:var(--eo-bg-soft);border:1px solid rgba(184,134,11,.3);border-radius:8px;padding:8px 10px;}
 .eo-formcard-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px;}
-.eo-formcard-title{font-weight:700;color:#6b5424;font-size:12px;flex:1;min-width:60px;}
+.eo-formcard-title{font-weight:700;color:var(--eo-text-2);font-size:12px;flex:1;min-width:60px;}
 .eo-draft-edit .eo-field{display:flex;gap:8px;align-items:flex-start;margin-bottom:6px;}
-.eo-draft-edit .eo-field-label{flex:0 0 96px;font-size:12px;color:#7a6431;padding-top:6px;
+.eo-draft-edit .eo-field-label{flex:0 0 96px;font-size:12px;color:var(--eo-text-5);padding-top:6px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .eo-draft-edit .eo-field .eo-input{margin-bottom:0;font-size:13px;}
 .eo-draft-edit .eo-field .eo-textarea{min-height:42px;}
 .eo-btn.eo-sm{padding:3px 9px;font-size:12px;}
-.eo-extra-keys summary{font-size:11px;color:#9b8a5e;cursor:pointer;margin:4px 0;}
+.eo-extra-keys summary{font-size:11px;color:var(--eo-text-4);cursor:pointer;margin:4px 0;}
 /* YAML 编辑框用等宽字，行号对齐、编号一眼能看出跳没跳 */
 .eo-draft-yaml{font-family:ui-monospace,Consolas,"Courier New",monospace;font-size:12px;
   white-space:pre;overflow:visible;line-height:1.5;min-height:160px;}
-.eo-draft-edit label,.eo-draft-edit .eo-label{font-size:12px;color:#7a6431;white-space:nowrap;}
+.eo-draft-edit label,.eo-draft-edit .eo-label{font-size:12px;color:var(--eo-text-5);white-space:nowrap;}
 .eo-draft-edit .eo-sec-inline{margin-top:6px;}
-.eo-sec{border-top:1px dashed rgba(184,134,11,.35);margin:10px 0 6px;padding-top:8px;
-  font-weight:600;color:#6b5424;}
+.eo-sec{border-top:1px dashed var(--eo-line);margin:10px 0 6px;padding-top:8px;
+  font-weight:600;color:var(--eo-text-2);}
 
 /* 标签栏 */
-.eo-tabs{display:flex;gap:4px;border-bottom:1px solid rgba(184,134,11,.35);
-  margin-bottom:14px;position:sticky;top:49px;background:#fffdf7;z-index:40;padding-top:4px;}
-.eo-tab{padding:9px 16px;cursor:pointer;border-radius:9px 9px 0 0;color:#7a6431;
+/* 标签栏贴着头栏，自己留一点上边距当呼吸，不再靠正文区的 padding 撑（2026-11-02） */
+.eo-tabs{display:flex;gap:4px;border-bottom:1px solid var(--eo-line);
+  margin:0 -20px 14px;padding:6px 20px 0;position:sticky;top:0;background:var(--eo-bg);z-index:40;
+  box-shadow:0 -1px 0 0 var(--eo-bg) inset;}
+.eo-tab{padding:9px 16px;cursor:pointer;border-radius:9px 9px 0 0;color:var(--eo-text-5);
   font-size:14px;display:flex;align-items:center;gap:6px;white-space:nowrap;}
-.eo-tab:hover{background:#fff6e0;color:#5a3e0b;}
-.eo-tab-active{background:linear-gradient(160deg,#fff3d6,#f5d080);color:#4a3208;
-  font-weight:700;border-bottom:2px solid #b8860b;margin-bottom:-1px;}
-.eo-badge{background:#b8860b;color:#fff;border-radius:9px;padding:0 6px;
+.eo-tab:hover{background:var(--eo-bg-warm);color:var(--eo-dark-2);}
+.eo-tab-active{background:linear-gradient(160deg,var(--eo-bg-busy),var(--eo-accent-soft));color:#4a3208;
+.eo-tab:focus-visible,.eo-node:focus-visible,.eo-btn:focus-visible,
+.eo-input:focus-visible,.eo-sel:focus-visible,.eo-close:focus-visible{
+  outline:2px solid var(--eo-accent);outline-offset:2px;}
+  font-weight:700;border-bottom:2px solid var(--eo-accent);margin-bottom:-1px;}
+.eo-badge{background:var(--eo-accent);color:#fff;border-radius:9px;padding:0 6px;
   font-size:11px;line-height:16px;min-width:16px;text-align:center;font-weight:600;}
-.eo-badge-err{background:#c0392b;}
+.eo-badge-err{background:var(--eo-danger);}
 .eo-page{display:block;}
 
 /* 折叠块 */
 .eo-details{border:1px solid rgba(184,134,11,.32);border-radius:9px;
-  background:#fffaf0;margin:8px 0;padding:0 10px;}
-.eo-details>summary{cursor:pointer;padding:9px 0;color:#6b5424;font-weight:600;
+  background:var(--eo-bg-soft);margin:8px 0;padding:0 10px;}
+.eo-details>summary{cursor:pointer;padding:9px 0;color:var(--eo-text-2);font-weight:600;
   font-size:13px;user-select:none;list-style:none;}
 .eo-details>summary::-webkit-details-marker{display:none;}
-.eo-details>summary::before{content:"▸ ";color:#b8860b;}
+.eo-details>summary::before{content:"▸ ";color:var(--eo-accent);}
 .eo-details[open]>summary::before{content:"▾ ";}
 .eo-details[open]>summary{border-bottom:1px dashed rgba(184,134,11,.3);margin-bottom:8px;}
 .eo-details .eo-box{max-height:none;}
@@ -3605,7 +4214,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
 /* 输入 */
 .eo-input{padding:6px 10px;border-radius:8px;border:1px solid rgba(184,134,11,.45);
-  background:#fffdf7;color:#3c2f14;font-size:13px;flex:1;min-width:0;}
+  background:var(--eo-bg);color:var(--eo-text);font-size:13px;flex:1;min-width:0;}
 .eo-input:focus{outline:2px solid rgba(184,134,11,.28);outline-offset:0;}
 .eo-textarea{width:100%;box-sizing:border-box;resize:vertical;line-height:1.6;
   font-family:inherit;margin-bottom:9px;}
@@ -3613,8 +4222,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
    底色和字色必须显式给——只挂 eo-textarea 不挂 eo-input 时是浏览器默认的深灰底白字，
    对着这份米黄界面像块补丁（2026-11-01 实测踩到）。等宽字是为了让缩进对齐看得出来。 */
 .eo-outline-editor{
-  background:#fffdf7;color:#3c2f14;
-  border:1px solid rgba(184,134,11,.35);border-radius:9px;
+  background:var(--eo-bg);color:var(--eo-text);
+  border:1px solid var(--eo-line);border-radius:9px;
   padding:10px 12px;margin-bottom:6px;
   font-family:ui-monospace,Consolas,"Courier New",monospace;
   font-size:12.5px;line-height:1.65;
@@ -3622,14 +4231,14 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 }
 .eo-outline-editor:focus{outline:2px solid rgba(184,134,11,.28);outline-offset:0;
   border-color:rgba(184,134,11,.6);}
-.eo-editor-stat{color:#9b8a5e;font-size:12px;margin:0 0 8px;}
-.eo-editor-dirty{color:#b8860b;font-weight:600;}
+.eo-editor-stat{color:var(--eo-text-4);font-size:12px;margin:0 0 8px;}
+.eo-editor-dirty{color:var(--eo-accent);font-weight:600;}
 
 /* 节点行 */
 .eo-node{padding:4px 6px;cursor:pointer;border-radius:6px;line-height:1.55;}
-.eo-node:hover{background:#fff3d6;}
-.eo-node-on{color:#2c6e2c;font-weight:600;}
-.eo-node-suggest{color:#8a5a00;background:#fff6e0;}
+.eo-node:hover{background:var(--eo-bg-busy);}
+.eo-node-on{color:var(--eo-ok);font-weight:600;}
+.eo-node-suggest{color:#8a5a00;background:var(--eo-bg-warm);}
 .eo-suggest{display:flex;align-items:center;gap:8px;padding:3px 4px;border-bottom:1px dashed #e6d7b0;}
 .eo-suggest span{flex:1;}
 
@@ -3639,39 +4248,39 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 /* 日志级别筛选按钮 */
 .eo-logfilter{display:flex;flex-wrap:wrap;gap:6px;padding:2px 0 4px;}
 .eo-filterbtn{padding:3px 10px;font-size:12px;}
-.eo-filterbtn-on{background:#f5d080;color:#4a3200;font-weight:700;}
+.eo-filterbtn-on{background:var(--eo-accent-soft);color:var(--eo-dark);font-weight:700;}
 
 /* 事件类型：次类型多选按钮 */
 .eo-subtype-wrap{align-items:flex-start;}
 .eo-subtypes{display:flex;flex-wrap:wrap;gap:5px;flex:1;}
 .eo-subtype{padding:2px 9px;font-size:12px;line-height:1.5;}
-.eo-subtype-on{background:#f5d080;color:#4a3200;font-weight:700;border-color:#c9a13a;}
+.eo-subtype-on{background:var(--eo-accent-soft);color:var(--eo-dark);font-weight:700;border-color:#c9a13a;}
 
 /* 体验偏好：可折叠分组 + 大致/详细 */
-.eo-prefgroup{margin:6px 0;border:1px solid #e8dbb3;border-radius:8px;background:#fffdf7;}
-.eo-prefgroup-sum{cursor:pointer;padding:7px 10px;font-weight:600;color:#6b5424;font-size:13px;
+.eo-prefgroup{margin:6px 0;border:1px solid #e8dbb3;border-radius:8px;background:var(--eo-bg);}
+.eo-prefgroup-sum{cursor:pointer;padding:7px 10px;font-weight:600;color:var(--eo-text-2);font-size:13px;
   list-style:none;user-select:none;}
 .eo-prefgroup-sum::-webkit-details-marker{display:none;}
-.eo-prefgroup-sum::before{content:'▸ ';color:#b8860b;}
+.eo-prefgroup-sum::before{content:'▸ ';color:var(--eo-accent);}
 .eo-prefgroup[open] .eo-prefgroup-sum::before{content:'▾ ';}
 .eo-prefgroup-body{padding:2px 10px 8px;}
 .eo-prefmode{display:flex;align-items:center;gap:6px;padding:2px 0 6px;}
 .eo-modebtn{padding:3px 12px;font-size:12px;}
-.eo-modebtn-on{background:#f5d080;color:#4a3200;font-weight:700;}
+.eo-modebtn-on{background:var(--eo-accent-soft);color:var(--eo-dark);font-weight:700;}
 
 /* 记忆来源的子项（shujuku 诊断） */
-.eo-sub{margin:2px 0 6px 18px;padding:6px 10px;border-left:3px solid #e6cd8a;background:#fffdf6;border-radius:0 6px 6px 0;}
-.eo-sub-title{font-size:13px;font-weight:600;color:#6b5424;margin-bottom:2px;}
+.eo-sub{margin:2px 0 6px 18px;padding:6px 10px;border-left:3px solid #e6cd8a;background:var(--eo-bg);border-radius:0 6px 6px 0;}
+.eo-sub-title{font-size:13px;font-weight:600;color:var(--eo-text-2);margin-bottom:2px;}
 
 /* 打勾模式：标题上的问号 */
 .eo-sec-inline{display:flex;align-items:center;gap:6px;}
 .eo-help{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;
-  border-radius:50%;border:1px solid #b8860b;color:#8a6a10;font-size:11px;font-weight:700;
+  border-radius:50%;border:1px solid var(--eo-accent);color:#8a6a10;font-size:11px;font-weight:700;
   cursor:pointer;user-select:none;position:relative;background:#fff8e2;}
 .eo-help:hover{background:#f5e0a8;}
-.eo-help-on{background:#f5d080;color:#4a3200;}
+.eo-help-on{background:var(--eo-accent-soft);color:var(--eo-dark);}
 .eo-tip{position:absolute;left:22px;top:-4px;width:260px;padding:8px 10px;border-radius:8px;
-  background:#3a3222;color:#fff6e0;font-size:12px;font-weight:400;line-height:1.6;
+  background:#3a3222;color:var(--eo-bg-warm);font-size:12px;font-weight:400;line-height:1.6;
   box-shadow:0 3px 12px rgba(0,0,0,.28);z-index:10;white-space:normal;}
 /* 偏好项里的问号在行内偏右，提示框改成从问号正下方向右展开，
    否则 260px 的框会顶出面板右缘 */
@@ -3682,7 +4291,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 /* 打勾模式：三档各占一行 */
 .eo-modes{display:flex;flex-direction:column;gap:5px;margin:4px 0;}
 .eo-mode{display:flex;gap:8px;align-items:flex-start;padding:5px 8px;border-radius:6px;
-  background:#fdf8ec;font-size:12px;line-height:1.6;color:#5a4a2a;}
+  background:#fdf8ec;font-size:12px;line-height:1.6;color:var(--eo-text-6);}
 .eo-mode-tag{flex:0 0 auto;font-weight:700;color:#7a5a0a;}
 
 `;
@@ -3874,6 +4483,19 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         fabState.dock = side;
         applyFabState(fabState);
         saveFabState();
+        showDockHintOnce();
+    }
+
+    /**
+     * 吸附后球只剩一条竖条，不知道怎么恢复是第一次用最容易卡住的地方（2026-11-02）。
+     * 提示只给一次，看过就记进设置，别每次都来打扰。
+     */
+    function showDockHintOnce() {
+        const s = getSettings();
+        if (s.ui.dockHintShown) return;
+        s.ui.dockHintShown = true;
+        saveSettings();
+        toast('球已收进边缘，轻点一下就展开；拖出来就恢复悬浮', { ms: 6000 });
     }
 
     function activateFab() {
@@ -4038,7 +4660,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
   <span class="eo-close" id="eo_close">✕ 关闭</span>
 </div>
 <div class="eo-busy" id="eo_busy">处理中…</div>
-<div class="eo-body" id="eo_body"></div>`;
+<div class="eo-confirmbar" id="eo_confirmbar">
+  <span class="eo-confirm-text" id="eo_confirm_text"></span>
+  <button type="button" class="eo-btn eo-btn-danger" id="eo_confirm_ok">确定</button>
+  <button type="button" class="eo-btn" id="eo_confirm_cancel">取消</button>
+</div>
+<div class="eo-body" id="eo_body"></div>
+<div class="eo-toasts" id="eo_toasts"></div>`;
         document.body.appendChild(panelEl);
         panelEl.querySelector('#eo_close').addEventListener('click', () => togglePanel(false));
         backdropEl.addEventListener('click', () => togglePanel(false));
@@ -4058,6 +4686,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         p.classList.toggle('eo-open', open);
         if (backdropEl) backdropEl.classList.toggle('eo-open', open);
         document.body.style.overflow = open ? 'hidden' : '';
+        // 4.1：面板和悬浮球同 z-index，球会盖在面板内容上。面板开着就把球藏起来
+        if (fabEl) fabEl.style.visibility = open ? 'hidden' : '';
         if (open) {
             renderPanel();
             // 每次打开面板顺手校正一次条目位置，世界书被重排过也能自动纠正
@@ -4066,6 +4696,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         }
     }
 
+    // ==================== 10. 界面 ====================
+    /** 建一个元素：标签、类名、文字。全文件都在用 */
     function el(tag, cls, text) {
         const d = document.createElement(tag);
         if (cls) d.className = cls;
@@ -4282,8 +4914,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         const btnRebuild = el('button', 'eo-btn', '从结构重建');
         btnRebuild.type = 'button';
-        btnRebuild.addEventListener('click', () => {
-            if (!confirm('用事件卡里已保存的结构重新生成文本？当前框里的改动会丢。')) return;
+        btnRebuild.addEventListener('click', async () => {
+            if (!(await askConfirm('用事件卡里已保存的结构重新生成文本？当前框里的改动会丢。'))) return;
             const rebuilt = keysToChinese(stripCodeFence(outlineToYaml(d.outline || {})).text);
             buf.text = rebuilt.text;
             buf.backMap = rebuilt.backMap;
@@ -4328,7 +4960,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     });
                     draftEditIssues = res.issues && res.issues.length ? res.issues : null;
                     discardPendingEdit();
-                    previewDraftId = d.id;
+                    previewDraftIds.add(d.id);
                     renderPanel();
                 } catch (e) {
                     // 格式硬错：不保存、不退出编辑，把原文留在框里让人接着改
@@ -4341,8 +4973,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
             const btnCancel = el('button', 'eo-btn', '取消');
             btnCancel.type = 'button';
-            btnCancel.addEventListener('click', () => {
-                if (buf.text !== buf.original && !confirm('放弃这次编辑？改动不会保存。')) return;
+            btnCancel.addEventListener('click', async () => {
+                if (buf.text !== buf.original && !(await askConfirm('放弃这次编辑？改动不会保存。'))) return;
                 discardPendingEdit();
                 renderPanel();
             });
@@ -4409,6 +5041,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     function renderPanel() {
         const body = panelEl && panelEl.querySelector('#eo_body');
         if (!body) return;
+        // 重建之前先把用户的位置记住：不清掉的话，点一个节点就从头再来一遍（C1 止血版）
+        const view = captureView();
         body.innerHTML = '';
 
         // 面板重建后按钮和提示都是新造的，按当前 busy 状态恢复，否则切页回来就像没在忙
@@ -4444,6 +5078,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 badge.textContent = unreadErrors > 99 ? '99+' : String(unreadErrors);
                 b.appendChild(badge);
             }
+            makeActivatable(b, 'tab');
+            b.setAttribute('aria-selected', activeTab === t.key ? 'true' : 'false');
             b.addEventListener('click', () => {
                 activeTab = t.key;
                 if (t.key === 'log') unreadErrors = 0;
@@ -4467,6 +5103,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             });
         }
         else renderSetPage(page);
+
+        // 内容重建完把它找回来
+        restoreView(view);
     }
 
     // ---------- 问号说明气泡（生成页与设置页共用） ----------
@@ -4519,8 +5158,15 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
     // ---------- 页：生成事件 ----------
 
-    // 当前展开预览的待选事件 id；跨重渲染保留，没展开就是 null
-    let previewDraftId = null;
+    /**
+     * 正在展开大纲的待选事件 id（2026-11-02 由单值改成集合）：
+     * 待选最多 3 份，来回点只能看一份，比较两份 200 行的大纲得反复开合。
+     * 现在可以同时展开，一份关掉只影响它自己。
+     */
+    const previewDraftIds = new Set();
+
+    /** 兼容旧判断：任意一份是否在预览 */
+    function isPreviewing(id) { return previewDraftIds.has(id); }
 
     /* ---------- 草稿编辑框的「正在改」状态（2026-11-02）----------
        「编辑」按钮不随开合改文案，一直是「编辑」，开关只能靠高亮 + 编辑框底部的「完成」。
@@ -4536,26 +5182,184 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     }
 
     /** 编辑框开着、但还没改动：直接关，不用问 */
-    function closeDraftEditor() {
+    async function closeDraftEditor() {
         if (pendingDraftEditDirty) {
-            if (!confirm('这份草稿还有没保存的改动，关掉就丢了。继续？')) return;
+            if (!(await askConfirm('这份草稿还有没保存的改动，关掉就丢了。继续？'))) return;
         }
         discardPendingEdit();
+        renderPanel();
+    }
+
+    /**
+     * 只重画当前页，不重建面板外壳、不动标签栏（2026-11-02 C1）。
+     * 点一个节点、切一个日志筛选这类「本页自己的数据变了」的操作走这里：
+     * 以前一律调 renderPanel()，等于把状态卡、待选列表、表单全部重建一遍，
+     * 滚动和焦点也跟着丢。这里换掉的内容区不动，滚动位置天然保留。
+     */
+    function repaintPage() {
+        const page = panelEl && panelEl.querySelector('#eo_body .eo-page');
+        if (!page || !page.isConnected) { renderPanel(); return; }
+        closeAllTips();
+        const body = page.parentNode;
+        const top = page.getBoundingClientRect().top;
+        page.innerHTML = '';
+        if (activeTab === 'gen') renderGenPage(page);
+        else if (activeTab === 'inv') renderInvPage(page);
+        else if (activeTab === 'log') renderLogPage(page);
+        else renderSetPage(page);
+        // 页面内容变化会让后面的内容整体上下移位，这里把页面顶端拉回原位，视觉上不跳
+        const dy = page.getBoundingClientRect().top - top;
+        if (dy && body && body.scrollTop != null) body.scrollTop += dy;
     }
 
     function renderGenPage(page) {
+        // 生成页最长，拆成三块各管一段：状态卡、待选事件、新建事件表单（2026-11-02）
+        renderGenStatus(page);
+        renderGenDrafts(page);
+        renderGenForm(page);
+    }
+
+    /** 生成页顶部：当前事件状态卡 */
+    function renderGenStatus(page) {
         const ev = getCurrentEvent();
 
         const statusBox = el('div', 'eo-box');
         const draftN = Object.values(getMeta().events).filter(e => e && e.status === 'draft').length;
         statusBox.textContent = ev
-            ? `进行中：${ev.name}\n开始于 ${String(ev.createdAt || '').slice(0, 19)}\n世界书：${ev.worldBook}　条目 uid=${ev.entryUid}`
+            ? `进行中：${ev.name}\n开始于 ${String(ev.createdAt || '').slice(0, 19)}\n世界书：${ev.worldBook}　条目已同步`
                 + (draftN ? `\n另有 ${draftN} 个待选事件等你决定` : '')
             : (draftN
                 ? `当前没有进行中的事件。上方有 ${draftN} 个待选事件，点「采用」即可开始；也可以继续生成新的来比较。`
                 : '当前没有进行中的事件。填好下面的事件名和偏好即可开始。生成后先进待选，满意再采用。');
         page.appendChild(statusBox);
+    }
 
+    /** 生成页：待选事件列表（采用 / 丢弃 / 展示大纲 / 编辑） */
+    /**
+     * 待选事件卡片（2026-11-02 C2）：头、简介、四个操作按钮。
+     * 以前这段直接写在生成页的循环里，生成页一拆就跟着长，现在独立成一个组件。
+     */
+    function renderDraftCard(d) {
+                const item = el('div', 'eo-draft');
+                const head = el('div', 'eo-draft-head');
+                head.appendChild(el('span', 'eo-draft-name', d.name));
+                const n = (d.outline && d.outline.nodes || []).length;
+                const c = Object.keys((d.outline && d.outline.characters) || {}).length;
+                const meta = [];
+                meta.push(`${n} 个节点`);
+                if (c) meta.push(`${c} 类角色`);
+                if (d.autoNamed) meta.push('自动命名');
+                head.appendChild(el('span', 'eo-draft-meta', meta.join('　')));
+                item.appendChild(head);
+
+                if (d.brief) item.appendChild(el('div', 'eo-draft-brief', d.brief));
+
+                // 采用/丢弃会真的改状态，和「只是看看」的开关分开摆（2026-11-02）：
+                // 以前四个按钮等宽并排，手机上「采用」紧挨「编辑」，误触代价一个是生效一个是展开
+                const acts = el('div', 'eo-draft-acts');
+                const lookActs = el('div', 'eo-draft-acts-look');
+                const useActs = el('div', 'eo-draft-acts-use');
+                acts.appendChild(lookActs);
+                acts.appendChild(useActs);
+                const btnUse = el('button', 'eo-btn eo-primary eo-press', '采用');
+                btnUse.type = 'button';
+                btnUse.addEventListener('click', async () => {
+                    btnUse.disabled = true;
+                    btnUse.textContent = '正在采用…';
+                    try {
+                        await commitDraft(d.id);
+                        activeTab = 'gen';
+                        renderPanel();
+                    } catch (e) {
+                        error('采用待选事件失败：', e);
+                        btnUse.disabled = false;
+                        btnUse.textContent = '采用';
+                        toast('采用失败：' + (e && e.message || e), { bad: true });
+                    }
+                });
+                useActs.appendChild(btnUse);
+
+                const btnDrop = el('button', 'eo-btn eo-press', '丢弃');
+                btnDrop.type = 'button';
+                btnDrop.addEventListener('click', async () => {
+                    if (!(await askConfirm(`丢弃待选事件「${d.name}」？它还没写进世界书，丢弃不会留下任何东西。`))) return;
+                    discardDraft(d.id);
+                    renderPanel();
+                });
+                useActs.appendChild(btnDrop);
+
+                // 展示大纲是开关，但开关态靠文案和左侧竖条表达，不靠底色（2026-11-02）：
+                // 底色和「采用」的主按钮长得太像，一眼分不清哪个会真生效
+                const showing = isPreviewing(d.id);
+                const btnLook = el('button', 'eo-btn eo-btn-toggle' + (showing ? ' eo-on' : ''), showing ? '收起大纲' : '展示大纲');
+                btnLook.type = 'button';
+                btnLook.addEventListener('click', async () => {
+                    if (pendingDraftEditDirty && editingDraftId === d.id) {
+                        if (!(await askConfirm('正在编辑的这份还有没保存的改动，收起来会丢掉。继续？'))) return;
+                        discardPendingEdit();
+                    }
+                    if (previewDraftIds.has(d.id)) {
+                        previewDraftIds.delete(d.id);
+                        // 收起这一份的预览，如果它正开着编辑器，编辑器也一并退出
+                        if (editingDraftId === d.id) { editingDraftId = null; draftEditBuf = null; }
+                    } else {
+                        previewDraftIds.add(d.id);
+                    }
+                    renderPanel();
+                });
+                lookActs.appendChild(btnLook);
+
+                const btnEdit = el('button', 'eo-btn eo-btn-toggle' + (editingDraftId === d.id ? ' eo-on' : ''),
+                    editingDraftId === d.id ? '收起编辑' : '编辑');
+                btnEdit.type = 'button';
+                btnEdit.addEventListener('click', async () => {
+                    if (editingDraftId === d.id) {
+                        await closeDraftEditor();
+                        return;
+                    } else {
+                        // 从别的草稿的编辑框切过来：有未保存改动先问一句，别悄悄丢
+                        if (pendingDraftEditDirty
+                            && !(await askConfirm('另一份草稿还有没保存的改动，切走会丢掉。继续？'))) return;
+                        discardPendingEdit();
+                        editingDraftId = d.id;
+                        draftEditBuf = makeDraftEditBuf(d);
+                        draftEditIssues = null;
+                        previewDraftIds.add(d.id);
+                    }
+                    renderPanel();
+                });
+                lookActs.appendChild(btnEdit);
+                item.appendChild(acts);
+
+                if (editingDraftId === d.id) {
+                    item.appendChild(renderDraftEditor(d));
+                    // 编辑器开着就直接返回这张卡，不再渲染大纲正文（2026-11-02 抽组件时改：
+                    // 以前这里是 continue，跳出循环会把后面的草稿全丢掉，界面一片空白，2026-11-01 踩过）
+                    return item;
+                }
+
+                // 展开时才渲染大纲正文，避免一屏堆几百行
+                if (isPreviewing(d.id)) {
+                    const body = el('div', 'eo-draft-body');
+                    const q = d.parseQuality;
+                    if (q && !q.ok) {
+                        const bad = el('div', 'eo-bad-box');
+                        bad.textContent = '⚠ 这份大纲结构不完整：' + q.missing.join('；');
+                        body.appendChild(bad);
+                    }
+                    const txt = el('div', 'eo-outline-text');
+                    txt.textContent = renderOutlineText(d.outline);
+                    body.appendChild(txt);
+                    item.appendChild(body);
+                }
+                return item;
+        return item;
+    }
+
+    function renderGenDrafts(page) {
+        // 当前进行中的事件：拆函数时它原本在 renderGenStatus 里，
+        // 这里要用到（完结/废弃按钮、大纲、原始输出），所以自己取一次（2026-11-02 回归 bug）
+        const ev = getCurrentEvent();
         // --- 待选事件 ---
         // 生成只产出待选，不写世界书；点「采用」才真正生效。
         // 这样反复重生成不会来回写删世界书条目
@@ -4572,106 +5376,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
             const draftBox = el('div', 'eo-drafts');
             for (const d of drafts) {
-                const item = el('div', 'eo-draft');
-                const head = el('div', 'eo-draft-head');
-                head.appendChild(el('span', 'eo-draft-name', d.name));
-                const n = (d.outline && d.outline.nodes || []).length;
-                const c = Object.keys((d.outline && d.outline.characters) || {}).length;
-                const meta = [];
-                meta.push(`${n} 个节点`);
-                if (c) meta.push(`${c} 类角色`);
-                if (d.autoNamed) meta.push('自动命名');
-                head.appendChild(el('span', 'eo-draft-meta', meta.join('　')));
-                item.appendChild(head);
-
-                if (d.brief) item.appendChild(el('div', 'eo-draft-brief', d.brief));
-
-                const acts = el('div', 'eo-row');
-                const btnUse = el('button', 'eo-btn eo-press', '采用');
-                btnUse.type = 'button';
-                btnUse.addEventListener('click', async () => {
-                    btnUse.disabled = true;
-                    btnUse.textContent = '正在采用…';
-                    try {
-                        await commitDraft(d.id);
-                        activeTab = 'gen';
-                        renderPanel();
-                    } catch (e) {
-                        error('采用待选事件失败：', e);
-                        btnUse.disabled = false;
-                        btnUse.textContent = '采用';
-                        alert('采用失败：' + (e && e.message || e));
-                    }
-                });
-                acts.appendChild(btnUse);
-
-                const btnDrop = el('button', 'eo-btn eo-press', '丢弃');
-                btnDrop.type = 'button';
-                btnDrop.addEventListener('click', () => {
-                    if (!confirm(`丢弃待选事件「${d.name}」？它还没写进世界书，丢弃不会留下任何东西。`)) return;
-                    discardDraft(d.id);
-                    renderPanel();
-                });
-                acts.appendChild(btnDrop);
-
-                // 看大纲 / 编辑是开关：开着就常亮，再点一次收起、灯灭（2026-11-02 危晓定）
-                const btnLook = el('button', 'eo-btn' + (previewDraftId === d.id ? ' eo-on' : ''), '展示大纲');
-                btnLook.type = 'button';
-                btnLook.addEventListener('click', () => {
-                    if (pendingDraftEditDirty) {
-                        if (!confirm('正在编辑的这份还有没保存的改动，切走会丢掉。继续？')) return;
-                        discardPendingEdit();
-                    }
-                    previewDraftId = previewDraftId === d.id ? null : d.id;
-                    // 收起预览等于收起这张草稿，正在编辑它也一并退出
-                    if (previewDraftId === null) { editingDraftId = null; draftEditBuf = null; }
-                    renderPanel();
-                });
-                acts.appendChild(btnLook);
-
-                const btnEdit = el('button', 'eo-btn' + (editingDraftId === d.id ? ' eo-on' : ''), '编辑');
-                btnEdit.type = 'button';
-                btnEdit.addEventListener('click', () => {
-                    if (editingDraftId === d.id) {
-                        closeDraftEditor();
-                    } else {
-                        // 从别的草稿的编辑框切过来：有未保存改动先问一句，别悄悄丢
-                        if (pendingDraftEditDirty
-                            && !confirm('另一份草稿还有没保存的改动，切走会丢掉。继续？')) return;
-                        discardPendingEdit();
-                        editingDraftId = d.id;
-                        draftEditBuf = makeDraftEditBuf(d);
-                        draftEditIssues = null;
-                        previewDraftId = d.id;
-                    }
-                    renderPanel();
-                });
-                acts.appendChild(btnEdit);
-                item.appendChild(acts);
-
-                if (editingDraftId === d.id) {
-                    item.appendChild(renderDraftEditor(d));
-                    draftBox.appendChild(item);
-                    // 这里用 continue 不是 return：return 会跳出整个 for，
-                    // 后面的草稿全被丢掉，界面看起来就是「一片空白」（2026-11-01 实测踩到）
-                    continue;
-                }
-
-                // 展开时才渲染大纲正文，避免一屏堆几百行
-                if (previewDraftId === d.id) {
-                    const body = el('div', 'eo-draft-body');
-                    const q = d.parseQuality;
-                    if (q && !q.ok) {
-                        const bad = el('div', 'eo-bad-box');
-                        bad.textContent = '⚠ 这份大纲结构不完整：' + q.missing.join('；');
-                        body.appendChild(bad);
-                    }
-                    const txt = el('div', 'eo-outline-text');
-                    txt.textContent = renderOutlineText(d.outline);
-                    body.appendChild(txt);
-                    item.appendChild(body);
-                }
-                draftBox.appendChild(item);
+                draftBox.appendChild(renderDraftCard(d));
             }
             page.appendChild(draftBox);
         }
@@ -4686,7 +5391,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
             const btnDone = el('button', 'eo-btn', '完结');
             btnDone.addEventListener('click', async () => {
-                if (!confirm(`确认完结「${ev.name}」？世界书条目会被删除，事件卡转为历史。`)) return;
+                if (!(await askConfirm(`确认完结「${ev.name}」？世界书条目会被删除，事件卡转为历史。`))) return;
                 btnDone.disabled = true;
                 opOut.className = 'eo-hint';
                 opOut.textContent = '处理中…';
@@ -4704,7 +5409,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
             const btnAb = el('button', 'eo-btn', '废弃');
             btnAb.addEventListener('click', async () => {
-                if (!confirm(`确认废弃「${ev.name}」？`)) return;
+                if (!(await askConfirm(`确认废弃「${ev.name}」？世界书条目会被删除，事件卡转为历史。`))) return;
                 btnAb.disabled = true;
                 opOut.className = 'eo-hint';
                 opOut.textContent = '处理中…';
@@ -4756,12 +5461,16 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             // 只是「采用」时要先把当前这件事收掉
             page.appendChild(el('div', 'eo-sec', '再生成一个待选'));
         }
+    }
 
+    /** 生成页：新建事件的表单与体验偏好 */
+    function renderGenForm(page) {
         // --- 新建事件表单 ---
         page.appendChild(el('div', 'eo-sec', '事件'));
         const nameRow = el('div', 'eo-row');
         nameRow.appendChild(el('label', null, '事件名'));
         const nameInput = el('input', 'eo-input');
+        markKey(nameInput, 'gen.name');
         nameInput.type = 'text';
         nameInput.placeholder = '例如：东方快车谋杀案';
         // 事件名也存进草稿，这样「重置为默认」能把它一起清掉
@@ -4858,7 +5567,28 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         hintInput.addEventListener('change', persistGenForm);
         page.appendChild(hintInput);
 
-        page.appendChild(el('div', 'eo-sec', '体验偏好'));
+        // 体验偏好标题旁带「沿用上次」（2026-11-02）：上次那套就在 genForm 里，
+        // 以前只有「重置为默认」，想回到上次的配置只能一项一项点回来
+        const prefSec = el('div', 'eo-sec eo-sec-inline');
+        prefSec.appendChild(el('span', null, '体验偏好'));
+        const btnLast = el('button', 'eo-btn', '沿用上次');
+        btnLast.type = 'button';
+        attachHelp(btnLast, '把体验偏好恢复成上一次用过的那套。上次的值一直留着，'
+            + '点「重置为默认」才会清掉。已经在用上次那套时这个按钮不会亮。');
+        btnLast.addEventListener('click', () => {
+            const last = loadGenForm();
+            if (!last.prefs) { toast('还没有上一次的配置，生成一次之后就有了'); return; }
+            // prefs 与 groupMode 是同一份工作区引用，原地覆盖就够了
+            const fresh = Object.assign(defaultPrefs(), last.prefs);
+            for (const k of Object.keys(prefs)) delete prefs[k];
+            Object.assign(prefs, fresh);
+            if (last.groupModes) Object.assign(groupMode, last.groupModes);
+            persistGenForm();
+            log('体验偏好已沿用上次的配置');
+            repaintPage();
+        });
+        prefSec.appendChild(btnLast);
+        page.appendChild(prefSec);
         page.appendChild(el('div', 'eo-hint',
             '这里是「这次想玩什么样的体验」，会原样写进生成大纲的提示词，模型按你的选择决定难度和危险程度。不确定选哪个的，留着「根据当前情况自行设定」就行，模型会自己配一套合理的。'));
 
@@ -4899,7 +5629,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
             if (hintSpan) {
                 hintSpan.textContent = mode === 'rough'
-                    ? `选一个粗档位（含「${PREF_AUTO_NEW}」），${items.length} 个子项一次定好`
+                    ? `一次把本组 ${items.length} 项定好`
                     : '逐项挑，可以拼出档位覆盖不了的组合';
             }
 
@@ -4977,7 +5707,11 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             if (g.group !== curGroup) {
                 curGroup = g.group;
                 const box = el('details', 'eo-prefgroup');
-                box.open = false;
+                // 展开状态记在模块里，切页或重绘后仍然开着
+                box.open = openPrefGroups.has(g.group);
+                box.addEventListener('toggle', () => {
+                    if (box.open) openPrefGroups.add(g.group); else openPrefGroups.delete(g.group);
+                });
                 const sum = el('summary', 'eo-prefgroup-sum');
                 const count = PREF_GROUPS.filter(x => x.group === g.group).length;
                 sum.textContent = `${g.group}（${count} 项）`;
@@ -4992,7 +5726,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                         btns[mk].className = 'eo-btn eo-modebtn' + (groupMode[g.group] === mk ? ' eo-modebtn-on' : '');
                     }
                 };
-                for (const [mk, ml] of [['rough', '大致'], ['detail', '详细']]) {
+                for (const [mk, ml] of [['rough', '按档位选'], ['detail', '逐项调']]) {
                     const b = el('button', 'eo-btn eo-modebtn', ml);
                     b.type = 'button';
                     b.addEventListener('click', (e) => {
@@ -5036,11 +5770,11 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const rstRow = el('div', 'eo-row eo-reset-row');
         const btnReset = el('button', 'eo-btn', '重置为默认');
         btnReset.type = 'button';
-        btnReset.addEventListener('click', () => {
-            if (!confirm('把上面所有选项重置为默认？已生成的待选事件不受影响。')) return;
+        btnReset.addEventListener('click', async () => {
+            if (!(await askConfirm('把上面所有选项重置为默认？已生成的待选事件不受影响。'))) return;
             resetDraftPrefs();
             log('生成页选项已重置为默认');
-            renderPanel();
+            repaintPage();
         });
         rstRow.appendChild(btnReset);
         attachHelp(rstRow, '把事件名、事件目的、框架提示、额外要求和全部体验偏好拨回默认值。'
@@ -5081,7 +5815,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 // 方便在此基础上微调后再生成一个来比较。想回默认就点「重置为默认」
                 opOut.className = 'eo-ok';
                 opOut.textContent = `已生成「${event.name}」（${nodeN} 个节点），已放入上方待选。看看满意就点「采用」写入世界书，不满意可以直接再生成一个。`;
-                previewDraftId = event.id;
+                // 刚生成的那份默认展开，方便马上看效果
+                previewDraftIds.add(event.id);
                 activeTab = 'gen';
                 renderPanel();
             } catch (e) {
@@ -5103,15 +5838,16 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         if (progress.steps.length) renderProgress();
     }
 
+
     // ---------- 页：盘点 ----------
 
-    function renderInvPage(page) {
-        const ev = getCurrentEvent();
-        if (!ev) {
-            page.appendChild(el('div', 'eo-hint', '当前没有进行中的事件。请先到「生成事件」页开一个。'));
-            return;
-        }
-
+    /**
+     * 盘点页的操作行：开始盘点按钮、打勾模式说明、结果提示。
+     * 2026-11-02：主操作按钮曾经整段消失（页面上直接跳到「节点进度」），
+     * 抽出来以后渲染开头和兜底处都调它，不会再有「按钮不见」这种状态。
+     */
+    function buildInvActions(page) {
+        const box = el('div', 'eo-inv-actions');
         const opOut = el('div', 'eo-hint');
         const row = el('div', 'eo-row');
         const btnInv = el('button', 'eo-btn eo-primary', '开始盘点');
@@ -5126,7 +5862,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 const r = await runInventory();
                 log(`第 ${r.record.round} 次盘点完成，世界书条目已更新（uid=${r.event.entryUid}）`);
                 opOut.className = 'eo-ok';
-                opOut.textContent = `第 ${r.record.round} 次盘点完成，已更新世界书条目 uid=${r.event.entryUid}`;
+                opOut.textContent = `第 ${r.record.round} 次盘点完成，世界书已更新`;
                 renderPanel();
             } catch (e) {
                 error('盘点失败：', e);
@@ -5141,8 +5877,22 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         const mode = getSettings().tracker.mode;
         row.appendChild(el('span', 'eo-hint', `打勾模式：${TRACKER_MODES[mode] || mode}`));
-        page.appendChild(row);
-        page.appendChild(opOut);
+        box.appendChild(row);
+        box.appendChild(opOut);
+        return box;
+    }
+
+    function renderInvPage(page) {
+        const ev = getCurrentEvent();
+        if (!ev) {
+            page.appendChild(el('div', 'eo-hint', '当前没有进行中的事件。请先到「生成事件」页开一个。'));
+            return;
+        }
+
+        // 操作行（开始盘点 + 打勾模式 + 输出提示）。
+        // 先清掉可能残留的旧操作区再挂新的，保证页面上始终只有一个（2026-11-02）
+        for (const old of page.querySelectorAll('.eo-inv-actions')) old.remove();
+        page.appendChild(buildInvActions(page));
         const invPh = el('div');
         invPh.id = 'eo_progress_host';
         page.appendChild(invPh);
@@ -5166,17 +5916,32 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     const row = el('div', 'eo-suggest');
                     const txt = el('span', null, `${id}. ${(node && (node.type || '')) || ''} ${(node && nodeText(node)) || '（大纲里找不到这个节点）'}`);
                     row.appendChild(txt);
+                    // 模型说「已达成」时，依据往往就在最近一两楼。给个回看入口，
+                    // 省得关面板、翻回去、再开面板（2026-11-02）
+                    const bLook = el('button', 'eo-btn', '看剧情');
+                    bLook.type = 'button';
+                    attachHelp(bLook, '收起面板跳到对话最后一楼，看看最近发生了什么再决定。');
+                    bLook.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        togglePanel(false);
+                        const last = document.querySelector('.mes.last_mes')
+                            || (document.querySelectorAll('.mes').length
+                                ? document.querySelectorAll('.mes')[document.querySelectorAll('.mes').length - 1]
+                                : null);
+                        if (last && last.scrollIntoView) last.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                    });
+                    row.appendChild(bLook);
                     const bOk = el('button', 'eo-btn eo-primary', '确认');
                     bOk.addEventListener('click', (e) => {
                         e.stopPropagation();
                         confirmPending(id);
-                        renderPanel();
+                        repaintPage();
                     });
                     const bNo = el('button', 'eo-btn', '忽略');
                     bNo.addEventListener('click', (e) => {
                         e.stopPropagation();
                         dismissPending(id);
-                        renderPanel();
+                        repaintPage();
                     });
                     row.appendChild(bOk);
                     row.appendChild(bNo);
@@ -5185,7 +5950,21 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 page.appendChild(pb);
             }
 
-            page.appendChild(el('div', 'eo-sec', `节点进度（${triggered.size}/${nodes.length}，点击切换）`));
+            const nodeSec = el('div', 'eo-sec eo-sec-inline');
+            nodeSec.appendChild(el('span', null, `节点进度（${triggered.size}/${nodes.length}，点击切换）`));
+            const vetoedNow = (ev.tracker && ev.tracker.nodeVetoed) || [];
+            if (vetoedNow.length) {
+                const btnUndo = el('button', 'eo-btn', `恢复自动勾选（${vetoedNow.length}）`);
+                btnUndo.type = 'button';
+                attachHelp(btnUndo, '你手动撤销过的节点会被自动盘点跳过。点这里把它们全部放回去，'
+                    + '下次自动盘点会重新判断这些节点是否已达成。已经打勾的节点不受影响。');
+                btnUndo.addEventListener('click', () => {
+                    const n = restoreVetoedNodes();
+                    if (n) { toast(`已恢复 ${n} 个节点的自动判断`); repaintPage(); }
+                });
+                nodeSec.appendChild(btnUndo);
+            }
+            page.appendChild(nodeSec);
             const nb = el('div', 'eo-box');
             for (const n of nodes) {
                 const id = nodeId(n);
@@ -5195,19 +5974,25 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 line.textContent = `${on ? '☑' : (isPending ? '◐' : '☐')} ${id}. ${n.type || ''} ${nodeText(n)}`
                     + (nodeTrigger(n) ? `（${nodeTrigger(n)}）` : '')
                     + (isPending ? '　← 模型建议，待确认' : '');
+                makeActivatable(line, 'checkbox');
+                line.setAttribute('aria-checked', on ? 'true' : 'false');
                 line.addEventListener('click', () => {
                     toggleNode(id);
-                    renderPanel();
+                    // 只改这一页的勾选状态，没理由把整个面板重建一遍
+                    repaintPage();
                 });
                 nb.appendChild(line);
             }
             page.appendChild(nb);
 
+            // 核心真相摊在页面上等于自己把案子剧透了（2026-11-02）。
+            // 默认收着，想看的人自己点开；标题里把「剧透」写明白，别让人手滑点开
             const core = (ev.outline && ev.outline.core_truth) || '';
             if (core) {
-                const c = el('div', 'eo-hint');
-                c.textContent = `核心真相（禁止透露）：${core}`;
-                page.appendChild(c);
+                const cd = el('details', 'eo-details');
+                cd.appendChild(el('summary', null, '核心真相（剧透，点开前想清楚）'));
+                cd.appendChild(el('div', 'eo-hint', `禁止在剧情里透露：${core}`));
+                page.appendChild(cd);
             }
         } else {
             page.appendChild(el('div', 'eo-hint', '大纲解析出的节点清单为空，请到「日志」页查看原始输出。'));
@@ -5220,10 +6005,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             page.appendChild(el('div', 'eo-hint', '还没有盘点过。'));
         } else {
             for (const rec of invs.slice().reverse()) {
+                // 摘要放身上、原文折叠在里：100+ 行的模型原输出不展开就看不见，
+                // 但「这次勾了几个、推翻了什么」一眼要知道（2026-11-02）
                 const det = el('details', 'eo-details');
                 det.appendChild(el('summary', null,
                     `第 ${rec.round} 次｜${String(rec.at || '').slice(0, 19)}`
                     + (rec.committedToBook ? '｜已入库' : '｜未入库')));
+                det.appendChild(el('div', 'eo-hint', inventorySummary(rec)));
                 const box = el('div', 'eo-box');
                 box.textContent = rec.raw;
                 det.appendChild(box);
@@ -5232,10 +6020,32 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         }
     }
 
+    /**
+     * 一次盘点的一句话摘要（2026-11-02）：原文 100+ 行折叠在里，
+     * 折叠状态下也要能看出这次盘出了什么。
+     */
+    function inventorySummary(rec) {
+        const p = rec && rec.parsed;
+        if (!p) return '这次没解析出结构化结果，只有文字报告，展开看原文。';
+        const parts = [];
+        const hit = Array.isArray(p.triggeredNodes) ? p.triggeredNodes.length : 0;
+        if (hit) parts.push(`勾选 ${hit} 个节点`);
+        const sug = Array.isArray(rec.suggestedNodes) ? rec.suggestedNodes.length : 0;
+        if (sug) parts.push(`建议待确认 ${sug} 个`);
+        const ref = Array.isArray(p.refutedMisleads) ? p.refutedMisleads.length : 0;
+        if (ref) parts.push(`推翻误导 ${ref} 条`);
+        const off = Array.isArray(p.offPathBranches) ? p.offPathBranches.length : 0;
+        if (off) parts.push(`大纲外路径 ${off} 条`);
+        const veto = Array.isArray(p.nodeVetoed) ? p.nodeVetoed.length : 0;
+        if (veto) parts.push(`判定不可能 ${veto} 个`);
+        return parts.length ? parts.join('｜') : '这次没有新的判定。';
+    }
     // ---------- 页：日志 ----------
 
     // 日志页的级别筛选：记在模块级，切页签不丢；'all' = 全部
     let logFilter = 'all';
+    // 关键词过滤（2026-11-02 4.5）：远程排障时经常要捞某个节点号或某段报错
+    let logKeyword = '';
 
     function renderRuntimeLogSection(page) {
         const head = el('div', 'eo-sec eo-sec-inline');
@@ -5256,13 +6066,40 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 e.preventDefault();
                 e.stopPropagation();
                 logFilter = key;
-                renderPanel();
+                repaintPage();
             });
             fRow.appendChild(b);
         };
         mkBtn('all', `全部 ${runtimeLog.length}`);
         for (const lv of LOG_LEVELS) mkBtn(lv, `${LOG_LEVEL_LABEL[lv]} ${cnt[lv]}`);
         page.appendChild(fRow);
+
+        // 关键词过滤：回车或失焦才生效，不然每敲一个字就整页重绘
+        const kwRow = el('div', 'eo-row');
+        kwRow.appendChild(el('label', null, '筛选'));
+        const kwIn = el('input', 'eo-input');
+        kwIn.type = 'search';
+        kwIn.placeholder = '输入关键词，回车生效（例如节点编号、报错片段）';
+        kwIn.value = logKeyword || '';
+        kwIn.style.flex = '1';
+        const applyKw = () => {
+            const v = String(kwIn.value || '').trim();
+            if (v === logKeyword) return;
+            logKeyword = v;
+            repaintPage();
+        };
+        kwIn.addEventListener('change', applyKw);
+        kwIn.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); applyKw(); }
+            if (e.key === 'Escape' && logKeyword) {
+                e.preventDefault();
+                logKeyword = '';
+                kwIn.value = '';
+                repaintPage();
+            }
+        });
+        kwRow.appendChild(kwIn);
+        page.appendChild(kwRow);
 
         if (!debugEnabled()) {
             const tip = el('div', 'eo-hint');
@@ -5271,10 +6108,21 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         }
 
         // 只收调试级却一条都没有，说明这不只是筛选问题
-        const shown = logFilter === 'all' ? runtimeLog : runtimeLog.filter(l => l.level === logFilter);
+        const kw = logKeyword ? logKeyword.toLowerCase() : '';
+        const shown = runtimeLog
+            .filter(l => logFilter === 'all' || l.level === logFilter)
+            .filter(l => {
+                if (!kw) return true;
+                return String(l.text || '').toLowerCase().includes(kw)
+                    || String(l.level || '').toLowerCase().includes(kw);
+            });
         if (!shown.length) {
             page.appendChild(el('div', 'eo-hint',
-                runtimeLog.length ? '这个级别下暂时没有记录，点上面的「全部」看其它级别。' : '还没有记录。'));
+                !runtimeLog.length
+                    ? '还没有记录。'
+                    : (kw
+                        ? `没有匹配「${logKeyword}」的记录，按 Esc 清掉筛选。`
+                        : '这个级别下暂时没有记录，点上面的「全部」看其它级别。')));
             return;
         }
         const box = el('div', 'eo-box eo-logbox');
@@ -5287,13 +6135,53 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         toBottom();
         if (typeof requestAnimationFrame === 'function') requestAnimationFrame(toBottom);
         setTimeout(toBottom, 60);
+        // 日志页按钮区（2026-11-02 整理）：先建行，再逐个建按钮，最后统一挂到页面上
+        const r = el('div', 'eo-row');
+
         const btn = el('button', 'eo-btn', '清空运行日志');
+        btn.type = 'button';
         btn.addEventListener('click', () => {
             runtimeLog.length = 0;
-            renderPanel();
+            repaintPage();
         });
-        const r = el('div', 'eo-row');
         r.appendChild(btn);
+
+        // 导出跟着当前筛选走：排障时往往只想给一段，不想把五百条全发出去
+        const scopeNote = (logFilter === 'all' && !kw) ? '' : '（当前筛选结果）';
+        const lineOf = (l) => `[${l.at || ''}] ${String(l.level || 'info').toUpperCase()} ${l.text}`;
+
+        const btnExportTxt = el('button', 'eo-btn', '导出文本');
+        btnExportTxt.type = 'button';
+        btnExportTxt.addEventListener('click', () => {
+            const name = `事件大纲-运行日志-${fileStamp()}.txt`;
+            if (downloadText(name, shown.map(lineOf).join('\n') || '（没有日志）')) toast('已导出 ' + name + scopeNote);
+        });
+        r.appendChild(btnExportTxt);
+
+        const btnExportJson = el('button', 'eo-btn', '导出 JSON');
+        btnExportJson.type = 'button';
+        btnExportJson.addEventListener('click', () => {
+            const name = `事件大纲-运行日志-${fileStamp()}.json`;
+            const data = {
+                version: VERSION,
+                exportedAt: new Date().toISOString(),
+                filter: { level: logFilter, keyword: logKeyword || '' },
+                logs: shown,
+            };
+            if (downloadText(name, JSON.stringify(data, null, 2), 'application/json')) toast('已导出 ' + name + scopeNote);
+        });
+        r.appendChild(btnExportJson);
+
+        const btnCopyAll = el('button', 'eo-btn', '复制全部');
+        btnCopyAll.type = 'button';
+        attachHelp(btnCopyAll, '把当前筛选里的日志整段复制到剪贴板，直接粘给对方或粘进记事本。'
+            + '浏览器不允许剪贴板时会退回「手动全选」提示。');
+        btnCopyAll.addEventListener('click', async () => {
+            const ok = await copyText(shown.map(lineOf).join('\n'));
+            toast(ok ? `已复制 ${shown.length} 条${scopeNote}` : '浏览器不让我写剪贴板，请手动选中日志复制');
+        });
+        r.appendChild(btnCopyAll);
+
         page.appendChild(r);
     }
 
@@ -5350,11 +6238,16 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             page.appendChild(ab);
         }
 
-        // 世界书条目内容
-        page.appendChild(el('div', 'eo-sec', '世界书条目'));
+        // 世界书条目内容（2026-11-02）：这段里有核心真相，默认摊开会剧透，
+        // 和盘点页的处理保持一致——折叠起来，摘要行先把后果说清楚
+        page.appendChild(el('div', 'eo-sec eo-sec-inline', '世界书条目'));
+        const entryDet = el('details', 'eo-details');
+        entryDet.appendChild(el('summary', null,
+            '事件条目全文（剧透，点开前想清楚）'));
         const eb = el('div', 'eo-box');
         eb.textContent = buildEntryContent(ev, (ev.inventories || []).length);
-        page.appendChild(eb);
+        entryDet.appendChild(eb);
+        page.appendChild(entryDet);
 
         const btn = el('button', 'eo-btn', '刷新');
         btn.addEventListener('click', () => renderPanel());
@@ -5381,13 +6274,134 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     const openProfiles = new Set();
 
     function renderSetPage(page) {
-        // --- API ---
-        page.appendChild(el('div', 'eo-sec', '模型 API'));
-        const s = getSettings();
+        // 顶部锚点（2026-11-02 4.4）：设置页八段平铺、很长，手机上想改世界书要滚很久。
+        // 不做二级标签页——那会藏掉设置项、也增加记忆负担；四个锚点按下滚即可
+        const nav = el('div', 'eo-setnav');
+        const anchors = [
+            ['eo_set_sec_model', '模型'],
+            ['eo_set_sec_mem', '记忆与盘点'],
+            ['eo_set_sec_ui', '界面与世界书'],
+            ['eo_set_sec_lv', '难度档位'],
+        ];
+        for (const [id, label] of anchors) {
+            const b = el('button', 'eo-btn eo-setnav-btn', label);
+            b.type = 'button';
+            b.addEventListener('click', () => {
+                const target = page.querySelector('#' + id);
+                if (target && target.scrollIntoView) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+            nav.appendChild(b);
+        }
+        page.appendChild(nav);
+        // 只重画设置页用的入口（2026-11-02）：切换当前配置、改配置方式这两件事
+        // 只需要把设置页重画一遍。以前调 renderPanel() 会把整个面板连同滚动位置一起重建，
+        // 在手机上改一个下拉就跳回顶部。
+        const repaint = () => {
+            if (!page.isConnected) { renderPanel(); return; }
+            const host = page.parentNode;
+            const top = page.getBoundingClientRect().top;
+            page.innerHTML = '';
+            renderSetPage(page);
+            const dy = page.getBoundingClientRect().top - top;
+            if (dy && host && host.scrollTop != null) host.scrollTop += dy;
+        };
+        // 各段单独兜底（2026-11-02）：某一段抛出异常时，以前整页从那里断掉，
+        // 下面全是空白，用户完全不知道发生了什么。现在把错误画进页面并写日志，其余段照画
+        // 注意：分段以后各段是独立函数，看不到本函数的局部变量，所以 s 要显式传进去
+        const setS = getSettings();
+        const sections = [
+            ['模型', renderSetModel],
+            ['记忆来源', renderSetMemory],
+            ['打勾与自动盘点', renderSetTrack],
+            ['历史保留', renderSetRetention],
+            ['界面', renderSetUi],
+            ['世界书', renderSetBook],
+            ['难度档位', renderSetLevels],
+        ];
+        for (const [name, fn] of sections) {
+            try {
+                fn(page, setS);
+            } catch (e) {
+                error('设置页「' + name + '」渲染失败：', e);
+                const bad = el('div', 'eo-bad-box');
+                bad.textContent = '「' + name + '」这一段没能显示出来：' + ((e && e.message) || e)
+                    + '。其余设置项不受影响，日志页有完整报错。';
+                page.appendChild(bad);
+            }
+        }
+    }
+
+    /**
+     * 取模型清单（2026-11-02）：走 OpenAI 兼容的 GET /models。
+     * 只有「扩展自己连」这一档能拉——跟随酒馆时没有地址和密钥可问。
+     */
+    async function fetchModelList(profile) {
+        const base = String(profile.baseUrl || '').trim().replace(/\/+$/, '');
+        if (!base) throw new Error('先填接口地址');
+        if (!profile.apiKey) throw new Error('先填密钥');
+        const controller = typeof AbortController === 'function' ? new AbortController() : null;
+        const timer = setTimeout(() => { if (controller) { try { controller.abort(); } catch (e) { /* 忽略 */ } } }, 20000);
+        let resp;
+        try {
+            resp = await fetch(base + '/models', {
+                method: 'GET',
+                headers: { 'Authorization': 'Bearer ' + profile.apiKey },
+                signal: controller ? controller.signal : undefined,
+            });
+        } catch (e) {
+            throw new Error('连不上：' + (e && e.message || e));
+        } finally {
+            clearTimeout(timer);
+        }
+        const text = await resp.text();
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}：${text.slice(0, 200)}`);
+        let data;
+        try { data = JSON.parse(text); } catch (e) { throw new Error('返回的不是 JSON'); }
+        const arr = Array.isArray(data) ? data : (data && Array.isArray(data.data) ? data.data : []);
+        return arr
+            .map(x => (x && (x.id || x.name)) || '')
+            .filter(Boolean)
+            .sort();
+    }
+
+    /** 模型清单弹在一处，点一个就选上 */
+    function showModelPicker(page, profileId, list, onPick) {
+        const old = page.querySelector('#eo_model_picker');
+        if (old) old.remove();
+        const box = el('div', 'eo-box');
+        box.id = 'eo_model_picker';
+        box.appendChild(el('div', 'eo-hint', `共 ${list.length} 个模型，点一个填进模型名`));
+        const sel = el('select', 'eo-sel');
+        sel.style.width = '100%';
+        for (const m of list) {
+            const o = el('option', null, m);
+            o.value = m;
+            sel.appendChild(o);
+        }
+        box.appendChild(sel);
+        const row = el('div', 'eo-row');
+        const bOk = el('button', 'eo-btn eo-primary', '用这个');
+        bOk.type = 'button';
+        bOk.addEventListener('click', () => { onPick(sel.value); box.remove(); });
+        const bNo = el('button', 'eo-btn', '收起');
+        bNo.type = 'button';
+        bNo.addEventListener('click', () => box.remove());
+        row.appendChild(bOk);
+        row.appendChild(bNo);
+        box.appendChild(row);
+        page.appendChild(box);
+    }
+
+    /** 设置页：当前用哪套模型配置（模型段） */
+    function renderSetModel(page, s) {
+        const secModel = el('div', 'eo-anchor');
+        secModel.id = 'eo_set_sec_model';
+        page.appendChild(secModel);
+        page.appendChild(el('div', 'eo-sec', '模型'));
 
         // 使用哪套配置
         const apiRow = el('div', 'eo-row');
-        apiRow.appendChild(el('label', null, '使用配置'));
+        apiRow.appendChild(el('label', null, '当前使用'));
         const apiSel = el('select', 'eo-sel');
         apiSel.style.flex = '1';
         for (const p of s.apiProfiles) {
@@ -5396,12 +6410,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             apiSel.appendChild(o);
         }
         apiSel.value = s.activeProfileId;
+        markKey(apiSel, 'set.profile');
         apiSel.addEventListener('change', () => {
             getSettings().activeProfileId = apiSel.value;
             saveSettings();
             const p = (getSettings().apiProfiles || []).find(x => x.id === apiSel.value);
             log(`模型 API 已切换为「${p ? p.name : apiSel.value}」`);
-            renderPanel();
+            repaint();
         });
         apiRow.appendChild(apiSel);
         page.appendChild(apiRow);
@@ -5409,10 +6424,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const cur = (s.apiProfiles || []).find(p => p.id === s.activeProfileId) || { mode: 'main' };
         page.appendChild(el('div', 'eo-hint',
             cur.mode === 'main'
-                ? '跟随酒馆主连接：用酒馆当前选的模型和连接，最省心。'
+                ? '跟随酒馆：用酒馆当前选的模型和连接，最省心，一般就用这个。'
                 : cur.mode === 'direct'
-                    ? '直连：扩展自己请求你填的接口，与酒馆主模型完全独立。'
-                    : '酒馆连接源：调用酒馆里已配好的连接，可以指定模型名。'));
+                    ? '扩展自己连：填服务地址、模型名和密钥，与酒馆用的模型完全分开。'
+                    : '用酒馆里的连接：从酒馆已配好的连接里挑一个，可以另外指定模型名。'));
 
         // 配置档列表：每行一套，可以编辑/删除
         const listHead = el('div', 'eo-sec eo-sec-inline');
@@ -5428,7 +6443,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 if (box.open) openProfiles.add(p.id); else openProfiles.delete(p.id);
             });
             const sum = el('summary', 'eo-prefgroup-sum');
-            sum.textContent = `${p.name}${p.mode === 'main' ? '（跟随酒馆）' : p.mode === 'direct' ? '（直连）' : '（酒馆连接源）'}`;
+            sum.textContent = `${p.name}${p.mode === 'main' ? '（跟随酒馆）' : p.mode === 'direct' ? '（自己连）' : '（用酒馆连接）'}`;
             box.appendChild(sum);
             const body = el('div', 'eo-prefgroup-body');
 
@@ -5441,77 +6456,18 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 nameIn.type = 'text';
                 nameIn.value = p.name || '';
                 nameIn.style.flex = '1';
+                // 改完离开输入框就存，不用专门去点按钮（2026-11-02）
+                nameIn.addEventListener('change', () => {
+                    const nm = String(nameIn.value || '').trim();
+                    if (!nm) { nameIn.value = p.name; return; }
+                    if (nm === p.name) return;
+                    updateProfile(p.id, t => { t.name = nm; });
+                    log(`模型配置「${p.name}」已更名为「${nm}」`);
+                });
                 nameRow2.appendChild(nameIn);
                 body.appendChild(nameRow2);
 
-                const modeRow2 = el('div', 'eo-row');
-                modeRow2.appendChild(el('label', null, '方式'));
-                const modeSel = el('select', 'eo-sel');
-                for (const [mv, ml] of [['tavern', '走酒馆连接源'], ['direct', '直连接口']]) {
-                    const o = el('option', null, ml);
-                    o.value = mv;
-                    modeSel.appendChild(o);
-                }
-                modeSel.value = p.mode;
-                modeSel.addEventListener('change', () => {
-                    const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
-                    if (t) { t.mode = modeSel.value; saveSettings(); }
-                    renderPanel();
-                });
-                modeRow2.appendChild(modeSel);
-                body.appendChild(modeRow2);
-
-                if (p.mode === 'tavern') {
-                    const apiRow2 = el('div', 'eo-row');
-                    apiRow2.appendChild(el('label', null, '连接源'));
-                    const apiSel2 = el('select', 'eo-sel');
-                    const o0 = el('option', null, '（跟随酒馆当前连接源）');
-                    o0.value = '';
-                    apiSel2.appendChild(o0);
-                    for (const [av, al] of TAVERN_APIS) {
-                        const o = el('option', null, al);
-                        o.value = av;
-                        apiSel2.appendChild(o);
-                    }
-                    apiSel2.value = p.api || '';
-                    apiSel2.addEventListener('change', () => {
-                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
-                        if (t) { t.api = apiSel2.value; saveSettings(); }
-                    });
-                    apiRow2.appendChild(apiSel2);
-                    body.appendChild(apiRow2);
-
-                    const mRow = el('div', 'eo-row');
-                    mRow.appendChild(el('label', null, '模型名'));
-                    const mIn = el('input', 'eo-input');
-                    mIn.type = 'text';
-                    mIn.placeholder = '留空=跟随酒馆当前模型';
-                    mIn.value = p.model || '';
-                    mIn.style.flex = '1';
-                    mIn.addEventListener('change', () => {
-                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
-                        if (t) { t.model = mIn.value.trim(); saveSettings(); }
-                    });
-                    mRow.appendChild(mIn);
-                    body.appendChild(mRow);
-
-                    const rRow = el('div', 'eo-row');
-                    rRow.appendChild(el('label', null, '输出上限'));
-                    const rIn = el('input', 'eo-input');
-                    rIn.type = 'number';
-                    rIn.min = '0';
-                    rIn.step = '100';
-                    rIn.placeholder = '0=用酒馆当前设置';
-                    rIn.value = String(Number(p.responseLength) || 0);
-                    rIn.style.width = '90px';
-                    rIn.addEventListener('change', () => {
-                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
-                        if (t) { t.responseLength = Number(rIn.value) || 0; saveSettings(); }
-                    });
-                    rRow.appendChild(rIn);
-                    body.appendChild(rRow);
-                } else {
-                    const uRow = el('div', 'eo-row');
+                const uRow = el('div', 'eo-row');
                     uRow.appendChild(el('label', null, '接口地址'));
                     const uIn = el('input', 'eo-input');
                     uIn.type = 'text';
@@ -5519,24 +6475,71 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     uIn.value = p.baseUrl || '';
                     uIn.style.flex = '1';
                     uIn.addEventListener('change', () => {
-                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
-                        if (t) { t.baseUrl = uIn.value.trim(); saveSettings(); }
+                        updateProfile(p.id, t => { t.baseUrl = uIn.value.trim(); });
                     });
                     uRow.appendChild(uIn);
                     body.appendChild(uRow);
 
+                    // 密钥不把原值回填进输入框（2026-11-02）：密码框点一下「显示密码」就露底了。
+                    // 有密钥就显示掩码和「已保存」，要改点「重新输入」，要删点「清除」。
                     const kRow = el('div', 'eo-row');
                     kRow.appendChild(el('label', null, '密钥'));
-                    const kIn = el('input', 'eo-input');
-                    kIn.type = 'password';
-                    kIn.placeholder = 'sk-…';
-                    kIn.value = p.apiKey || '';
-                    kIn.style.flex = '1';
-                    kIn.addEventListener('change', () => {
-                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
-                        if (t) { t.apiKey = kIn.value.trim(); saveSettings(); }
-                    });
-                    kRow.appendChild(kIn);
+                    const keyState = { editing: !p.apiKey };
+                    const kBox = el('div', 'eo-keybox');
+                    kBox.style.flex = '1';
+                    kRow.appendChild(kBox);
+                    const paintKey = () => {
+                        kBox.innerHTML = '';
+                        if (keyState.editing) {
+                            const kIn = el('input', 'eo-input');
+                            kIn.type = 'password';
+                            kIn.placeholder = 'sk-…';
+                            kIn.style.flex = '1';
+                            kIn.autocomplete = 'off';
+                            // 这里刻意不回填原值：用户不输入就是没改，留空等于不改
+                            kIn.addEventListener('change', () => {
+                                const v = kIn.value.trim();
+                                if (!v) return;
+                                updateProfile(p.id, t => { t.apiKey = v; });
+                                keyState.editing = false;
+                                kIn.value = '';
+                                log(`配置「${p.name}」的密钥已更新`);
+                                repaintPage();
+                            });
+                            kBox.appendChild(kIn);
+                            const bCancel = el('button', 'eo-btn', '不改了');
+                            bCancel.type = 'button';
+                            bCancel.addEventListener('click', (e) => {
+                                e.preventDefault();
+                                keyState.editing = false;
+                                reloadProfileKey(p.id);
+                                repaintPage();
+                            });
+                            kBox.appendChild(bCancel);
+                        } else {
+                            kBox.appendChild(el('span', 'eo-keymask', maskKey(p.apiKey)));
+                            const bEdit = el('button', 'eo-btn', '重新输入');
+                            bEdit.type = 'button';
+                            bEdit.addEventListener('click', (e) => {
+                                e.preventDefault();
+                                keyState.editing = true;
+                                repaintPage();
+                            });
+                            kBox.appendChild(bEdit);
+                            const bClear = el('button', 'eo-btn', '清除');
+                            bClear.type = 'button';
+                            attachHelp(bClear, '清掉这套配置里存着的密钥。直连模式没有密钥就连不上，清除前想清楚。');
+                            bClear.addEventListener('click', async (e) => {
+                                e.preventDefault();
+                                if (!(await askConfirm('清除这套配置的密钥？清除后直连模式无法请求，需要重新填写。'))) return;
+                                updateProfile(p.id, t => { t.apiKey = ''; });
+                                log(`配置「${p.name}」的密钥已清除`);
+                                repaintPage();
+                            });
+                            kBox.appendChild(bClear);
+                        }
+                    };
+                    paintKey();
                     body.appendChild(kRow);
 
                     const mRow2 = el('div', 'eo-row');
@@ -5547,10 +6550,36 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     mIn2.value = p.model || '';
                     mIn2.style.flex = '1';
                     mIn2.addEventListener('change', () => {
-                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
-                        if (t) { t.model = mIn2.value.trim(); saveSettings(); }
+                        updateProfile(p.id, t => { t.model = mIn2.value.trim(); });
                     });
                     mRow2.appendChild(mIn2);
+                    // 获取模型列表（2026-11-02）：地址和密钥填好后直接问服务端要清单，
+                    // 省得手打模型名拼错。拉不到不拦人，手填照样能用
+                    const btnModels = el('button', 'eo-btn', '获取模型列表');
+                    btnModels.type = 'button';
+                    attachHelp(btnModels, '按这套配置里的地址和密钥，向服务端要一份可用模型清单。'
+                        + '服务端不提供清单（返回 404 之类）时只能手填，不影响使用。');
+                    btnModels.addEventListener('click', async () => {
+                        btnModels.disabled = true;
+                        const old = btnModels.textContent;
+                        btnModels.textContent = '获取中…';
+                        try {
+                            const list = await fetchModelList(p);
+                            if (!list.length) throw new Error('服务端没返回任何模型');
+                            showModelPicker(page, p.id, list, (picked) => {
+                                updateProfile(p.id, t => { t.model = picked; });
+                                mIn2.value = picked;
+                                log(`配置「${p.name}」的模型已选为 ${picked}`);
+                            });
+                        } catch (e) {
+                            error('获取模型列表失败：', e);
+                            toast('获取模型列表失败：' + (e && e.message || e), { bad: true });
+                        } finally {
+                            btnModels.disabled = false;
+                            btnModels.textContent = old;
+                        }
+                    });
+                    mRow2.appendChild(btnModels);
                     body.appendChild(mRow2);
 
                     const tRow = el('div', 'eo-row');
@@ -5563,8 +6592,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     tIn.value = String(Number.isFinite(Number(p.temperature)) ? Number(p.temperature) : 0.7);
                     tIn.style.width = '76px';
                     tIn.addEventListener('change', () => {
-                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
-                        if (t) { t.temperature = Number(tIn.value); saveSettings(); }
+                        updateProfile(p.id, t => { t.temperature = Number(tIn.value); });
                     });
                     tRow.appendChild(tIn);
                     tRow.appendChild(el('span', 'eo-hint', '0-2，越高越发散；结构化输出建议 0.7 以下'));
@@ -5580,22 +6608,59 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     xIn.value = String(Number(p.maxTokens) || 0);
                     xIn.style.width = '90px';
                     xIn.addEventListener('change', () => {
-                        const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
-                        if (t) { t.maxTokens = Number(xIn.value) || 0; saveSettings(); }
+                        updateProfile(p.id, t => { t.maxTokens = Number(xIn.value) || 0; });
                     });
                     xRow.appendChild(xIn);
                     body.appendChild(xRow);
-                }
+
+                    // 请求体三段（2026-11-02）：意思与酒馆里同名设置一致，
+                    // 都是 YAML 文本。留空就等于不加、不删，跟酒馆默认一致
+                    const bodySec = el('div', 'eo-sec eo-sec-inline');
+                    bodySec.appendChild(el('span', null, '请求体'));
+                    bodySec.appendChild(el('span', 'eo-hint',
+                        '按需填写，留空等同不设置。这组只对「自己连」生效；每次请求临时生效，不改服务端任何东西。'));
+                    body.appendChild(bodySec);
+
+                    const yamlField = (label, key, hint) => {
+                        const r = el('div', 'eo-yaml-field');
+                        const head = el('div', 'eo-hint');
+                        head.textContent = label;
+                        r.appendChild(head);
+                        const ta = el('textarea', 'eo-input');
+                        ta.rows = 3;
+                        ta.style.width = '100%';
+                        ta.placeholder = hint;
+                        ta.value = p[key] || '';
+                        markKey(ta, 'profile.' + p.id + '.' + key);
+                        // 解析失败只提示，不拦保存：填错不该让整次请求发不出去
+                        const chk = el('div', 'eo-hint');
+                        const bad = String(p[key] || '').trim() && /^\s*\S+\s*$/.test(String(p[key] || ''));
+                        if (bad) chk.textContent = '看不出来是「键: 值」的形状，这项会被忽略';
+                        ta.addEventListener('change', () => {
+                            updateProfile(p.id, t => { t[key] = ta.value; });
+                            const v = String(ta.value || '').trim();
+                            chk.textContent = v && !/:/.test(v) ? '看不出来是「键: 值」的形状，这项会被忽略' : '';
+                        });
+                        r.appendChild(ta);
+                        r.appendChild(chk);
+                        body.appendChild(r);
+                    };
+
+                    yamlField('包含主体参数', 'includeBody',
+                        '键: 值\n例如\ntemperature: 0.3\nresponse_format: {"type":"json_object"}');
+                    yamlField('排除主体参数', 'excludeBody',
+                        '键名，一行一个\n例如\ntop_p\nfrequency_penalty');
+                    yamlField('包含请求标头', 'includeHeaders',
+                        '键: 值\n例如\nX-Title: 事件大纲');
 
                 // 保存名称按钮 + 测试 + 删除
                 const actRow = el('div', 'eo-row');
-                const btnSave = el('button', 'eo-btn', '保存名称');
+                const btnSave = el('button', 'eo-btn', '保存配置');
                 btnSave.type = 'button';
-                btnSave.addEventListener('click', () => {
-                    const t = (getSettings().apiProfiles || []).find(x => x.id === p.id);
+                btnSave.addEventListener('click', async () => {
                     const nm = String(nameIn.value || '').trim();
                     if (!nm) { nameIn.value = p.name; return; }
-                    if (t) { t.name = nm; saveSettings(); }
+                    updateProfile(p.id, t => { t.name = nm; });
                     log(`模型配置「${p.name}」已更名为「${nm}」`);
                     renderPanel();
                 });
@@ -5608,30 +6673,36 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     btnTest.disabled = true;
                     testOut.className = 'eo-hint';
                     testOut.textContent = '测试中…';
-                    const prevActive = getSettings().activeProfileId;
                     try {
-                        // 临时切到这套配置试一次
-                        getSettings().activeProfileId = p.id;
+                        // 直接把这套配置传进去测，不碰全局当前配置：
+                        // 以前是临时改 activeProfileId 再改回来，测试期间点生成就会用错配置
                         const r = await testProfile(p);
                         testOut.className = 'eo-ok';
                         testOut.textContent = `通！${r.ms} 毫秒，返回「${r.sample}」`;
+                        updateProfile(p.id, t => { t.lastTest = { ok: true, ms: r.ms, at: Date.now() }; });
                         log(`配置「${p.name}」测试连接通过：${r.ms} 毫秒`);
                     } catch (e) {
+                        updateProfile(p.id, t => { t.lastTest = { ok: false, at: Date.now() }; });
                         testOut.className = 'eo-bad';
                         testOut.textContent = '不通：' + (e && e.message || e);
                     } finally {
-                        getSettings().activeProfileId = prevActive;
-                        saveSettings();
                         btnTest.disabled = false;
                     }
                 });
+                // 展开配置块时顺手显示上一次的结果：以前结果只活到下次重绘
+                if (p.lastTest) {
+                    testOut.className = p.lastTest.ok ? 'eo-ok' : 'eo-bad';
+                    testOut.textContent = p.lastTest.ok
+                        ? `上次测试：通，${p.lastTest.ms} 毫秒`
+                        : '上次测试：不通';
+                }
                 actRow.appendChild(btnTest);
                 actRow.appendChild(testOut);
                 body.appendChild(actRow);
 
                 if (p.id !== 'main') {
                     const delRow = el('div', 'eo-row');
-                    const btnDel = el('button', 'eo-btn', '删除这套配置');
+                    const btnDel = el('button', 'eo-btn', '删除配置');
                     btnDel.type = 'button';
                     btnDel.addEventListener('click', () => {
                         const st = getSettings();
@@ -5646,6 +6717,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     body.appendChild(delRow);
                 }
             }
+
 
             box.appendChild(body);
             page.appendChild(box);
@@ -5679,6 +6751,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         page.appendChild(addRow);
 
         // --- 记忆来源 ---
+    }
+
+    /** 设置页：记忆来源与楼层数 */
+    function renderSetMemory(page, s) {
+        const secMem = el('div', 'eo-anchor');
+        secMem.id = 'eo_set_sec_mem';
+        page.appendChild(secMem);
         page.appendChild(el('div', 'eo-sec', '记忆来源'));
         const memRow = el('div', 'eo-row');
         memRow.appendChild(el('label', null, '来源'));
@@ -5693,7 +6772,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             getSettings().memory.source = memSel.value;
             saveSettings();
             log(`记忆来源已切换为「${MEMORY_SOURCES[memSel.value] || memSel.value}」`);
-            renderPanel();
+            repaintPage();
         });
         memRow.appendChild(memSel);
         page.appendChild(memRow);
@@ -5732,7 +6811,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             getSettings().worldbook.enabled = wbChk.checked;
             saveSettings();
             log(`读取角色世界书：${wbChk.checked ? '开' : '关'}`);
-            renderPanel();
+            repaintPage();
         });
         wbBox.appendChild(wbChk);
         wbBox.appendChild(el('span', null, '读取角色世界书'));
@@ -5820,6 +6899,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         }
 
         // --- 打勾模式 ---
+    }
+
+    /** 设置页：打勾模式与自动盘点的楼层阈值 */
+    function renderSetTrack(page, s) {
         const trSec = el('div', 'eo-sec eo-sec-inline');
         trSec.appendChild(el('span', null, '打勾模式'));
         attachHelp(trSec, '「打勾」= 把大纲里的某个节点标成已达成。剧情推进到某个节点时，谁来判断、谁来点，就是这个模式决定的。');
@@ -5836,7 +6919,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             getSettings().tracker.mode = trSel.value;
             saveSettings();
             log(`打勾模式已切换为「${TRACKER_MODES[trSel.value] || trSel.value}」`);
-            renderPanel();
+            repaintPage();
         });
         trRow.appendChild(trSel);
         page.appendChild(trRow);
@@ -5907,7 +6990,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 } catch (e) {
                     afBtn.disabled = false;
                     afBtn.textContent = '现在盘点一次';
-                    alert('盘点失败：' + (e && e.message || e));
+                    toast('盘点失败：' + (e && e.message || e), { bad: true });
                 }
             });
             const afRow2 = el('div', 'eo-row');
@@ -5922,6 +7005,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         // --- shujuku 诊断已上移到「记忆来源」子项（见上） ---
 
         // --- 保留数量 ---
+    }
+
+    /** 设置页：历史事件保留数量 */
+    function renderSetRetention(page, s) {
         const retSec = el('div', 'eo-sec eo-sec-inline');
         retSec.appendChild(el('span', null, '历史保留'));
         attachHelp(retSec, '事件完结或废弃后，事件卡不会立刻消失，而是留在这里当历史。这两个数字是分别保留多少条：超出上限时按结束时间从旧到新删掉最老的。进行中的事件永远不会被清掉。');
@@ -5958,6 +7045,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         page.appendChild(retRow);
 
         // --- 界面 ---
+    }
+
+    /** 设置页：界面（悬浮球开关、调试日志） */
+    function renderSetUi(page, s) {
+        const secUi = el('div', 'eo-anchor');
+        secUi.id = 'eo_set_sec_ui';
+        page.appendChild(secUi);
         page.appendChild(el('div', 'eo-sec', '界面'));
         const fabRow = el('div', 'eo-row');
         fabRow.appendChild(el('label', null, '悬浮窗'));
@@ -5983,13 +7077,17 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             getSettings().debug = dbgChk.checked;
             saveSettings();
             debug(`调试日志已${dbgChk.checked ? '开启' : '关闭'}`);
-            renderPanel();
+            repaintPage();
         });
         dbgRow.appendChild(dbgChk);
         dbgRow.appendChild(el('span', 'eo-hint', '开启后记录每一步的细节，排障时用；平时建议关掉，免得刷屏'));
         page.appendChild(dbgRow);
 
         // --- 世界书自检 ---
+    }
+
+    /** 设置页：世界书（打勾范围、自检、写入测试） */
+    function renderSetBook(page, s) {
         page.appendChild(el('div', 'eo-sec', '世界书'));
         const bookRow = el('div', 'eo-row');
         const btnCheck = el('button', 'eo-btn', '自检世界书');
@@ -6039,7 +7137,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 const content = `〔事件大纲｜写入自测｜${new Date().toISOString()}〕\n测试条目，确认无损写入后请点删除。`;
                 const r = await upsertEventEntry(target, content, `${ENTRY_PREFIX}${TEST_MARK}`, null);
                 checkOut.className = 'eo-ok';
-                checkOut.textContent = `写入成功，uid=${r.uid}。其余条目内容校验通过。`;
+                checkOut.textContent = '写入成功，其余条目内容校验通过。';
                 log(`世界书写入测试成功：${target}，uid=${r.uid}`);
             } catch (e) {
                 checkOut.className = 'eo-bad';
@@ -6081,9 +7179,17 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         page.appendChild(bookRow);
 
         // --- 难度档位 ---
+    }
+
+    /** 设置页：难度档位自定义 */
+    function renderSetLevels(page, s) {
+        const secLv = el('div', 'eo-anchor');
+        secLv.id = 'eo_set_sec_lv';
+        page.appendChild(secLv);
         page.appendChild(el('div', 'eo-sec', '难度档位'));
         page.appendChild(el('div', 'eo-hint',
-            '生成事件时「难度等级」下拉里可选的档位。留空则使用内置默认档：'
+            '生成事件时「难度等级」下拉里可选的档位。一行一个，从低到高排，下拉里就按这个顺序出现。'
+            + '留空则使用内置默认档：'
             + DEFAULT_DIFFICULTY_LEVELS.join(' / ')
             + '。如果你的角色卡自带一套分级（比如从 F 到 SSS、或「见习/正式/精英」），在这里整组填成你卡里的说法即可。'));
         const lvInput = el('textarea', 'eo-input eo-textarea');
@@ -6096,6 +7202,15 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const lvRow = el('div', 'eo-row');
         const btnLvSave = el('button', 'eo-btn eo-primary', '保存档位');
         const btnLvReset = el('button', 'eo-btn', '恢复默认');
+        const btnLvFill = el('button', 'eo-btn', '填入内置五档');
+        btnLvFill.type = 'button';
+        attachHelp(btnLvFill, '把内置那五档填进上面的框，方便在它们基础上改一两档。'
+            + '只填不保存，改完还要点「保存档位」。');
+        btnLvFill.addEventListener('click', () => {
+            lvInput.value = DEFAULT_DIFFICULTY_LEVELS.join('\n');
+            lvOut.className = 'eo-hint';
+            lvOut.textContent = '已填入内置五档，改完记得点「保存档位」。';
+        });
         const lvOut = el('div', 'eo-hint');
         btnLvSave.addEventListener('click', () => {
             const list = String(lvInput.value || '').split('\n')
@@ -6121,17 +7236,15 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             log('难度档位已恢复默认');
         });
         lvRow.appendChild(btnLvSave);
+        lvRow.appendChild(btnLvFill);
         lvRow.appendChild(btnLvReset);
         page.appendChild(lvRow);
         page.appendChild(lvOut);
-        page.appendChild(checkOut);
 
-        const foot = el('div', 'eo-hint', `扩展 v${VERSION}｜日志前缀 ${LOG_PREFIX}`);
-        foot.style.marginTop = '14px';
-        page.appendChild(foot);
     }
 
-    // ==================== 6. 设置面板入口 ====================
+
+    // ==================== 11. 设置面板入口 ====================
 
     function addMenuButton() {
         const menu = document.getElementById('extensionsMenu');
@@ -6147,7 +7260,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         menu.appendChild(item);
     }
 
-    // ==================== 7. 入口 ====================
+    // ==================== 12. 入口 ====================
 
     function init() {
         const context = ctx();
