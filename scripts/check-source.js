@@ -4,7 +4,7 @@
 // 2026-11-02 拆仓：原 check-docs.js 里与文档有关的部分搬到了文档仓库（docs-repo/scripts/check-docs.js）。
 // 留在本仓库的是「只看代码」的检查，外加一项跨仓库可选检查：
 // 比对文档头部版本行与 manifest.version——EO_DOCS_DIR 指向文档仓库根目录时用该路径，
-// 未设置则自动探测仓库根下的 docs-repo；两处都找不到就跳过并提示，不算失败
+// 未设置则自动探测兄弟目录 ../docs-repo；两处都找不到就跳过并提示，不算失败
 // （单独 clone 源码仓库时文档仓库不在手边，属正常）。
 const fs = require('fs');
 const path = require('path');
@@ -156,13 +156,13 @@ for (const ph of needPhrases) {
     if (!reported) ok(`渲染循环里没有裸 return（检查 ${loops} 个列表循环）`);
 }
 
-// ---- 6. 与文档仓库的版本行比对（EO_DOCS_DIR 优先，否则探测仓库根下的 docs-repo）----
+// ---- 6. 与文档仓库的版本行比对（EO_DOCS_DIR 优先，否则探测兄弟目录 ../docs-repo）----
 {
     const docsDir = process.env.EO_DOCS_DIR
         ? path.resolve(process.env.EO_DOCS_DIR)
-        : path.resolve(root, 'docs-repo');
+        : path.resolve(root, '..', 'docs-repo');
     if (!fs.existsSync(docsDir)) {
-        ok(`跳过文档版本比对（既未设置 EO_DOCS_DIR，仓库根下也没有 docs-repo：${docsDir}）`);
+        ok(`跳过文档版本比对（既未设置 EO_DOCS_DIR，兄弟目录也没有 docs-repo：${docsDir}）`);
     } else if (!mv) {
         // manifest 版本都没读到，前面已经报错，这里不再重复
         ok('跳过文档版本比对（manifest 版本未知）');
