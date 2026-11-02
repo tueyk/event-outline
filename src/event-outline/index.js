@@ -1975,8 +1975,8 @@
             'event_name: <事件名>',
             'event_brief: <一句话简介>',
             'event_type:',
-            '  主类型: <案件推理|谈判交涉|探险探索|生存危机|社交博弈|战斗冲突|日常委托|禁忌秘辛>',
-            '  次类型: [<最多3个>]',
+            '  primary: <案件推理|谈判交涉|探险探索|生存危机|社交博弈|战斗冲突|日常委托|禁忌秘辛>',
+            '  secondary: [<最多3个>]',
             'core_truth: |',
             '  <多层真相，逐条列>',
             'nodes:',
@@ -1987,20 +1987,20 @@
             '    refute_by: [<可选，误导项填节点编号>]',
             'min_nodes_for_deduction: [<推理必需的节点编号>]',
             'characters:',
-            '  助力者:',
+            '  helpers:',
             '    - name: <角色名>',
             '      identity: <身份>',
             '      motive: <动机，各人不同>',
             '      cost: <条件或代价，无则填 无>',
-            '  阻碍者:',
+            '  obstructers:',
             '    - name: <角色名>',
             '      identity: <身份>',
             '      reason: <阻碍理由>',
             '      resolvable_by: <化解方式>',
-            '  知情者:',
+            '  informants:',
             '    - name: <角色名>',
             '      info_known: <掌握的信息>',
-            '  幕后方:',
+            '  behind_scenes:',
             '    - name: <角色名或势力>',
             '      reveal: forbidden',
             '      exposure_path: <暴露路径>',
@@ -2012,15 +2012,15 @@
             '    risk: <无|低|中|高>',
             '    fail: <失败后果>',
             'time_pressure:',
-            '  倒计时: <描述>',
-            '  时长: <描述>',
-            '  超时后果: <描述>',
-            '  拖延代价: <描述>',
+            '  countdown: <描述>',
+            '  duration: <描述>',
+            '  timeout_result: <描述>',
+            '  delay_cost: <描述>',
             'danger:',
-            '  致死性: <描述>',
-            '  失败后果: <描述>',
-            '  容错率: <描述>',
-            '  威胁来源: <描述>',
+            '  lethality: <描述>',
+            '  failure: <描述>',
+            '  tolerance: <描述>',
+            '  threat_source: <描述>',
             'forbidden:',
             '  - <禁止事项>',
             '```',
@@ -2719,13 +2719,24 @@
         信息内容: 'info', 指向信息: 'info', 后果: 'consequence', 可被节点推翻: 'refute_by',
         可推翻: 'refute_by', 是否误导: 'is_misleading', 类别: 'kind',
         步骤: 'step', 对应节点: 'node', 对应节点编号: 'node', 路径正文: 'route',
-        是否必经: 'must', 失败后果: 'fail', 失败情形: 'fail',
+        // danger 组的「失败后果」与 paths 里的「失败情形」本来就是两个键（failure / fail），
+        // 2026-11-02 骨架统一成英文时把 danger 的写成 failure；旧稿里的中文写法照旧收在这里
+        是否必经: 'must', 失败后果: 'failure', 失败情形: 'fail',
         时间压力: 'time_pressure', 危险程度: 'danger', 倒计时: 'countdown', 时长: 'duration',
         超时后果: 'timeout_result', 主类型: 'primary', 次类型: 'secondary',
         结果: 'outcomes', 大纲外走向: 'out_of_plan_paths', 必需节点: 'required_nodes',
         可跳过节点: 'optional_nodes', 风险: 'risk',
         拖延代价: 'delay_cost', 致死性: 'lethality', 容错率: 'tolerance', 威胁来源: 'threat_source',
         条件或代价: 'condition_or_cost', 标注: 'note', '知情者/关键人物': 'informants',
+        // ---- 2026-11-02 补齐：显示表里已经有中文名、但这里没人指过来的键 ----
+        // 这些中文模型偶尔还会写（旧提示词、或它自己发挥），不认就等于整段信息被丢掉。
+        // 骨架已经统一成英文，这里是宽容度，不是鼓励。
+        // 注意：只补「这里还没有的写法」。中文名撞车的（身份→identity、路径→path、
+        // 步骤→step、化解方式→resolvable_by、触发词→keyword、掌握的信息→info_known 等）
+        // 沿用原登记，别在这里重复，对象里重复的键会互相覆盖，反而改错目标。
+        描述: 'desc', 说明: 'detail', 推进作用: 'thrust',
+        内容: 'content', 隐藏信息: 'hidden',
+        是否必需: 'required', 可否化解: 'resolvable', 为什么现在: 'why_now',
     };
 
     // 「节点」这个词在 paths 里模型常用来写「必经/可跳过」，在别处才是编号。
@@ -3074,6 +3085,18 @@
         steps: '步骤',
         why_now: '当下的理由',
         wont_tell: '不肯说的',
+        // 时间压力 / 危险程度 两组的子键（2026-11-02 补）。
+        // 中文键映射表早就收下了这些写法，但显示用的 OUTLINE_KEY_LABEL 没跟上，
+        // 结果是编辑框里只有外层「时间压力：」「危险程度：」是中文，里面几个子键露着英文。
+        countdown: '倒计时',
+        duration: '时长',
+        timeout_result: '超时后果',
+        delay_cost: '拖延代价',
+        lethality: '致死性',
+        // danger 组的失败后果是 failure，paths 里的失败情形才是 fail；两个都要有名字
+        failure: '失败后果',
+        tolerance: '容错率',
+        threat_source: '威胁来源',
     };
 
     const NODE_TYPE_LABEL = {
@@ -4186,10 +4209,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-draft-acts{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-top:6px;}
 .eo-draft-acts-look{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
 .eo-draft-acts-use{display:flex;gap:6px;align-items:center;margin-left:auto;}
-/* 设置页顶部锚点（2026-11-02 4.4）：八段平铺太长，手机上一个下拉滚半天 */
-.eo-setnav{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 10px;}
-.eo-setnav-btn{padding:3px 10px;font-size:12px;}
-.eo-anchor{scroll-margin-top:8px;height:0;}
+/* 设置页顶部原本有一排锚点按钮（模型、记忆与判定、界面与世界书、难度挡位），
+   2026-11-02 危晓要求删掉：页面上不需要这排快捷跳转，直接按段落顺读即可。
+   各段的锚点占位 div 一并去掉，空 div 不再需要定位。 */
 .eo-keybox{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
 .eo-keymask{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--eo-text-4);}
 .eo-btn-toggle{border-left:3px solid transparent;}
@@ -4804,12 +4826,12 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     })();
 
     /**
-     * 把大纲文本里的英文键换成中文，给编辑框显示用。
-     * 只换行首的「键:」和「- 键:」这种键位，值里的英文（比如节点类型 testimony）不动。
-     * 缩进原样保留，所以换键名不影响 YAML 结构。
+     * 转成正键名后要原样保留、不参与中英互转的键。
+     * 现在没有例外项：立场键（助力者/阻碍者/知情者/幕后方）也照常转，
+     * 转回时靠 backMap 还原成原稿的写法，不必特意保留英文。
+     * 这个集合原名叫 SIDE_CN（2026-11-01 改名），当时 keysToEnglish 里漏改了一处引用，
+     * 害得「保存编辑」每次保存都抛 ReferenceError，2026-11-02 才被发现；改名时务必全局搜旧名。
      */
-    // 转成中文后会显示成「助力者:」这样的键，转回时靠 backMap 还原成原稿的写法，
-    // 所以这几个立场键也照转，不用特意保留英文。
     const KEEP_AS_IS = new Set();
 
     /**
@@ -4847,7 +4869,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             const m = line.match(/^(\s*(?:-\s+)?)([^\s:][^:]*?)(\s*:)([\s\S]*)$/);
             if (!m) return line;
             const name = m[2].trim();
-            if (SIDE_CN.has(name)) return line;
+            // 立场键（助力者/阻碍者/知情者/幕后方）不特殊处理：转成中文后靠 backMap 还原原稿写法。
+            // 这里原来写的是 SIDE_CN.has(name)，那个集合在 2026-11-01 就被 KEEP_AS_IS 取代了，
+            // 残留的引用让「保存编辑」每次都抛 ReferenceError——改动只走到这里，所以一直没被发现。
+            if (KEEP_AS_IS.has(name)) return line;
             // 模型原稿里本来就是中文键，别翻成英文
             if (Array.isArray(backMap) && backMap[idx] === '__CN__') return line;
             // 这一行没改过键名，且原来就有英文键，直接还原成原来那个
@@ -4933,7 +4958,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             const text = buf.text || '';
             const ls = text ? text.split('\n').length : 0;
             const changed = text !== buf.original;
-            stat.textContent = ls + ' 行 · ' + text.length + ' 字' + (changed ? ' · 有未保存的改动' : '');
+            // 有改动时明确说「下面」——按钮行在编辑框底部，滚下去就有，别让人以为按钮消失了
+            stat.textContent = ls + ' 行 · ' + text.length + ' 字'
+                + (changed ? ' · 有未保存的改动，点下面的「保存编辑」' : '');
             stat.className = 'eo-hint eo-editor-stat' + (changed ? ' eo-editor-dirty' : '');
         };
         paintStat();
@@ -4983,18 +5010,20 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             }
         };
 
+        // 底部按钮行常驻（2026-11-02 危晓反馈「有改动后找不到保存按钮」后改）。
+        // 原来的做法是「一有未保存改动就把整排按钮撤掉、只留一句提示」，方向反了：
+        // 改动那一刻正是最需要保存按钮的时候，撤回按钮等于在关键时刻把入口藏起来。
+        // 而且编辑框 min-height 320px，手机上按钮行本就在视野外，一改字按钮又消失，
+        // 用户只会看到底部那句「翻到编辑框底部就能保存」，按提示去了还是没有按钮。
+        // 现在：按钮行始终在，只调主次——有改动时「保存编辑」是主按钮，没改动时只给「完成」。
         const paintTail = () => {
             tail.textContent = '';
             const btnRow = el('div', 'eo-row');
-            if (S.pendingDraftEditDirty) {
-                // 正在改：底部按钮收回，只留一句提醒——改完再回来才有「保存编辑」
-                btnRow.appendChild(el('div', 'eo-hint eo-editor-dirty',
-                    '有未保存的改动。翻到编辑框底部就能「保存编辑」，或点上面的「编辑」放弃并关掉。'));
-                tail.appendChild(btnRow);
-                return;
-            }
-            const btnSave = el('button', 'eo-btn eo-primary', '保存编辑');
+            const dirty = S.pendingDraftEditDirty;
+            const btnSave = el('button', 'eo-btn' + (dirty ? ' eo-primary' : ''), '保存编辑');
             btnSave.type = 'button';
+            // 没有改动时保存按钮照样在，但点它不会有任何效果，禁用掉免得误点以为存了什么
+            btnSave.disabled = !dirty;
             btnSave.addEventListener('click', () => {
                 try {
                     const res = saveDraftEdit(d.id, {
@@ -5023,8 +5052,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             });
             btnRow.appendChild(btnCancel);
 
-            // 没改动时只留「完成」：看完了就关，不用翻回去点「编辑」
-            if (buf.text === buf.original) {
+            // 没改动时额外给一个「完成」：看完了就关，不用翻回去点「编辑」。
+            // 它和「取消」在无改动时效果一致，留着是因为「完成」比「取消」读起来更顺
+            if (!dirty) {
                 const btnDone = el('button', 'eo-btn', '完成');
                 btnDone.type = 'button';
                 btnDone.addEventListener('click', () => {
@@ -5036,7 +5066,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             tail.appendChild(btnRow);
         };
 
-        // 状态一变就重画尾部：有改动才出现「保存编辑」，改回原样又收回去
+        // 状态一变就重画尾部，让「保存编辑」的主次跟着变动走（按钮本身始终在位）
         const syncDirty = () => {
             const now = buf.text !== buf.original;
             if (now === S.pendingDraftEditDirty) return;
@@ -5491,7 +5521,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 det.appendChild(ob);
                 page.appendChild(det);
             }
-            if (ev.outlineRaw) {
+            // 模型原始输出只在调试模式开着时给（2026-11-02 危晓要求）：
+            // 它是排查用的技术细节，平时摆着只会让人误点或误读，关掉后整块不渲染
+            if (ev.outlineRaw && debugEnabled()) {
                 const det = el('details', 'eo-details');
                 const sum = el('summary', null, '模型原始输出（排查用，含英文字段名）');
                 det.appendChild(sum);
@@ -6146,7 +6178,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         if (!debugEnabled()) {
             const tip = el('div', 'eo-hint');
-            tip.textContent = '调试级日志默认不收集。需要看细节时到「设置」页打开「调试日志」，再回来就能看到。';
+            tip.textContent = '调试级日志默认不收集。需要看细节时到「设置」页打开「调试模式」，再回来就能看到。';
             page.appendChild(tip);
         }
 
@@ -6225,8 +6257,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const btnCopyAll = el('button', 'eo-btn', '复制全部');
         btnCopyAll.type = 'button';
         btnCopyAll.disabled = noRows;
-        attachHelp(btnCopyAll, '把当前筛选里的日志整段复制到剪贴板，直接粘给对方或粘进记事本。'
-            + '浏览器不允许剪贴板时会退回「手动全选」提示。');
+        // 这个按钮不再挂问号（2026-11-02 危晓要求）：按钮名已经说清做什么，
+        // 剪贴板被拦时的提示在点击后的轻提示里给
         btnCopyAll.addEventListener('click', async () => {
             const ok = await copyText(shown.map(lineOf).join('\n'));
             toast(ok ? `已复制 ${shown.length} 条${scopeNote}` : '浏览器不让我写剪贴板，请手动选中日志复制');
@@ -6325,25 +6357,6 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     const openProfiles = new Set();
 
     function renderSetPage(page) {
-        // 顶部锚点（2026-11-02 4.4）：设置页八段平铺、很长，手机上想改世界书要滚很久。
-        // 不做二级标签页——那会藏掉设置项、也增加记忆负担；四个锚点按下滚即可
-        const nav = el('div', 'eo-setnav');
-        const anchors = [
-            ['eo_set_sec_model', '模型'],
-            ['eo_set_sec_mem', '记忆与盘点'],
-            ['eo_set_sec_ui', '界面与世界书'],
-            ['eo_set_sec_lv', '难度档位'],
-        ];
-        for (const [id, label] of anchors) {
-            const b = el('button', 'eo-btn eo-setnav-btn', label);
-            b.type = 'button';
-            b.addEventListener('click', () => {
-                const target = page.querySelector('#' + id);
-                if (target && target.scrollIntoView) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            });
-            nav.appendChild(b);
-        }
-        page.appendChild(nav);
         // 只重画设置页用的入口（2026-11-02）：切换当前配置、改配置方式这两件事
         // 只需要把设置页重画一遍。以前调 renderPanel() 会把整个面板连同滚动位置一起重建，
         // 在手机上改一个下拉就跳回顶部。
@@ -6361,6 +6374,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         // 注意：分段以后各段是独立函数，看不到本函数的局部变量，所以 s 要显式传进去
         const setS = getSettings();
         const sections = [
+            ['调试模式', renderSetDebug],
             ['模型', renderSetModel],
             ['记忆来源', renderSetMemory],
             ['打勾与自动盘点', renderSetTrack],
@@ -6415,6 +6429,31 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             .sort();
     }
 
+    /**
+     * 设置页：调试模式（2026-11-02 危晓要求）
+     * 原来叫「调试日志」、挂在「界面」段下面，跟悬浮窗开关混在一起不搭。
+     * 现在改叫「调试模式」，单独放设置页最前面——它是给排障用的总开关，
+     * 打开后除了收 debug 级日志，生成页的「模型原始输出」也跟着出现。
+     */
+    function renderSetDebug(page, s) {
+        page.appendChild(el('div', 'eo-sec', '调试'));
+        const dbgRow = el('div', 'eo-row');
+        dbgRow.appendChild(el('label', null, '调试模式'));
+        const dbgChk = el('input');
+        markKey(dbgChk, 'set.debugLog');
+        dbgChk.type = 'checkbox';
+        dbgChk.checked = !!s.debug;
+        dbgChk.addEventListener('change', () => {
+            getSettings().debug = dbgChk.checked;
+            saveSettings();
+            debug(`调试模式已${dbgChk.checked ? '开启' : '关闭'}`);
+            repaintPage();
+        });
+        dbgRow.appendChild(dbgChk);
+        dbgRow.appendChild(el('span', 'eo-hint', '开启后记录每一步的细节，并显示模型的原始输出；排障时用，平时建议关掉，免得刷屏'));
+        page.appendChild(dbgRow);
+    }
+
     /** 模型清单弹在一处，点一个就选上 */
     function showModelPicker(page, profileId, list, onPick) {
         const old = page.querySelector('#eo_model_picker');
@@ -6445,12 +6484,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
     /** 设置页：当前用哪套模型配置（模型段） */
     function renderSetModel(page, s) {
-        const secModel = el('div', 'eo-anchor');
-        secModel.id = 'eo_set_sec_model';
-        page.appendChild(secModel);
         page.appendChild(el('div', 'eo-sec', '模型'));
 
-        // 使用哪套配置
+        // 使用哪套配置。`main`（跟随酒馆主连接）有两条路可走，所以至少要有它的选项——
+        // 2026-11-02 起配置档列表里不再显示它（危晓要求），这里补回来，否则没有独占配置时选不中任何一项
         const apiRow = el('div', 'eo-row');
         apiRow.appendChild(el('label', null, '当前使用'));
         const apiSel = el('select', 'eo-sel');
@@ -6458,6 +6495,11 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         for (const p of s.apiProfiles) {
             const o = el('option', null, p.name + (p.mode === 'main' ? '' : p.mode === 'direct' ? '（直连）' : '（酒馆连接源）'));
             o.value = p.id;
+            apiSel.appendChild(o);
+        }
+        if (!s.apiProfiles.some(p => p.id === s.activeProfileId)) {
+            const o = el('option', null, '跟随酒馆主连接');
+            o.value = 'main';
             apiSel.appendChild(o);
         }
         apiSel.value = s.activeProfileId;
@@ -6485,7 +6527,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         listHead.appendChild(el('span', null, '配置档'));
         page.appendChild(listHead);
 
+        // 这一排只列能编辑的配置档。`main`（跟随酒馆主连接）没有可填的内容，
+        // 2026-11-02 危晓要求不再显示，它只在上面「当前使用」里出现
         for (const p of s.apiProfiles) {
+            if (p.mode === 'main') continue;
             const box = el('details', 'eo-prefgroup');
             // 重建面板时恢复展开状态：切换方式会触发 renderPanel，
             // 不记住的话刚展开的配置会自己折回去，用户还得再点一次
@@ -6494,10 +6539,12 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 if (box.open) openProfiles.add(p.id); else openProfiles.delete(p.id);
             });
             const sum = el('summary', 'eo-prefgroup-sum');
-            sum.textContent = `${p.name}${p.mode === 'main' ? '（跟随酒馆）' : p.mode === 'direct' ? '（自己连）' : '（用酒馆连接）'}`;
+            sum.textContent = `${p.name}${p.mode === 'direct' ? '（自己连）' : '（用酒馆连接）'}`;
             box.appendChild(sum);
             const body = el('div', 'eo-prefgroup-body');
 
+            // main 档在这一排里已经跳过了，走不到这里的 main 分支，但保留兜底：
+            // 万一以后有人给 main 加上可编辑字段，这里不会因为缺分支画成空白
             if (p.mode === 'main') {
                 body.appendChild(el('div', 'eo-hint', '这套配置不需要填写任何东西，永远跟随酒馆当前连接。'));
             } else {
@@ -6811,9 +6858,6 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
     /** 设置页：记忆来源与楼层数 */
     function renderSetMemory(page, s) {
-        const secMem = el('div', 'eo-anchor');
-        secMem.id = 'eo_set_sec_mem';
-        page.appendChild(secMem);
         page.appendChild(el('div', 'eo-sec', '记忆来源'));
         const memRow = el('div', 'eo-row');
         memRow.appendChild(el('label', null, '来源'));
@@ -6840,6 +6884,38 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             ? `已选「${MEMORY_SOURCES[resolved.wanted] || resolved.wanted}」，但当前对话没有可用数据，已自动降级为：${resolved.adapter.describe()}`
             : `当前使用：${resolved.adapter.describe()}`;
         page.appendChild(memInfo);
+
+        // --- shujuku 接入诊断：2026-11-02 从世界书段末尾挪到「最近楼层」上面。
+        // 判定看「实际解析到的适配器」，不是看设置值：
+        // 手动选 shujuku → 显示；自动模式下探测到 shujuku → 也显示；
+        // 自动模式退到仅最近楼层 → 不显示（那时体检没有意义）
+        if (resolved.adapter.id === 'shujuku-jiyao') {
+            const sub = el('div', 'eo-sub');
+            sub.appendChild(el('div', 'eo-sub-title', '└ shujuku 接入诊断'));
+            sub.appendChild(el('div', 'eo-hint',
+                s.memory.source === 'auto'
+                    ? '自动模式下检测到 shujuku 正在使用，所以这里显示它的体检项：确认它当前用哪种填表模式、纪要表在哪、能不能解析出纪要。哪天自动模式不再命中 shujuku，这一项会自动消失。'
+                    : '这段是专门给 shujuku 用的体检：确认它当前用哪种填表模式、纪要表在哪、能不能解析出纪要。它是「记忆来源选 shujuku」时才有的子项，切回别的来源就不显示。'));
+            const diagBtn = el('button', 'eo-btn', '体检');
+            const diagOut = el('div', 'eo-box');
+            diagOut.style.display = 'none';
+            diagBtn.addEventListener('click', () => {
+                try {
+                    diagOut.className = 'eo-box';
+                    diagOut.textContent = diagnoseShujuku().join(String.fromCharCode(10));
+                    diagOut.style.display = 'block';
+                } catch (e) {
+                    diagOut.className = 'eo-bad';
+                    diagOut.textContent = '诊断失败：' + (e && e.message || e);
+                    diagOut.style.display = 'block';
+                }
+            });
+            const diagRow = el('div', 'eo-row');
+            diagRow.appendChild(diagBtn);
+            sub.appendChild(diagRow);
+            sub.appendChild(diagOut);
+            page.appendChild(sub);
+        }
 
         const flRow = el('div', 'eo-row');
         flRow.appendChild(el('label', null, '最近楼层'));
@@ -6925,40 +7001,6 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         wbCapRow.appendChild(wbCap);
         wbCapRow.appendChild(el('span', 'eo-hint', '字，0 = 不限'));
         page.appendChild(wbCapRow);
-
-        // --- shujuku 接入诊断：记忆来源的子项 ---
-        // 判定看「实际解析到的适配器」，不是看设置值：
-        // 手动选 shujuku → 显示；自动模式下探测到 shujuku → 也显示；
-        // 自动模式退到仅最近楼层 → 不显示（那时体检没有意义）
-        if (resolved.adapter.id === 'shujuku-jiyao') {
-            const sub = el('div', 'eo-sub');
-            sub.appendChild(el('div', 'eo-sub-title', '└ shujuku 接入诊断'));
-            sub.appendChild(el('div', 'eo-hint',
-                s.memory.source === 'auto'
-                    ? '自动模式下检测到 shujuku 正在使用，所以这里显示它的体检项：确认它当前用哪种填表模式、纪要表在哪、能不能解析出纪要。哪天自动模式不再命中 shujuku，这一项会自动消失。'
-                    : '这段是专门给 shujuku 用的体检：确认它当前用哪种填表模式、纪要表在哪、能不能解析出纪要。它是「记忆来源选 shujuku」时才有的子项，切回别的来源就不显示。'));
-            const diagBtn = el('button', 'eo-btn', '体检');
-            const diagOut = el('div', 'eo-box');
-            diagOut.style.display = 'none';
-            diagBtn.addEventListener('click', () => {
-                try {
-                    diagOut.className = 'eo-box';
-                    diagOut.textContent = diagnoseShujuku().join(String.fromCharCode(10));
-                    diagOut.style.display = 'block';
-                } catch (e) {
-                    diagOut.className = 'eo-bad';
-                    diagOut.textContent = '诊断失败：' + (e && e.message || e);
-                    diagOut.style.display = 'block';
-                }
-            });
-            const diagRow = el('div', 'eo-row');
-            diagRow.appendChild(diagBtn);
-            sub.appendChild(diagRow);
-            sub.appendChild(diagOut);
-            page.appendChild(sub);
-        }
-
-        // --- 打勾模式 ---
     }
 
     /** 设置页：打勾模式与自动盘点的楼层阈值 */
@@ -7111,11 +7153,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         // --- 界面 ---
     }
 
-    /** 设置页：界面（悬浮球开关、调试日志） */
+    /** 设置页：界面（悬浮球开关） */
     function renderSetUi(page, s) {
-        const secUi = el('div', 'eo-anchor');
-        secUi.id = 'eo_set_sec_ui';
-        page.appendChild(secUi);
         page.appendChild(el('div', 'eo-sec', '界面'));
         const fabRow = el('div', 'eo-row');
         fabRow.appendChild(el('label', null, '悬浮窗'));
@@ -7130,23 +7169,6 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         fabRow.appendChild(fabChk);
         fabRow.appendChild(el('span', 'eo-hint', '关闭后仍可从扩展菜单打开'));
         page.appendChild(fabRow);
-
-        // 调试日志开关：打开后 debug 级日志才会被收集
-        const dbgRow = el('div', 'eo-row');
-        dbgRow.appendChild(el('label', null, '调试日志'));
-        const dbgChk = el('input');
-        markKey(dbgChk, 'set.debugLog');
-        dbgChk.type = 'checkbox';
-        dbgChk.checked = !!s.debug;
-        dbgChk.addEventListener('change', () => {
-            getSettings().debug = dbgChk.checked;
-            saveSettings();
-            debug(`调试日志已${dbgChk.checked ? '开启' : '关闭'}`);
-            repaintPage();
-        });
-        dbgRow.appendChild(dbgChk);
-        dbgRow.appendChild(el('span', 'eo-hint', '开启后记录每一步的细节，排障时用；平时建议关掉，免得刷屏'));
-        page.appendChild(dbgRow);
 
         // --- 世界书自检 ---
     }
@@ -7248,9 +7270,6 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
     /** 设置页：难度档位自定义 */
     function renderSetLevels(page, s) {
-        const secLv = el('div', 'eo-anchor');
-        secLv.id = 'eo_set_sec_lv';
-        page.appendChild(secLv);
         page.appendChild(el('div', 'eo-sec', '难度档位'));
         page.appendChild(el('div', 'eo-hint',
             '生成事件时「难度等级」下拉里可选的档位。一行一个，从低到高排，下拉里就按这个顺序出现。'

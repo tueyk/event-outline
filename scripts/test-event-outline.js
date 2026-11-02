@@ -938,6 +938,66 @@ exports.r = renderOutlineText;
     check('下拉框仍显示当前档位', src.includes('trSel.value = s.tracker.mode'));
 }
 
+// ---- 25.3 设置页与生成页的六项界面收口（2026-11-02 危晓要求）----
+{
+    // ①「调试日志」改名「调试模式」，并从「界面」段挪出去、单独成段排在最前
+    check('仍有调试开关控件', src.includes("markKey(dbgChk, 'set.debugLog')"));
+    check('标签已改成「调试模式」', src.includes("dbgRow.appendChild(el('label', null, '调试模式'))"));
+    check('不再沿用旧名「调试日志」', !src.includes("'调试日志'"));
+    check('调试开关单独成段', src.includes('function renderSetDebug(page, s)'));
+    const setPageIdx = src.indexOf('const sections = [');
+    const secChunk = src.slice(setPageIdx, setPageIdx + 400);
+    check('调试段排在设置页最前', secChunk.trim().startsWith("const sections = [\n            ['调试模式', renderSetDebug],"),
+        secChunk.split('\n').slice(0, 3).join(' / '));
+    check('界面段不再管调试', !/function renderSetUi\(page, s\) \{[\s\S]*?dbgChk/.test(src),
+        'renderSetUi 里还有调试开关');
+
+    // ③ 设置页顶部锚点按钮已删
+    check('顶部锚点按钮已删', !src.includes('eo-setnav'), '仍有 eo-setnav');
+    check('锚点占位 div 已删', !src.includes("el('div', 'eo-anchor')"), '仍有 eo-anchor 占位');
+
+    // ④ 配置档列表不再列「跟随酒馆主连接」
+    check('配置档列表跳过 main 档', src.includes("if (p.mode === 'main') continue;"));
+    check('配置档摘要不再有跟随酒馆分支',
+        !src.includes("`${p.name}${p.mode === 'main' ? '（跟随酒馆）'"),
+        '摘要仍会给 main 加后缀');
+    check('当前使用下拉保底给 main 选项', src.includes("const o = el('option', null, '跟随酒馆主连接');"));
+
+    // ⑤ shujuku 接入诊断在「最近楼层」之前
+    const diagIdx = src.indexOf("'└ shujuku 接入诊断'");
+    const flIdx = src.indexOf("flRow.appendChild(el('label', null, '最近楼层'))");
+    check('诊断段与楼层段都在', diagIdx > 0 && flIdx > 0, diagIdx + '/' + flIdx);
+    check('诊断段排在最近楼层之前', diagIdx > 0 && flIdx > 0 && diagIdx < flIdx,
+        '诊断在 ' + diagIdx + '，楼层在 ' + flIdx);
+
+    // ⑥ 日志页「复制全部」不挂问号，且仍能复制
+    check('复制全部不再挂问号', !/attachHelp\(btnCopyAll/.test(src), '仍有 attachHelp(btnCopyAll)');
+    check('复制全部仍可用', src.includes("const btnCopyAll = el('button', 'eo-btn', '复制全部')"));
+
+    // ② 模型原始输出只在调试模式开着时渲染
+    const rawIdx = src.indexOf('模型原始输出（排查用，含英文字段名）');
+    const rawChunk = src.slice(Math.max(0, rawIdx - 300), rawIdx);
+    check('原始输出段存在', rawIdx > 0);
+    check('原始输出按调试开关渲染', rawChunk.includes('debugEnabled()'),
+        '原始输出块前没有 debugEnabled() 判断');
+}
+
+// ---- 25.4 草稿编辑框的保存按钮必须常驻（2026-11-02 危晓反馈）----
+// 起因：原来一有未保存改动就把底部整排按钮撤掉、只留一句提示，用户改完字找不到「保存编辑」。
+// 这几条钉住「按钮行常驻、有改动给主按钮、没改动禁用保存」的形状，防止再被改回去。
+{
+    const tailIdx = src.indexOf('const paintTail = () => {');
+    check('编辑框有 paintTail', tailIdx > 0);
+    const tailChunk = src.slice(tailIdx, tailIdx + 2400);
+    check('保存按钮无条件创建', tailChunk.includes("const btnSave = el('button'"));
+    check('有改动时保存按钮是主按钮', tailChunk.includes("(dirty ? ' eo-primary' : '')"));
+    check('无改动时保存按钮禁用', tailChunk.includes('btnSave.disabled = !dirty;'));
+    check('不再用早退把按钮撤掉',
+        !tailChunk.includes('翻到编辑框底部就能'),
+        '仍保留「撤回按钮只留提示」的老写法');
+    check('有改动时编辑框上方也提示去点下面的保存', src.includes('有未保存的改动，点下面的「保存编辑」'));
+}
+
 // ---- 26. 大纲正文的换行与排版 ----
 // 大纲是 \n 拼出来的纯文本，容器必须有 white-space:pre-wrap，否则全挤成一行
 {

@@ -5,8 +5,12 @@
 // 跑法：在仓库根执行 node scripts/test-render.js
 
 const fs = require('fs');
+const path = require('path');
 
-const SRC_PATH = 'src/event-outline/index.js';
+// 按脚本自身位置取源码，不看当前目录（2026-11-02）：
+// 原来写的是相对路径 'src/event-outline/index.js'，只有在仓库根执行才对；
+// 从别处调用时直接 ENOENT，跑流程的人会以为测试挂了，其实是路径找不到。
+const SRC_PATH = path.join(__dirname, '..', 'src', 'event-outline', 'index.js');
 const src = fs.readFileSync(SRC_PATH, 'utf8');
 const LINES = src.split('\n');
 const SEP = String.fromCharCode(10, 10);
@@ -407,6 +411,19 @@ if (invApi) {
             for (const c of (node.children || [])) { const hit = find(c); if (hit) return hit; }
             return null;
         })(logPage));
+        // 复制全部不再挂问号（2026-11-02 危晓要求）：按钮所在的按钮行里不该有帮助标记
+        const copyBtn = (function find(node) {
+            if (!node) return null;
+            if (node.tagName === 'BUTTON' && String(node.textContent || '').indexOf('复制全部') >= 0) return node;
+            for (const c of (node.children || [])) { const hit = find(c); if (hit) return hit; }
+            return null;
+        })(logPage);
+        check('复制全部按钮存在', !!copyBtn);
+        if (copyBtn && copyBtn.parentNode) {
+            const acts = copyBtn.parentNode;
+            const helpMarks = (acts.children || []).filter(c => c.className && String(c.className).indexOf('eo-help') >= 0);
+            check('复制全部没有问号', helpMarks.length === 0, '按钮行里有 ' + helpMarks.length + ' 个帮助标记');
+        }
 
     } catch (e) {
         check('renderRuntimeLogSection 能跑通', false, e && e.message);
