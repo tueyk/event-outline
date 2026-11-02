@@ -26,6 +26,8 @@ if command -v cygpath >/dev/null 2>&1; then
   NODE_DIR="$(cygpath -m "$SRC_DIR")"
 fi
 node --check "${NODE_DIR}/index.js"
+# 2026-11-02 拆仓：文档检查搬去 docs-repo，这里跑源码检查（版本两处一致、OOC 词、渲染函数）
+node "$(dirname "$0")/check-source.js" >/dev/null
 node -e "const m=require('${NODE_DIR}/manifest.json');for(const k of ['js','display_name','loading_order'])if(m[k]===undefined)throw new Error('manifest 缺字段: '+k);console.log('[ok] manifest '+m.display_name+' v'+m.version)"
 VER="$(node -e "console.log(require('${NODE_DIR}/manifest.json').version)")"
 
