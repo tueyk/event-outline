@@ -1,9 +1,9 @@
 /* 事件大纲 / 状态盘点 扩展
  * 单文件，按分区组织。无构建步骤，不使用 import。
  * 分区按实际顺序编号，连续无跳号（check-source 会校验）：
- *   0 常量   1 上下文   2 存储   3 世界书   4 记忆适配器
- *   5 表单 helper   6 OOC 词与偏好   7 上下文拼装   8 生成与解析   9 事件流程
- *   10 界面   11 设置入口   12 入口
+ *   0 常量   1 状态   2 上下文   3 存储   4 世界书   5 记忆适配器
+ *   6 表单 helper   7 OOC 词与偏好   8 上下文拼装   9 生成与解析   10 事件流程
+ *   11 界面   12 设置入口   13 入口
  */
 (function () {
     'use strict';
@@ -84,7 +84,41 @@
     const FAB_EXPANDED = 44;      // 展开时边长
     const CHRONICLE_NAME = '纪要表';
 
-    // ==================== 1. 上下文 ====================
+    // ==================== 1. 状态 ====================
+    // 界面的可变状态只有这一个对象（评审 B2，2026-11-02 收口）。
+    // 新增状态一律加在这里，别在文件各处分头 let——分头写过一次就散成十几处，
+    // 重绘、切对话、重连之后哪一处忘了重置都查不出来。
+    // 只放「会变」的状态；设置、解析出的常量不在这里。
+    const S = {
+        runtimeLog: [],
+        unreadErrors: 0,
+        writeChain: Promise.resolve(),
+        lastAdapterSig: null,
+        pendingRequest: null,
+        pendingConfirm: null,
+        draftPrefs: null,
+        draftGroupModes: null,
+        draftName: '',
+        busy: false,
+        busyText: '处理中…',
+        panelEl: null,
+        fabEl: null,
+        backdropEl: null,
+        fabState: { anchor: { x: 14, y: 40 }, dock: 'left' },
+        activeTab: 'gen',
+        editingDraftId: null,
+        draftEditBuf: null,
+        draftEditIssues: null,
+        pendingDraftEditDirty: false,
+        logFilter: 'all',
+        logKeyword: '',
+        autoCheckTimer: null,
+        autoRunning: false,
+        progress: { steps: [], startedAt: 0, timer: null },
+        previewDraftIds: new Set(),
+    };
+
+    // ==================== 2. 上下文 ====================
 
     function ctx() {
         return window.SillyTavern && window.SillyTavern.getContext
@@ -98,9 +132,9 @@
      * 打勾变更、错误。不记录聊天内容本身，避免把剧情抄进日志。
      */
     const RUNTIME_LOG_MAX = 500;
-    const runtimeLog = [];
+    let runtimeLog = S.runtimeLog; // 引用指向 S，值统一存 S
     // 未读错误数：日志页标签上挂红点用，点进日志页就清零
-    let unreadErrors = 0;
+    let unreadErrors = S.unreadErrors; // 引用指向 S，值统一存 S
 
     // 日志级别：info / warn / error 默认都收；debug 只在设置里打开开关后才收
     const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
@@ -131,8 +165,8 @@
         const hh = String(d.getHours()).padStart(2, '0');
         const mi = String(d.getMinutes()).padStart(2, '0');
         const ss = String(d.getSeconds()).padStart(2, '0');
-        runtimeLog.push({ at: hh + ':' + mi + ':' + ss, level, text });
-        if (runtimeLog.length > RUNTIME_LOG_MAX) runtimeLog.splice(0, runtimeLog.length - RUNTIME_LOG_MAX);
+        S.runtimeLog.push({ at: hh + ':' + mi + ':' + ss, level, text });
+        if (S.runtimeLog.length > RUNTIME_LOG_MAX) S.runtimeLog.splice(0, S.runtimeLog.length - RUNTIME_LOG_MAX);
     }
 
     function log(...args) {
@@ -143,13 +177,13 @@
     function warn(...args) {
         pushRuntimeLog('warn', args);
         // 警告也算未读：结构缺失这类问题以前只落 warn，没人看见就等于没报
-        unreadErrors++;
+        S.unreadErrors++;
         console.warn(LOG_PREFIX, ...args);
     }
 
     function error(...args) {
         pushRuntimeLog('error', args);
-        unreadErrors++;
+        S.unreadErrors++;
         console.error(LOG_PREFIX, ...args);
     }
 
@@ -158,7 +192,7 @@
         if (debugEnabled()) console.debug(LOG_PREFIX, ...args);
     }
 
-    // ==================== 2. 存储 ====================
+    // ==================== 3. 存储 ====================
 
     function getSettings() {
         const context = ctx();
@@ -261,13 +295,13 @@
         return event;
     }
 
-    // ==================== 3. 世界书 ====================
+    // ==================== 4. 世界书 ====================
 
-    let writeChain = Promise.resolve();
+    let writeChain = S.writeChain; // 引用指向 S，值统一存 S
 
     function withWriteLock(fn) {
-        const run = writeChain.then(fn, fn);
-        writeChain = run.catch(() => { });
+        const run = S.writeChain.then(fn, fn);
+        S.writeChain = run.catch(() => { });
         return run;
     }
 
@@ -761,7 +795,7 @@
         };
     }
 
-    // ==================== 4. 记忆适配器 ====================
+    // ==================== 5. 记忆适配器 ====================
 
     const MODE_LABEL = {
         classic: '经典表格',
@@ -987,7 +1021,7 @@
 
     // 上次判定结果，用于去重：设置页每渲染一次都会探测一次，
     // 结果没变就不该再记一条日志
-    let lastAdapterSig = null;
+    let lastAdapterSig = S.lastAdapterSig; // 引用指向 S，值统一存 S
 
     function resolveAdapter() {
         const s = getSettings();
@@ -1017,8 +1051,8 @@
 
         // 只有判定结果（适配器 + 是否降级 + 数据量描述）真的变了才记日志
         const sig = decided.adapter.id + '|' + (decided.degraded ? 'degraded' : 'ok') + '|' + decided.adapter.describe();
-        if (sig !== lastAdapterSig) {
-            lastAdapterSig = sig;
+        if (sig !== S.lastAdapterSig) {
+            S.lastAdapterSig = sig;
             if (decided.degraded) {
                 warn(`记忆来源：设置要「${ADAPTERS.find(x => x.id === wanted)?.label || wanted}」但检测不到数据，已降级为「${decided.adapter.label}」（${decided.adapter.describe()}）`);
             } else if (wanted === 'auto') {
@@ -1031,7 +1065,7 @@
         return decided;
     }
 
-    // ==================== 5. 通用组件 ====================
+    // ==================== 6. 通用组件 ====================
     // 表单控件、确认条、轻提示：界面层与设置页共用，放这里免得两边各写一套
 
     // ---------- 表单控件 helper（2026-11-02 A2） ----------
@@ -1219,7 +1253,7 @@
     // ---------- 确认条与轻提示（2026-11-02 起替代原生 confirm / alert） ----------
 
     // 正在等的那次模型请求：放弃等待时 abort 掉，并让界面立刻解除忙碌态
-    let pendingRequest = null;
+    let pendingRequest = S.pendingRequest; // 引用指向 S，值统一存 S
 
     // 生成页三个偏好折叠组里哪些是展开的（2026-11-02）
     // 以前每组固定 open = false：开新事件要展开三次才能看全，点一下别的又折回去。
@@ -1238,7 +1272,7 @@
 
     /** 记下当前快照：滚动位置、焦点元素、光标位置、各输入框的值、展开着的折叠块 */
     function captureView() {
-        const body = panelEl && panelEl.querySelector('#eo_body');
+        const body = S.panelEl && S.panelEl.querySelector('#eo_body');
         if (!body) return null;
         // 滚动的是 #eo_body（面板 fixed 全屏），不是窗口
         const out = { scrollTop: body.scrollTop || 0, scrollY: window.scrollY || window.pageYOffset || 0, focus: null, inputs: {}, details: [] };
@@ -1270,7 +1304,7 @@
 
     /** 把快照找回来。滚动用两帧：内容刚重建，第一帧的布局还不一定算完 */
     function restoreView(snap) {
-        const body = panelEl && panelEl.querySelector('#eo_body');
+        const body = S.panelEl && S.panelEl.querySelector('#eo_body');
         if (!body || !snap) return;
         for (const [key, val] of Object.entries(snap.inputs || {})) {
             const node = body.querySelector('[data-eo-key="' + cssEscape(key) + '"]');
@@ -1308,23 +1342,23 @@
 
     /** 放弃当前这次模型请求（界面上的「放弃等待」按钮调）。没在等就什么也不做 */
     function abortPendingRequest() {
-        const p = pendingRequest;
+        const p = S.pendingRequest;
         if (!p) return false;
-        pendingRequest = null;
+        S.pendingRequest = null;
         try { if (p.controller) p.controller.abort(); } catch (e) { /* 老浏览器没有 abort，忽略 */ }
         p.giveUp();
         return true;
     }
 
     // 同一时刻只允许一条待确认；新的请求直接把旧的判为取消
-    let pendingConfirm = null;
+    let pendingConfirm = S.pendingConfirm; // 引用指向 S，值统一存 S
 
     /** 收起确认条。ok 为真表示点了确定，否则按取消处理 */
     function settleConfirm(ok) {
-        const p = pendingConfirm;
+        const p = S.pendingConfirm;
         if (!p) return;
-        pendingConfirm = null;
-        const bar = panelEl && panelEl.querySelector('#eo_confirmbar');
+        S.pendingConfirm = null;
+        const bar = S.panelEl && S.panelEl.querySelector('#eo_confirmbar');
         if (bar) bar.classList.toggle('eo-confirmbar-open', false);
         document.removeEventListener('keydown', p.onKey, true);
         p.resolve(!!ok);
@@ -1337,7 +1371,7 @@
      */
     function askConfirm(text, opt) {
         const o = opt || {};
-        if (pendingConfirm) settleConfirm(false);
+        if (S.pendingConfirm) settleConfirm(false);
         const p = ensurePanel();
         const bar = p.querySelector('#eo_confirmbar');
         const txt = p.querySelector('#eo_confirm_text');
@@ -1357,7 +1391,7 @@
             };
             okBtn.onclick = () => settleConfirm(true);
             cancelBtn.onclick = () => settleConfirm(false);
-            pendingConfirm = { resolve, onKey };
+            S.pendingConfirm = { resolve, onKey };
             // 用捕获阶段拦，避免面板里其他 keydown 监听先吃掉 Esc
             document.addEventListener('keydown', onKey, true);
             bar.classList.add('eo-confirmbar-open');
@@ -1388,7 +1422,7 @@
         }, ms);
     }
 
-    // ==================== 6. OOC 词与偏好 ====================
+    // ==================== 7. OOC 词与偏好 ====================
 
     // 原文存档：事务/运维/酒馆/OOC词-伊瑟利亚-兰开斯特-事件大纲与状态盘点.md
     // 第 12-45 行 = 大纲词，51-63 行 = 盘点词。此处为改良版，差异见设计文档。
@@ -1710,10 +1744,10 @@
     }
 
     // 生成页的草稿偏好与分组模式：跨重渲染保留，点了「开始生成」才用掉
-    let draftPrefs = null;
-    let draftGroupModes = null;
+    let draftPrefs = S.draftPrefs; // 引用指向 S，值统一存 S
+    let draftGroupModes = S.draftGroupModes; // 引用指向 S，值统一存 S
     // 事件名单独存：它不在 prefs 里，但「重置为默认」也要一起清掉
-    let draftName = '';
+    let draftName = S.draftName; // 引用指向 S，值统一存 S
 
     /**
      * 生成页表单的落盘（2026-11-01）。
@@ -1747,12 +1781,12 @@
     function persistGenForm() {
         const s = getSettings();
         s.genForm = {
-            name: draftName || '',
-            goal: (draftPrefs && draftPrefs.goal) || '',
-            promptHint: (draftPrefs && draftPrefs.promptHint) || '',
-            extra: (draftPrefs && draftPrefs.extra != null) ? draftPrefs.extra : '',
-            prefs: draftPrefs ? Object.assign({}, draftPrefs) : null,
-            groupModes: draftGroupModes ? Object.assign({}, draftGroupModes) : null,
+            name: S.draftName || '',
+            goal: (S.draftPrefs && S.draftPrefs.goal) || '',
+            promptHint: (S.draftPrefs && S.draftPrefs.promptHint) || '',
+            extra: (S.draftPrefs && S.draftPrefs.extra != null) ? S.draftPrefs.extra : '',
+            prefs: S.draftPrefs ? Object.assign({}, S.draftPrefs) : null,
+            groupModes: S.draftGroupModes ? Object.assign({}, S.draftGroupModes) : null,
         };
         saveSettings();
     }
@@ -1765,35 +1799,35 @@
     }
 
     function getDraftPrefs() {
-        if (!draftPrefs) {
+        if (!S.draftPrefs) {
             const saved = loadGenForm();
-            draftPrefs = saved.prefs || defaultPrefs();
-            if (!draftName && saved.name) draftName = saved.name;
+            S.draftPrefs = saved.prefs || defaultPrefs();
+            if (!S.draftName && saved.name) S.draftName = saved.name;
         }
-        return draftPrefs;
+        return S.draftPrefs;
     }
 
     function getGroupModes() {
-        if (!draftGroupModes) {
+        if (!S.draftGroupModes) {
             // 先看存盘的，用户上次选的粗细程度刷新后要还在
             const saved = loadGenForm();
-            if (saved.groupModes) draftGroupModes = Object.assign({}, saved.groupModes);
+            if (saved.groupModes) S.draftGroupModes = Object.assign({}, saved.groupModes);
         }
-        if (!draftGroupModes) {
-            draftGroupModes = {};
-            for (const name of Object.keys(PREF_PRESETS)) draftGroupModes[name] = 'rough';
+        if (!S.draftGroupModes) {
+            S.draftGroupModes = {};
+            for (const name of Object.keys(PREF_PRESETS)) S.draftGroupModes[name] = 'rough';
         }
         for (const name of Object.keys(PREF_PRESETS)) {
-            if (!draftGroupModes[name]) draftGroupModes[name] = 'rough';
+            if (!S.draftGroupModes[name]) S.draftGroupModes[name] = 'rough';
         }
-        return draftGroupModes;
+        return S.draftGroupModes;
     }
 
     /** 生成成功后清掉草稿，下次进来是全新的一份 */
     function resetDraftPrefs() {
-        draftPrefs = null;
-        draftGroupModes = null;
-        draftName = '';
+        S.draftPrefs = null;
+        S.draftGroupModes = null;
+        S.draftName = '';
         clearGenForm();
     }
 
@@ -1803,9 +1837,9 @@
      * 采用说明这一套设置已经落地成事件，下次该重新想。
      */
     function clearGenFormOnAdopt() {
-        draftPrefs = null;
-        draftGroupModes = null;
-        draftName = '';
+        S.draftPrefs = null;
+        S.draftGroupModes = null;
+        S.draftName = '';
         clearGenForm();
         log('待选事件已采用，生成页配置已清空');
     }
@@ -2077,7 +2111,7 @@
         return parts.join('\n');
     }
 
-    // ==================== 7. 上下文拼装 ====================
+    // ==================== 8. 上下文拼装 ====================
 
     function getChatMessages() {
         const context = ctx();
@@ -2236,7 +2270,7 @@
         return out;
     }
 
-    // ==================== 8. 生成与解析 ====================
+    // ==================== 9. 生成与解析 ====================
 
     /**
      * 发一次模型请求，外面套一层统一处理「超时」和「用户点放弃等待」。
@@ -2252,16 +2286,16 @@
         // 超时兜底：直连自己还会按配置 abort；走酒馆的没有取消接口，这里只放界面
         const limit = directTimeoutMs() + 60000;
         const timer = setTimeout(() => {
-            if (pendingRequest) {
+            if (S.pendingRequest) {
                 log(`模型请求超过 ${Math.round(limit / 1000)} 秒仍未收口，界面先放开，底层请求可能还在跑`);
                 settle();
             }
         }, limit);
         function settle() {
             clearTimeout(timer);
-            if (pendingRequest) pendingRequest = null;
+            if (S.pendingRequest) S.pendingRequest = null;
         }
-        pendingRequest = { giveUp, controller: null };
+        S.pendingRequest = { giveUp, controller: null };
         return outer.finally(settle);
     }
 
@@ -2281,18 +2315,18 @@
             || { id: 'main', name: '跟随酒馆主连接', mode: 'main' };
         const t0 = Date.now();
         debug(`调用模型：配置「${profile.name || profile.id}」（mode=${profile.mode || 'main'}），system ${String(systemPrompt).length} 字，prompt ${String(prompt).length} 字`);
-        if (busy && progress.startedAt) {
+        if (S.busy && S.progress.startedAt) {
             step(`请求模型（「${profile.name || profile.id}」，输入约 ${Math.round((String(systemPrompt).length + String(prompt).length) / 1000)} 千字）`);
         }
 
         const finish = (out) => {
             log(`模型返回：${String(out || '').length} 字，耗时 ${((Date.now() - t0) / 1000).toFixed(1)} 秒`);
-            if (busy && progress.startedAt) step(`模型已返回 ${String(out || '').length} 字`);
+            if (S.busy && S.progress.startedAt) step(`模型已返回 ${String(out || '').length} 字`);
             return out;
         };
         const failed = (e) => {
             error(`调用模型失败（耗时 ${((Date.now() - t0) / 1000).toFixed(1)} 秒）：${e && e.message || e}`);
-            if (busy && progress.startedAt) step(`模型调用失败：${(e && e.message) || e}`);
+            if (S.busy && S.progress.startedAt) step(`模型调用失败：${(e && e.message) || e}`);
             throw e;
         };
 
@@ -2405,11 +2439,11 @@
         // 以前这里没有任何超时：接口挂住就永远等下去，busy 不会解除，只能刷新页面
         const timeoutMs = directTimeoutMs();
         const controller = typeof AbortController === 'function' ? new AbortController() : null;
-        if (pendingRequest && controller) {
-            pendingRequest.controller = controller;
+        if (S.pendingRequest && controller) {
+            S.pendingRequest.controller = controller;
             // 「放弃等待」按钮也走这里：abort 之后 fetch 会抛 AbortError
-            const prevGiveUp = pendingRequest.giveUp;
-            pendingRequest.giveUp = () => { prevGiveUp(); try { controller.abort(); } catch (e) { /* 忽略 */ } };
+            const prevGiveUp = S.pendingRequest.giveUp;
+            S.pendingRequest.giveUp = () => { prevGiveUp(); try { controller.abort(); } catch (e) { /* 忽略 */ } };
         }
         const timer = setTimeout(() => {
             if (controller) { try { controller.abort(); } catch (e) { /* 忽略 */ } }
@@ -2903,11 +2937,11 @@
         return { structured, raw: String(raw || '') };
     }
 
-    // ==================== 9. 事件流程 ====================
+    // ==================== 10. 事件流程 ====================
 
-    let busy = false;
+    let busy = S.busy; // 引用指向 S，值统一存 S
     // 忙碌提示文案随操作变：废弃/完结是本地操作，不该显示「正在请求模型」
-    let busyText = '处理中…';
+    let busyText = S.busyText; // 引用指向 S，值统一存 S
 
     /**
      * 切换忙碌状态。
@@ -2916,15 +2950,15 @@
      * @param text 忙碌提示文案。不传就沿用上一次的，避免文案互相覆盖
      */
     function setBusy(on, keepProgress, text) {
-        busy = on;
-        if (text) busyText = text;
-        if (panelEl) {
-            const b = panelEl.querySelector('#eo_busy');
+        S.busy = on;
+        if (text) S.busyText = text;
+        if (S.panelEl) {
+            const b = S.panelEl.querySelector('#eo_busy');
             if (b) {
                 // 忙碌条上只放文字和一个「放弃等待」按钮：请求挂住时这是唯一出路，
                 // 以前只能刷新整个页面。按钮点了之后走 abortPendingRequest，busy 随之解除
                 b.innerHTML = '';
-                b.appendChild(document.createTextNode(text || busyText || '处理中…'));
+                b.appendChild(document.createTextNode(text || S.busyText || '处理中…'));
                 if (on) {
                     const giveUp = el('span', 'eo-giveup', '放弃等待');
                     giveUp.addEventListener('click', (ev) => {
@@ -2946,11 +2980,11 @@
             resetProgress();
         } else if (!on && keepProgress) {
             // 跑完了：停掉计时器，保留进度列表让人看清各步耗时，几秒后变淡
-            if (progress.timer) { clearInterval(progress.timer); progress.timer = null; }
-            const box = panelEl && panelEl.querySelector('#eo_progress');
+            if (S.progress.timer) { clearInterval(S.progress.timer); S.progress.timer = null; }
+            const box = S.panelEl && S.panelEl.querySelector('#eo_progress');
             if (box) {
                 const t = box.querySelector('.eo-progress-timer');
-                if (t) t.textContent = `共用时 ${Math.floor((Date.now() - progress.startedAt) / 1000)} 秒`;
+                if (t) t.textContent = `共用时 ${Math.floor((Date.now() - S.progress.startedAt) / 1000)} 秒`;
             }
         }
     }
@@ -3248,25 +3282,25 @@
     // ---------- 生成进度 ----------
     // 生成一次大纲要跑好几步（读世界书、读纪要、拉楼层、请模型、解析），
     // 每步耗时从几毫秒到几十秒不等，只显示「生成中」用户无法判断卡没卡死。
-    const progress = { steps: [], startedAt: 0, timer: null };
+    let progress = S.progress; // 引用指向 S，值统一存 S
 
     function resetProgress() {
-        progress.steps = [];
-        progress.startedAt = 0;
-        if (progress.timer) { clearInterval(progress.timer); progress.timer = null; }
+        S.progress.steps = [];
+        S.progress.startedAt = 0;
+        if (S.progress.timer) { clearInterval(S.progress.timer); S.progress.timer = null; }
     }
 
     /** 开始一次带进度的操作，返回 step 函数 */
     function startProgress(title) {
         resetProgress();
-        progress.startedAt = Date.now();
-        progress.title = title;
+        S.progress.startedAt = Date.now();
+        S.progress.title = title;
         renderProgress();
         // 每秒刷新一次耗时，让用户看到时间在走
-        progress.timer = setInterval(() => {
-            const box = panelEl && panelEl.querySelector('#eo_progress');
+        S.progress.timer = setInterval(() => {
+            const box = S.panelEl && S.panelEl.querySelector('#eo_progress');
             if (!box) return;
-            const sec = Math.floor((Date.now() - progress.startedAt) / 1000);
+            const sec = Math.floor((Date.now() - S.progress.startedAt) / 1000);
             const el2 = box.querySelector('.eo-progress-timer');
             if (el2) el2.textContent = `已用时 ${sec} 秒`;
         }, 1000);
@@ -3275,18 +3309,18 @@
 
     /** 推进到某一步。done=true 表示该步完成，否则标记为进行中 */
     function step(text, done) {
-        const last = progress.steps[progress.steps.length - 1];
+        const last = S.progress.steps[S.progress.steps.length - 1];
         if (last && !last.done) {
             last.done = true;
             last.ms = Date.now() - last.at;
         }
-        if (text) progress.steps.push({ text, at: Date.now(), done: !!done });
+        if (text) S.progress.steps.push({ text, at: Date.now(), done: !!done });
         renderProgress();
     }
 
     /** 把当前进行中的那一步标成失败，并保留列表让人看是卡在哪（2026-11-02） */
     function failProgress(reason) {
-        const last = progress.steps[progress.steps.length - 1];
+        const last = S.progress.steps[S.progress.steps.length - 1];
         if (last && !last.done && !last.failed) {
             last.failed = true;
             last.ms = Date.now() - last.at;
@@ -3296,9 +3330,9 @@
     }
 
     function renderProgress() {
-        if (!panelEl) return;
+        if (!S.panelEl) return;
         // 进度条挂在操作按钮下方：找当前页的锚点，找不到才退回面板顶部
-        const host = panelEl.querySelector('#eo_progress_host');
+        const host = S.panelEl.querySelector('#eo_progress_host');
         let box = document.getElementById('eo_progress');
         if (!box) {
             box = document.createElement('div');
@@ -3307,17 +3341,17 @@
         }
         if (host) {
             if (box.parentNode !== host) host.appendChild(box);
-        } else if (box.parentNode !== panelEl.querySelector('#eo_body')) {
-            const busyEl = panelEl.querySelector('#eo_busy');
-            if (busyEl && busyEl.parentNode) busyEl.parentNode.insertBefore(box, busyEl);
+        } else if (box.parentNode !== S.panelEl.querySelector('#eo_body')) {
+            const busyEl = S.panelEl.querySelector('#eo_busy');
+            if (S.busyEl && S.busyEl.parentNode) S.busyEl.parentNode.insertBefore(box, S.busyEl);
         }
         box.innerHTML = buildProgressHtml();
-        box.style.display = progress.steps.length ? 'block' : 'none';
+        box.style.display = S.progress.steps.length ? 'block' : 'none';
     }
 
     function buildProgressHtml() {
-        const sec = Math.floor((Date.now() - progress.startedAt) / 1000);
-        const rows = progress.steps.map((s) => {
+        const sec = Math.floor((Date.now() - S.progress.startedAt) / 1000);
+        const rows = S.progress.steps.map((s) => {
             // 失败那一步单独标红（2026-11-02）：以前失败后就停在 ⋯ 或灰着，看不出卡在哪
             if (s.failed) {
                 return `<div class="eo-progress-row eo-progress-failed">`
@@ -3328,7 +3362,7 @@
             return `<div class="eo-progress-row${s.done ? ' eo-progress-done' : ''}">`
                 + `<span class="eo-progress-mark">${mark}</span>${escapeHtml(s.text)}${cost}</div>`;
         }).join('');
-        return `<div class="eo-progress-head">${escapeHtml(progress.title || '处理中')}`
+        return `<div class="eo-progress-head">${escapeHtml(S.progress.title || '处理中')}`
             + `　<span class="eo-progress-timer">已用时 ${sec} 秒</span></div>${rows}`;
     }
 
@@ -3986,9 +4020,9 @@
     }
 
 
-    let panelEl = null;
-    let fabEl = null;
-    let backdropEl = null;
+    let panelEl = S.panelEl; // 引用指向 S，值统一存 S
+    let fabEl = S.fabEl; // 引用指向 S，值统一存 S
+    let backdropEl = S.backdropEl; // 引用指向 S，值统一存 S
 
     function injectStyle() {
         if (document.getElementById('eo_style')) return;
@@ -4065,6 +4099,13 @@
   #eo_panel .eo-body{padding:0 12px 40px;}
   .eo-head{padding:10px 12px;}
   .eo-tabs{margin-left:-12px;margin-right:-12px;padding-left:12px;padding-right:12px;}
+  /* 手机窄屏（2026-11-02）：输入类控件字号提到 16px。
+     iOS Safari 对字号小于 16px 的输入控件聚焦时会把整页放大，放完不回缩。
+     只提输入类，桌面不动；下拉框弹出列表会跟着大一号，这是预期的。 */
+  #eo_panel .eo-input,
+  #eo_panel select.eo-sel,
+  #eo_panel .eo-textarea,
+  #eo_panel .eo-yaml-field>textarea{font-size:16px;}
 }
 .eo-busy{display:none;padding:8px 12px;background:var(--eo-bg-busy);border-bottom:1px solid rgba(184,134,11,.3);
   color:var(--eo-accent-deep);font-size:12px;text-align:center;}
@@ -4325,18 +4366,18 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
     /** 展开状态下的尺寸。测量前临时去掉吸附类，否则量到的是竖条 */
     function fabExpandedSize() {
-        if (!fabEl) return { width: 44, height: 44 };
-        const folded = fabEl.classList.contains('eo-collapsed');
-        if (folded) fabEl.classList.remove('eo-collapsed');
+        if (!S.fabEl) return { width: 44, height: 44 };
+        const folded = S.fabEl.classList.contains('eo-collapsed');
+        if (folded) S.fabEl.classList.remove('eo-collapsed');
         try {
-            const w = fabEl.offsetWidth;
-            const h = fabEl.offsetHeight;
+            const w = S.fabEl.offsetWidth;
+            const h = S.fabEl.offsetHeight;
             return {
                 width: w > 0 ? w : 44,
                 height: h > 0 ? h : 44,
             };
         } finally {
-            if (folded) fabEl.classList.add('eo-collapsed');
+            if (folded) S.fabEl.classList.add('eo-collapsed');
         }
     }
 
@@ -4389,7 +4430,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
      * state: { anchor: {x,y}, dock: 'left'|'right'|null }
      */
     function applyFabState(state, initial) {
-        if (!fabEl) return;
+        if (!S.fabEl) return;
         const st = state || {};
         const dock = st.dock || null;
         const anchor = clampFabPos(
@@ -4397,37 +4438,37 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             (st.anchor && st.anchor.y != null) ? st.anchor.y : 40,
         );
 
-        fabEl.classList.toggle('eo-collapsed', !!dock);
-        fabEl.classList.toggle('eo-dock-left', dock === 'left');
-        fabEl.classList.toggle('eo-dock-right', dock === 'right');
-        fabEl.classList.remove('eo-hover');
+        S.fabEl.classList.toggle('eo-collapsed', !!dock);
+        S.fabEl.classList.toggle('eo-dock-left', dock === 'left');
+        S.fabEl.classList.toggle('eo-dock-right', dock === 'right');
+        S.fabEl.classList.remove('eo-hover');
 
         if (dock) {
             const d = fabDockPosition(dock, anchor.y);
-            fabEl.style.width = d.width + 'px';
-            fabEl.style.height = d.height + 'px';
-            fabEl.style.left = Math.round(d.x) + 'px';
-            fabEl.style.top = Math.round(d.y) + 'px';
+            S.fabEl.style.width = d.width + 'px';
+            S.fabEl.style.height = d.height + 'px';
+            S.fabEl.style.left = Math.round(d.x) + 'px';
+            S.fabEl.style.top = Math.round(d.y) + 'px';
         } else {
-            fabEl.style.width = '';
-            fabEl.style.height = '';
-            fabEl.style.left = Math.round(anchor.x) + 'px';
-            fabEl.style.top = Math.round(anchor.y) + 'px';
+            S.fabEl.style.width = '';
+            S.fabEl.style.height = '';
+            S.fabEl.style.left = Math.round(anchor.x) + 'px';
+            S.fabEl.style.top = Math.round(anchor.y) + 'px';
         }
-        fabEl.style.right = 'auto';
+        S.fabEl.style.right = 'auto';
 
         if (initial) {
-            fabEl.style.transition = 'none';
-            requestAnimationFrame(() => { if (fabEl) fabEl.style.transition = ''; });
+            S.fabEl.style.transition = 'none';
+            requestAnimationFrame(() => { if (S.fabEl) S.fabEl.style.transition = ''; });
         }
     }
 
-    let fabState = { anchor: { x: 14, y: 40 }, dock: 'left' };
+    let fabState = S.fabState; // 引用指向 S，值统一存 S
 
     function loadFabState() {
         const s = getSettings();
         const saved = s.ui.floatingPos || {};
-        fabState = {
+        S.fabState = {
             anchor: {
                 x: saved.anchor && Number.isFinite(saved.anchor.x) ? saved.anchor.x : 14,
                 y: saved.anchor && Number.isFinite(saved.anchor.y) ? saved.anchor.y : 40,
@@ -4438,50 +4479,50 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
     function saveFabState() {
         const s = getSettings();
-        s.ui.floatingPos = { anchor: { ...fabState.anchor }, dock: fabState.dock };
+        s.ui.floatingPos = { anchor: { ...fabState.anchor }, dock: S.fabState.dock };
         saveSettings();
     }
 
     function ensureFab() {
         const s = getSettings();
         if (!s.ui.floatingEnabled) {
-            if (fabEl) { fabEl.remove(); fabEl = null; }
+            if (S.fabEl) { S.fabEl.remove(); S.fabEl = null; }
             return;
         }
-        if (fabEl) return;
+        if (S.fabEl) return;
 
         loadFabState();
 
-        fabEl = document.createElement('div');
-        fabEl.id = 'eo_fab';
-        fabEl.setAttribute('role', 'button');
-        fabEl.tabIndex = 0;
-        fabEl.innerHTML = '<span class="eo-fab-label">事件</span>';
-        fabEl.title = '事件大纲';
-        document.body.appendChild(fabEl);
+        S.fabEl = document.createElement('div');
+        S.fabEl.id = 'eo_fab';
+        S.fabEl.setAttribute('role', 'button');
+        S.fabEl.tabIndex = 0;
+        S.fabEl.innerHTML = '<span class="eo-fab-label">事件</span>';
+        S.fabEl.title = '事件大纲';
+        document.body.appendChild(S.fabEl);
 
-        bindFabGestures(fabEl);
-        applyFabState(fabState, true);
+        bindFabGestures(S.fabEl);
+        applyFabState(S.fabState, true);
 
         window.addEventListener('resize', () => {
-            if (!fabEl) return;
-            fabState.anchor = clampFabPos(fabState.anchor.x, fabState.anchor.y);
-            applyFabState(fabState);
+            if (!S.fabEl) return;
+            S.fabState.anchor = clampFabPos(S.fabState.anchor.x, S.fabState.anchor.y);
+            applyFabState(S.fabState);
         });
     }
 
     /** 从吸附态恢复成自由悬浮 */
     function restoreFab() {
-        fabState.dock = null;
-        fabState.anchor = clampFabPos(fabState.anchor.x, fabState.anchor.y);
-        applyFabState(fabState);
+        S.fabState.dock = null;
+        S.fabState.anchor = clampFabPos(S.fabState.anchor.x, S.fabState.anchor.y);
+        applyFabState(S.fabState);
         saveFabState();
     }
 
     /** 收起并吸附到指定侧 */
     function dockFab(side) {
-        fabState.dock = side;
-        applyFabState(fabState);
+        S.fabState.dock = side;
+        applyFabState(S.fabState);
         saveFabState();
         showDockHintOnce();
     }
@@ -4499,7 +4540,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     }
 
     function activateFab() {
-        if (fabState.dock) {
+        if (S.fabState.dock) {
             // 吸附状态：只恢复，不打开面板
             restoreFab();
             return;
@@ -4526,18 +4567,18 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             try { el.releasePointerCapture(g.id); } catch (e) { /* 忽略 */ }
 
             if (cancelled) {
-                fabState.anchor = clampFabPos(g.anchor.x, g.anchor.y);
-                fabState.dock = g.dock;
-                applyFabState(fabState);
+                S.fabState.anchor = clampFabPos(g.anchor.x, g.anchor.y);
+                S.fabState.dock = g.dock;
+                applyFabState(S.fabState);
                 suppressClickUntil = Date.now() + 320;
                 return;
             }
 
             if (g.moved) {
                 suppressClickUntil = Date.now() + 320;
-                const side = detectDockSide(fabState.anchor);
+                const side = detectDockSide(S.fabState.anchor);
                 if (side) dockFab(side);
-                else { fabState.dock = null; applyFabState(fabState); saveFabState(); }
+                else { S.fabState.dock = null; applyFabState(S.fabState); saveFabState(); }
                 return;
             }
 
@@ -4569,14 +4610,14 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 moved: false,
                 startX: e.clientX,
                 startY: e.clientY,
-                offsetX: e.clientX - (fabState.dock ? rect.left : fabState.anchor.x),
-                offsetY: e.clientY - (fabState.dock ? rect.top : fabState.anchor.y),
+                offsetX: e.clientX - (S.fabState.dock ? rect.left : S.fabState.anchor.x),
+                offsetY: e.clientY - (S.fabState.dock ? rect.top : S.fabState.anchor.y),
                 anchor: { ...fabState.anchor },
-                dock: fabState.dock,
+                dock: S.fabState.dock,
             };
 
             // 从吸附态按下：立即展开为完整图标
-            if (fabState.dock) {
+            if (S.fabState.dock) {
                 gesture.offsetX = e.clientX - rect.left;
                 gesture.offsetY = e.clientY - rect.top;
             }
@@ -4590,7 +4631,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 if (Math.hypot(e.clientX - gesture.startX, e.clientY - gesture.startY) < FAB_DRAG_SLOP) return;
                 gesture.moved = true;
                 // 一旦开始拖，解除吸附，切到完整图标
-                fabState.dock = null;
+                S.fabState.dock = null;
                 el.classList.remove('eo-collapsed', 'eo-hover');
                 el.classList.add('eo-dragging');
                 el.style.width = '';
@@ -4599,7 +4640,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             }
             if (e.cancelable) e.preventDefault();
             const p = clampFabPos(e.clientX - gesture.offsetX, e.clientY - gesture.offsetY);
-            fabState.anchor = p;
+            S.fabState.anchor = p;
             el.style.left = Math.round(p.x) + 'px';
             el.style.top = Math.round(p.y) + 'px';
             el.style.right = 'auto';
@@ -4624,7 +4665,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         }
 
         el.addEventListener('pointerenter', () => {
-            if (!gesture && fabState.dock) el.classList.add('eo-hover');
+            if (!gesture && S.fabState.dock) el.classList.add('eo-hover');
         });
         el.addEventListener('pointerleave', () => {
             el.classList.remove('eo-hover');
@@ -4645,15 +4686,15 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     }
 
     function ensurePanel() {
-        if (panelEl) return panelEl;
+        if (S.panelEl) return S.panelEl;
 
-        backdropEl = document.createElement('div');
-        backdropEl.id = 'eo_backdrop';
-        document.body.appendChild(backdropEl);
+        S.backdropEl = document.createElement('div');
+        S.backdropEl.id = 'eo_backdrop';
+        document.body.appendChild(S.backdropEl);
 
-        panelEl = document.createElement('div');
-        panelEl.id = 'eo_panel';
-        panelEl.innerHTML = `
+        S.panelEl = document.createElement('div');
+        S.panelEl.id = 'eo_panel';
+        S.panelEl.innerHTML = `
 <div class="eo-head" id="eo_panel_head">
   <span class="eo-title">事件大纲</span>
   <span class="eo-hint" id="eo_ver">v${VERSION}</span>
@@ -4667,27 +4708,29 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 </div>
 <div class="eo-body" id="eo_body"></div>
 <div class="eo-toasts" id="eo_toasts"></div>`;
-        document.body.appendChild(panelEl);
-        panelEl.querySelector('#eo_close').addEventListener('click', () => togglePanel(false));
-        backdropEl.addEventListener('click', () => togglePanel(false));
+        document.body.appendChild(S.panelEl);
+        S.panelEl.querySelector('#eo_close').addEventListener('click', () => togglePanel(false));
+        S.backdropEl.addEventListener('click', () => togglePanel(false));
 
         document.addEventListener('keydown', (ev) => {
-            if (ev.key === 'Escape' && panelEl && panelEl.classList.contains('eo-open')) {
+            if (ev.key === 'Escape' && S.panelEl && S.panelEl.classList.contains('eo-open')) {
                 togglePanel(false);
             }
         });
-        return panelEl;
+        return S.panelEl;
     }
 
     function togglePanel(force) {
         const p = ensurePanel();
-        if (!backdropEl) ensurePanel();
+        if (!S.backdropEl) ensurePanel();
         const open = force === undefined ? !p.classList.contains('eo-open') : force;
         p.classList.toggle('eo-open', open);
-        if (backdropEl) backdropEl.classList.toggle('eo-open', open);
-        document.body.style.overflow = open ? 'hidden' : '';
+        if (S.backdropEl) S.backdropEl.classList.toggle('eo-open', open);
+        // 2026-11-02 删掉这里原本的 document.body.style.overflow 写入（评审 7.3 附带项，危晓裁决 B）。
+        // 酒馆 1.19 的 public/style.css 给 body 写了 overflow:hidden，遮罩 #eo_backdrop 又盖满视口吞掉点击与滚动，
+        // 这行写成 hidden 等于没写，关面板写空串却会往别人共用的全局 body 样式里留下东西。
         // 4.1：面板和悬浮球同 z-index，球会盖在面板内容上。面板开着就把球藏起来
-        if (fabEl) fabEl.style.visibility = open ? 'hidden' : '';
+        if (S.fabEl) S.fabEl.style.visibility = open ? 'hidden' : '';
         if (open) {
             renderPanel();
             // 每次打开面板顺手校正一次条目位置，世界书被重排过也能自动纠正
@@ -4696,7 +4739,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         }
     }
 
-    // ==================== 10. 界面 ====================
+    // ==================== 11. 界面 ====================
     /** 建一个元素：标签、类名、文字。全文件都在用 */
     function el(tag, cls, text) {
         const d = document.createElement(tag);
@@ -4705,13 +4748,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         return d;
     }
 
-    let activeTab = 'gen';
+    let activeTab = S.activeTab; // 引用指向 S，值统一存 S
     // 正在编辑的待选事件 id；非空时该草稿展开成原文编辑框
-    let editingDraftId = null;
+    let editingDraftId = S.editingDraftId; // 引用指向 S，值统一存 S
     // 编辑框里的临时值：展开时从事件卡拷一份，取消或换一个草稿就丢
-    let draftEditBuf = null;
+    let draftEditBuf = S.draftEditBuf; // 引用指向 S，值统一存 S
     // 上一次保存的自检警告（节点编号 / 引用对不上），显示在当前草稿下方
-    let draftEditIssues = null;
+    let draftEditIssues = S.draftEditIssues; // 引用指向 S，值统一存 S
 
     /** 展开编辑时把大纲原文拷进编辑缓冲，之后只在缓冲上改，取消就不影响事件卡 */
     function makeDraftEditBuf(d) {
@@ -4853,8 +4896,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     }
 
     function buildDraftEditor(d) {
-        const buf = draftEditBuf || makeDraftEditBuf(d);
-        draftEditBuf = buf;
+        const buf = S.draftEditBuf || makeDraftEditBuf(d);
+        S.draftEditBuf = buf;
         const wrap = el('div', 'eo-draft-body eo-draft-edit');
 
         wrap.appendChild(el('div', 'eo-hint', '直接改下面的文字，像改文档一样。改完点「保存编辑」，'
@@ -4905,7 +4948,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         btnCheck.type = 'button';
         btnCheck.addEventListener('click', () => {
             const r = checkEditedRaw(wrapCodeFence(keysToEnglish(buf.text, buf.backMap), buf.fenced));
-            draftEditIssues = r.issues.length ? r.issues : null;
+            S.draftEditIssues = r.issues.length ? r.issues : null;
             renderPanel();
             if (!r.ok) log('格式检查未通过：' + r.fatal.join('；'));
             else if (!r.issues.length) log('格式检查通过，没有发现问题');
@@ -4920,7 +4963,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             buf.text = rebuilt.text;
             buf.backMap = rebuilt.backMap;
             buf.original = rebuilt.text;
-            pendingDraftEditDirty = false;
+            S.pendingDraftEditDirty = false;
             renderPanel();
             log('已按结构重建编辑框内容');
         });
@@ -4932,8 +4975,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         const paintWarn = () => {
             if (warned) { warned.remove(); warned = null; }
-            if (draftEditIssues && draftEditIssues.length) {
-                warned = el('div', 'eo-warn', '格式提醒：' + draftEditIssues.join('；')
+            if (S.draftEditIssues && S.draftEditIssues.length) {
+                warned = el('div', 'eo-warn', '格式提醒：' + S.draftEditIssues.join('；')
                     + '。这类问题不阻断保存，但节点跟踪可能对不上，建议修一下。');
                 if (tail.parentNode) tail.parentNode.insertBefore(warned, tail);
                 else wrap.appendChild(warned);
@@ -4943,7 +4986,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const paintTail = () => {
             tail.textContent = '';
             const btnRow = el('div', 'eo-row');
-            if (pendingDraftEditDirty) {
+            if (S.pendingDraftEditDirty) {
                 // 正在改：底部按钮收回，只留一句提醒——改完再回来才有「保存编辑」
                 btnRow.appendChild(el('div', 'eo-hint eo-editor-dirty',
                     '有未保存的改动。翻到编辑框底部就能「保存编辑」，或点上面的「编辑」放弃并关掉。'));
@@ -4958,14 +5001,14 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                         // 编辑框里是中文键，落盘前换回英文键——解析器和世界书只认英文
                         raw: wrapCodeFence(keysToEnglish(buf.text, buf.backMap), buf.fenced),
                     });
-                    draftEditIssues = res.issues && res.issues.length ? res.issues : null;
+                    S.draftEditIssues = res.issues && res.issues.length ? res.issues : null;
                     discardPendingEdit();
-                    previewDraftIds.add(d.id);
+                    S.previewDraftIds.add(d.id);
                     renderPanel();
                 } catch (e) {
                     // 格式硬错：不保存、不退出编辑，把原文留在框里让人接着改
                     error('保存草稿编辑失败：', e);
-                    draftEditIssues = [String(e && e.message || e)];
+                    S.draftEditIssues = [String(e && e.message || e)];
                     renderPanel();
                 }
             });
@@ -4996,8 +5039,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         // 状态一变就重画尾部：有改动才出现「保存编辑」，改回原样又收回去
         const syncDirty = () => {
             const now = buf.text !== buf.original;
-            if (now === pendingDraftEditDirty) return;
-            pendingDraftEditDirty = now;
+            if (now === S.pendingDraftEditDirty) return;
+            S.pendingDraftEditDirty = now;
             paintTail();
             paintStat();
         };
@@ -5039,17 +5082,17 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     ];
 
     function renderPanel() {
-        const body = panelEl && panelEl.querySelector('#eo_body');
+        const body = S.panelEl && S.panelEl.querySelector('#eo_body');
         if (!body) return;
         // 重建之前先把用户的位置记住：不清掉的话，点一个节点就从头再来一遍（C1 止血版）
         const view = captureView();
         body.innerHTML = '';
 
         // 面板重建后按钮和提示都是新造的，按当前 busy 状态恢复，否则切页回来就像没在忙
-        if (busy) {
-            const bb = panelEl.querySelector('#eo_busy');
+        if (S.busy) {
+            const bb = S.panelEl.querySelector('#eo_busy');
             if (bb) {
-                bb.textContent = busyText;
+                bb.textContent = S.busyText;
                 bb.style.display = 'block';
             }
         }
@@ -5063,7 +5106,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         // --- 标签栏 ---
         const tabBar = el('div', 'eo-tabs');
         for (const t of TABS) {
-            const b = el('div', 'eo-tab' + (activeTab === t.key ? ' eo-tab-active' : ''), t.label);
+            const b = el('div', 'eo-tab' + (S.activeTab === t.key ? ' eo-tab-active' : ''), t.label);
             if (t.key === 'inv') {
                 const ev = getCurrentEvent();
                 if (ev && ev.status === 'active') {
@@ -5073,16 +5116,16 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 }
             }
             // 日志页出错时挂红点：不能等人自己去翻日志才发现解析失败
-            if (t.key === 'log' && unreadErrors > 0) {
+            if (t.key === 'log' && S.unreadErrors > 0) {
                 const badge = el('span', 'eo-badge eo-badge-err');
-                badge.textContent = unreadErrors > 99 ? '99+' : String(unreadErrors);
+                badge.textContent = S.unreadErrors > 99 ? '99+' : String(S.unreadErrors);
                 b.appendChild(badge);
             }
             makeActivatable(b, 'tab');
-            b.setAttribute('aria-selected', activeTab === t.key ? 'true' : 'false');
+            b.setAttribute('aria-selected', S.activeTab === t.key ? 'true' : 'false');
             b.addEventListener('click', () => {
-                activeTab = t.key;
-                if (t.key === 'log') unreadErrors = 0;
+                S.activeTab = t.key;
+                if (t.key === 'log') S.unreadErrors = 0;
                 renderPanel();
             });
             tabBar.appendChild(b);
@@ -5092,9 +5135,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const page = el('div', 'eo-page');
         body.appendChild(page);
 
-        if (activeTab === 'gen') renderGenPage(page);
-        else if (activeTab === 'inv') renderInvPage(page);
-        else if (activeTab === 'log') {
+        if (S.activeTab === 'gen') renderGenPage(page);
+        else if (S.activeTab === 'inv') renderInvPage(page);
+        else if (S.activeTab === 'log') {
             renderLogPage(page);
             // 切到日志页时再滚一次：此时元素已经挂到文档上，scrollHeight 才是真值
             requestAnimationFrame(() => {
@@ -5163,27 +5206,27 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
      * 待选最多 3 份，来回点只能看一份，比较两份 200 行的大纲得反复开合。
      * 现在可以同时展开，一份关掉只影响它自己。
      */
-    const previewDraftIds = new Set();
+    let previewDraftIds = S.previewDraftIds; // 引用指向 S，值统一存 S
 
     /** 兼容旧判断：任意一份是否在预览 */
-    function isPreviewing(id) { return previewDraftIds.has(id); }
+    function isPreviewing(id) { return S.previewDraftIds.has(id); }
 
     /* ---------- 草稿编辑框的「正在改」状态（2026-11-02）----------
        「编辑」按钮不随开合改文案，一直是「编辑」，开关只能靠高亮 + 编辑框底部的「完成」。
        所以编辑框一改字就把编辑框下面那组按钮（保存编辑/取消/完成）换成提示条，
        免得保存按钮躲在屏幕外面看不见。这个状态是模块级的：renderPanel 重建 DOM 也不会丢。 */
-    let pendingDraftEditDirty = false;
+    let pendingDraftEditDirty = S.pendingDraftEditDirty; // 引用指向 S，值统一存 S
 
     function discardPendingEdit() {
-        editingDraftId = null;
-        draftEditBuf = null;
-        draftEditIssues = null;
-        pendingDraftEditDirty = false;
+        S.editingDraftId = null;
+        S.draftEditBuf = null;
+        S.draftEditIssues = null;
+        S.pendingDraftEditDirty = false;
     }
 
     /** 编辑框开着、但还没改动：直接关，不用问 */
     async function closeDraftEditor() {
-        if (pendingDraftEditDirty) {
+        if (S.pendingDraftEditDirty) {
             if (!(await askConfirm('这份草稿还有没保存的改动，关掉就丢了。继续？'))) return;
         }
         discardPendingEdit();
@@ -5197,15 +5240,15 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
      * 滚动和焦点也跟着丢。这里换掉的内容区不动，滚动位置天然保留。
      */
     function repaintPage() {
-        const page = panelEl && panelEl.querySelector('#eo_body .eo-page');
+        const page = S.panelEl && S.panelEl.querySelector('#eo_body .eo-page');
         if (!page || !page.isConnected) { renderPanel(); return; }
         closeAllTips();
         const body = page.parentNode;
         const top = page.getBoundingClientRect().top;
         page.innerHTML = '';
-        if (activeTab === 'gen') renderGenPage(page);
-        else if (activeTab === 'inv') renderInvPage(page);
-        else if (activeTab === 'log') renderLogPage(page);
+        if (S.activeTab === 'gen') renderGenPage(page);
+        else if (S.activeTab === 'inv') renderInvPage(page);
+        else if (S.activeTab === 'log') renderLogPage(page);
         else renderSetPage(page);
         // 页面内容变化会让后面的内容整体上下移位，这里把页面顶端拉回原位，视觉上不跳
         const dy = page.getBoundingClientRect().top - top;
@@ -5268,7 +5311,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     btnUse.textContent = '正在采用…';
                     try {
                         await commitDraft(d.id);
-                        activeTab = 'gen';
+                        S.activeTab = 'gen';
                         renderPanel();
                     } catch (e) {
                         error('采用待选事件失败：', e);
@@ -5294,44 +5337,44 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 const btnLook = el('button', 'eo-btn eo-btn-toggle' + (showing ? ' eo-on' : ''), showing ? '收起大纲' : '展示大纲');
                 btnLook.type = 'button';
                 btnLook.addEventListener('click', async () => {
-                    if (pendingDraftEditDirty && editingDraftId === d.id) {
+                    if (S.pendingDraftEditDirty && S.editingDraftId === d.id) {
                         if (!(await askConfirm('正在编辑的这份还有没保存的改动，收起来会丢掉。继续？'))) return;
                         discardPendingEdit();
                     }
-                    if (previewDraftIds.has(d.id)) {
-                        previewDraftIds.delete(d.id);
+                    if (S.previewDraftIds.has(d.id)) {
+                        S.previewDraftIds.delete(d.id);
                         // 收起这一份的预览，如果它正开着编辑器，编辑器也一并退出
-                        if (editingDraftId === d.id) { editingDraftId = null; draftEditBuf = null; }
+                        if (S.editingDraftId === d.id) { S.editingDraftId = null; S.draftEditBuf = null; }
                     } else {
-                        previewDraftIds.add(d.id);
+                        S.previewDraftIds.add(d.id);
                     }
                     renderPanel();
                 });
                 lookActs.appendChild(btnLook);
 
-                const btnEdit = el('button', 'eo-btn eo-btn-toggle' + (editingDraftId === d.id ? ' eo-on' : ''),
-                    editingDraftId === d.id ? '收起编辑' : '编辑');
+                const btnEdit = el('button', 'eo-btn eo-btn-toggle' + (S.editingDraftId === d.id ? ' eo-on' : ''),
+                    S.editingDraftId === d.id ? '收起编辑' : '编辑');
                 btnEdit.type = 'button';
                 btnEdit.addEventListener('click', async () => {
-                    if (editingDraftId === d.id) {
+                    if (S.editingDraftId === d.id) {
                         await closeDraftEditor();
                         return;
                     } else {
                         // 从别的草稿的编辑框切过来：有未保存改动先问一句，别悄悄丢
-                        if (pendingDraftEditDirty
+                        if (S.pendingDraftEditDirty
                             && !(await askConfirm('另一份草稿还有没保存的改动，切走会丢掉。继续？'))) return;
                         discardPendingEdit();
-                        editingDraftId = d.id;
-                        draftEditBuf = makeDraftEditBuf(d);
-                        draftEditIssues = null;
-                        previewDraftIds.add(d.id);
+                        S.editingDraftId = d.id;
+                        S.draftEditBuf = makeDraftEditBuf(d);
+                        S.draftEditIssues = null;
+                        S.previewDraftIds.add(d.id);
                     }
                     renderPanel();
                 });
                 lookActs.appendChild(btnEdit);
                 item.appendChild(acts);
 
-                if (editingDraftId === d.id) {
+                if (S.editingDraftId === d.id) {
                     item.appendChild(renderDraftEditor(d));
                     // 编辑器开着就直接返回这张卡，不再渲染大纲正文（2026-11-02 抽组件时改：
                     // 以前这里是 continue，跳出循环会把后面的草稿全丢掉，界面一片空白，2026-11-01 踩过）
@@ -5386,7 +5429,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             const row = el('div', 'eo-row');
 
             const btnInv = el('button', 'eo-btn eo-primary', '去盘点这一页');
-            btnInv.addEventListener('click', () => { activeTab = 'inv'; renderPanel(); });
+            btnInv.addEventListener('click', () => { S.activeTab = 'inv'; renderPanel(); });
             row.appendChild(btnInv);
 
             const btnDone = el('button', 'eo-btn', '完结');
@@ -5474,8 +5517,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         nameInput.type = 'text';
         nameInput.placeholder = '例如：东方快车谋杀案';
         // 事件名也存进草稿，这样「重置为默认」能把它一起清掉
-        nameInput.value = draftName || '';
-        nameInput.addEventListener('input', () => { draftName = nameInput.value; persistGenForm(); });
+        nameInput.value = S.draftName || '';
+        nameInput.addEventListener('input', () => { S.draftName = nameInput.value; persistGenForm(); });
         // 切走或刷新前的最后一道保险：输入法组字中可能没触发 input，失焦时再存一次
         nameInput.addEventListener('change', persistGenForm);
         nameRow.appendChild(nameInput);
@@ -5790,12 +5833,12 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const btnGo = el('button', 'eo-btn eo-primary', '开始生成大纲');
         // 生成中 / 切页回来后恢复按钮状态：busy 是模块级变量，切换标签页不会丢，
         // 但每次 renderPanel 都会新建按钮，所以要按 busy 重新禁用
-        if (busy) {
+        if (S.busy) {
             btnGo.disabled = true;
             btnGo.textContent = '正在生成…';
         }
         btnGo.addEventListener('click', async () => {
-            if (busy) return;
+            if (S.busy) return;
             const name = String(nameInput.value || '').trim();
             // 事件名可以留空：留空就由模型根据当前剧情自己起名
             prefs.extra = String(extraInput.value || '无').trim() || '无';
@@ -5816,8 +5859,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 opOut.className = 'eo-ok';
                 opOut.textContent = `已生成「${event.name}」（${nodeN} 个节点），已放入上方待选。看看满意就点「采用」写入世界书，不满意可以直接再生成一个。`;
                 // 刚生成的那份默认展开，方便马上看效果
-                previewDraftIds.add(event.id);
-                activeTab = 'gen';
+                S.previewDraftIds.add(event.id);
+                S.activeTab = 'gen';
                 renderPanel();
             } catch (e) {
                 error('生成大纲失败：', e);
@@ -5835,7 +5878,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const ph = el('div');
         ph.id = 'eo_progress_host';
         page.appendChild(ph);
-        if (progress.steps.length) renderProgress();
+        if (S.progress.steps.length) renderProgress();
     }
 
 
@@ -5851,9 +5894,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const opOut = el('div', 'eo-hint');
         const row = el('div', 'eo-row');
         const btnInv = el('button', 'eo-btn eo-primary', '开始盘点');
-        if (busy) { btnInv.disabled = true; btnInv.textContent = '正在盘点…'; }
+        if (S.busy) { btnInv.disabled = true; btnInv.textContent = '正在盘点…'; }
         btnInv.addEventListener('click', async () => {
-            if (busy) return;
+            if (S.busy) return;
             btnInv.disabled = true;
             btnInv.textContent = '正在盘点…';
             opOut.className = 'eo-hint';
@@ -5896,7 +5939,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const invPh = el('div');
         invPh.id = 'eo_progress_host';
         page.appendChild(invPh);
-        if (progress.steps.length) renderProgress();
+        if (S.progress.steps.length) renderProgress();
 
         // 节点进度
         const nodes = (ev.outline && ev.outline.nodes) || [];
@@ -6043,34 +6086,34 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     // ---------- 页：日志 ----------
 
     // 日志页的级别筛选：记在模块级，切页签不丢；'all' = 全部
-    let logFilter = 'all';
+    let logFilter = S.logFilter; // 引用指向 S，值统一存 S
     // 关键词过滤（2026-11-02 4.5）：远程排障时经常要捞某个节点号或某段报错
-    let logKeyword = '';
+    let logKeyword = S.logKeyword; // 引用指向 S，值统一存 S
 
     function renderRuntimeLogSection(page) {
         const head = el('div', 'eo-sec eo-sec-inline');
         head.appendChild(el('span', null, '扩展运行日志'));
-        head.appendChild(el('span', 'eo-hint', `（${runtimeLog.length} 条，最多保留 ${RUNTIME_LOG_MAX}）`));
+        head.appendChild(el('span', 'eo-hint', `（${S.runtimeLog.length} 条，最多保留 ${RUNTIME_LOG_MAX}）`));
         page.appendChild(head);
         page.appendChild(el('div', 'eo-hint',
             '这里记录扩展自己做过的事：挂载、读写世界书、记忆适配器判定、生成与解析、打勾变更、报错。只存在内存里，刷新页面就清空，不会写进聊天记录。'));
 
         // 级别筛选
         const cnt = { debug: 0, info: 0, warn: 0, error: 0 };
-        for (const l of runtimeLog) if (cnt[l.level] != null) cnt[l.level]++;
+        for (const l of S.runtimeLog) if (cnt[l.level] != null) cnt[l.level]++;
         const fRow = el('div', 'eo-row eo-logfilter');
         const mkBtn = (key, label) => {
-            const b = el('button', 'eo-btn eo-filterbtn' + (logFilter === key ? ' eo-filterbtn-on' : ''), label);
+            const b = el('button', 'eo-btn eo-filterbtn' + (S.logFilter === key ? ' eo-filterbtn-on' : ''), label);
             b.type = 'button';
             b.addEventListener('click', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                logFilter = key;
+                S.logFilter = key;
                 repaintPage();
             });
             fRow.appendChild(b);
         };
-        mkBtn('all', `全部 ${runtimeLog.length}`);
+        mkBtn('all', `全部 ${S.runtimeLog.length}`);
         for (const lv of LOG_LEVELS) mkBtn(lv, `${LOG_LEVEL_LABEL[lv]} ${cnt[lv]}`);
         page.appendChild(fRow);
 
@@ -6080,20 +6123,20 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const kwIn = el('input', 'eo-input');
         kwIn.type = 'search';
         kwIn.placeholder = '输入关键词，回车生效（例如节点编号、报错片段）';
-        kwIn.value = logKeyword || '';
+        kwIn.value = S.logKeyword || '';
         kwIn.style.flex = '1';
         const applyKw = () => {
             const v = String(kwIn.value || '').trim();
-            if (v === logKeyword) return;
-            logKeyword = v;
+            if (v === S.logKeyword) return;
+            S.logKeyword = v;
             repaintPage();
         };
         kwIn.addEventListener('change', applyKw);
         kwIn.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') { e.preventDefault(); applyKw(); }
-            if (e.key === 'Escape' && logKeyword) {
+            if (e.key === 'Escape' && S.logKeyword) {
                 e.preventDefault();
-                logKeyword = '';
+                S.logKeyword = '';
                 kwIn.value = '';
                 repaintPage();
             }
@@ -6108,9 +6151,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         }
 
         // 只收调试级却一条都没有，说明这不只是筛选问题
-        const kw = logKeyword ? logKeyword.toLowerCase() : '';
-        const shown = runtimeLog
-            .filter(l => logFilter === 'all' || l.level === logFilter)
+        const kw = S.logKeyword ? S.logKeyword.toLowerCase() : '';
+        const shown = S.runtimeLog
+            .filter(l => S.logFilter === 'all' || l.level === S.logFilter)
             .filter(l => {
                 if (!kw) return true;
                 return String(l.text || '').toLowerCase().includes(kw)
@@ -6118,12 +6161,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             });
         if (!shown.length) {
             page.appendChild(el('div', 'eo-hint',
-                !runtimeLog.length
+                !S.runtimeLog.length
                     ? '还没有记录。'
                     : (kw
-                        ? `没有匹配「${logKeyword}」的记录，按 Esc 清掉筛选。`
+                        ? `没有匹配「${S.logKeyword}」的记录，按 Esc 清掉筛选。`
                         : '这个级别下暂时没有记录，点上面的「全部」看其它级别。')));
-            return;
+            // 早先这里直接 return，一条日志都没有时导出、复制、清空的入口跟着一起消失（2026-11-02 发现）。
+            // 按钮行改成无论有没有记录都挂上，没有内容时按钮自己禁用。
         }
         const box = el('div', 'eo-box eo-logbox');
         box.textContent = shown.map(l =>
@@ -6140,18 +6184,23 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         const btn = el('button', 'eo-btn', '清空运行日志');
         btn.type = 'button';
+        btn.disabled = !S.runtimeLog.length;
         btn.addEventListener('click', () => {
-            runtimeLog.length = 0;
+            S.runtimeLog.length = 0;
+            S.unreadErrors = 0;
             repaintPage();
         });
         r.appendChild(btn);
 
         // 导出跟着当前筛选走：排障时往往只想给一段，不想把五百条全发出去
-        const scopeNote = (logFilter === 'all' && !kw) ? '' : '（当前筛选结果）';
+        const scopeNote = (S.logFilter === 'all' && !kw) ? '' : '（当前筛选结果）';
         const lineOf = (l) => `[${l.at || ''}] ${String(l.level || 'info').toUpperCase()} ${l.text}`;
+
+        const noRows = !shown.length;
 
         const btnExportTxt = el('button', 'eo-btn', '导出文本');
         btnExportTxt.type = 'button';
+        btnExportTxt.disabled = noRows;
         btnExportTxt.addEventListener('click', () => {
             const name = `事件大纲-运行日志-${fileStamp()}.txt`;
             if (downloadText(name, shown.map(lineOf).join('\n') || '（没有日志）')) toast('已导出 ' + name + scopeNote);
@@ -6160,12 +6209,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         const btnExportJson = el('button', 'eo-btn', '导出 JSON');
         btnExportJson.type = 'button';
+        btnExportJson.disabled = noRows;
         btnExportJson.addEventListener('click', () => {
             const name = `事件大纲-运行日志-${fileStamp()}.json`;
             const data = {
                 version: VERSION,
                 exportedAt: new Date().toISOString(),
-                filter: { level: logFilter, keyword: logKeyword || '' },
+                filter: { level: S.logFilter, keyword: S.logKeyword || '' },
                 logs: shown,
             };
             if (downloadText(name, JSON.stringify(data, null, 2), 'application/json')) toast('已导出 ' + name + scopeNote);
@@ -6174,6 +6224,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         const btnCopyAll = el('button', 'eo-btn', '复制全部');
         btnCopyAll.type = 'button';
+        btnCopyAll.disabled = noRows;
         attachHelp(btnCopyAll, '把当前筛选里的日志整段复制到剪贴板，直接粘给对方或粘进记事本。'
             + '浏览器不允许剪贴板时会退回「手动全选」提示。');
         btnCopyAll.addEventListener('click', async () => {
@@ -6453,6 +6504,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 const nameRow2 = el('div', 'eo-row');
                 nameRow2.appendChild(el('label', null, '名称'));
                 const nameIn = el('input', 'eo-input');
+                markKey(nameIn, 'profile.' + p.id + '.name');
                 nameIn.type = 'text';
                 nameIn.value = p.name || '';
                 nameIn.style.flex = '1';
@@ -6470,6 +6522,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 const uRow = el('div', 'eo-row');
                     uRow.appendChild(el('label', null, '接口地址'));
                     const uIn = el('input', 'eo-input');
+                    markKey(uIn, 'profile.' + p.id + '.baseUrl');
                     uIn.type = 'text';
                     uIn.placeholder = 'https://api.example.com/v1';
                     uIn.value = p.baseUrl || '';
@@ -6545,6 +6598,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     const mRow2 = el('div', 'eo-row');
                     mRow2.appendChild(el('label', null, '模型名'));
                     const mIn2 = el('input', 'eo-input');
+                    markKey(mIn2, 'profile.' + p.id + '.model');
                     mIn2.type = 'text';
                     mIn2.placeholder = '如 deepseek-chat';
                     mIn2.value = p.model || '';
@@ -6585,6 +6639,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     const tRow = el('div', 'eo-row');
                     tRow.appendChild(el('label', null, '温度'));
                     const tIn = el('input', 'eo-input');
+                    markKey(tIn, 'profile.' + p.id + '.temperature');
                     tIn.type = 'number';
                     tIn.min = '0';
                     tIn.max = '2';
@@ -6601,6 +6656,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     const xRow = el('div', 'eo-row');
                     xRow.appendChild(el('label', null, '输出上限'));
                     const xIn = el('input', 'eo-input');
+                    markKey(xIn, 'profile.' + p.id + '.maxTokens');
                     xIn.type = 'number';
                     xIn.min = '0';
                     xIn.step = '100';
@@ -6762,6 +6818,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const memRow = el('div', 'eo-row');
         memRow.appendChild(el('label', null, '来源'));
         const memSel = el('select', 'eo-sel');
+        markKey(memSel, 'set.memorySource');
         for (const [k, label] of Object.entries(MEMORY_SOURCES)) {
             const o = el('option', null, label);
             o.value = k;
@@ -6787,6 +6844,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const flRow = el('div', 'eo-row');
         flRow.appendChild(el('label', null, '最近楼层'));
         const flIn = el('input', 'eo-input');
+        markKey(flIn, 'set.recentFloors');
         flIn.type = 'number';
         flIn.min = '1';
         flIn.max = '100';
@@ -6821,6 +6879,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const wcRow = el('div', 'eo-row');
         wcRow.appendChild(el('label', null, '世界书字数上限'));
         const wcIn = el('input', 'eo-input');
+        markKey(wcIn, 'set.worldbookChars');
         wcIn.type = 'number';
         wcIn.min = '1000';
         wcIn.step = '1000';
@@ -6852,6 +6911,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const wbCapRow = el('div', 'eo-row');
         wbCapRow.appendChild(el('label', null, '设定字数上限'));
         const wbCap = el('input', 'eo-input');
+        markKey(wbCap, 'set.presetChars');
         wbCap.type = 'number';
         wbCap.min = '0';
         wbCap.value = String((s.worldbook && s.worldbook.maxChars) || 0);
@@ -6909,6 +6969,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         page.appendChild(trSec);
         const trRow = el('div', 'eo-row');
         const trSel = el('select', 'eo-sel');
+        markKey(trSel, 'set.trackerMode');
         for (const [k, label] of Object.entries(TRACKER_MODES)) {
             const o = el('option', null, label);
             o.value = k;
@@ -6949,6 +7010,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             const afRow = el('div', 'eo-row');
             afRow.appendChild(el('label', null, '每'));
             const afIn = el('input', 'eo-input');
+            markKey(afIn, 'set.autoEvery');
             afIn.type = 'number';
             afIn.min = '0';
             afIn.max = '200';
@@ -7016,6 +7078,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const retRow = el('div', 'eo-row');
         retRow.appendChild(el('label', null, '完结'));
         const inDone = el('input', 'eo-input');
+        markKey(inDone, 'set.retainDone');
         inDone.type = 'number';
         inDone.min = '1';
         inDone.max = '100';
@@ -7030,6 +7093,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         retRow.appendChild(inDone);
         retRow.appendChild(el('span', 'eo-hint', '废弃'));
         const inAban = el('input', 'eo-input');
+        markKey(inAban, 'set.retainAbandoned');
         inAban.type = 'number';
         inAban.min = '1';
         inAban.max = '50';
@@ -7071,6 +7135,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const dbgRow = el('div', 'eo-row');
         dbgRow.appendChild(el('label', null, '调试日志'));
         const dbgChk = el('input');
+        markKey(dbgChk, 'set.debugLog');
         dbgChk.type = 'checkbox';
         dbgChk.checked = !!s.debug;
         dbgChk.addEventListener('change', () => {
@@ -7244,7 +7309,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     }
 
 
-    // ==================== 11. 设置面板入口 ====================
+    // ==================== 12. 设置面板入口 ====================
 
     function addMenuButton() {
         const menu = document.getElementById('extensionsMenu');
@@ -7260,7 +7325,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         menu.appendChild(item);
     }
 
-    // ==================== 12. 入口 ====================
+    // ==================== 13. 入口 ====================
 
     function init() {
         const context = ctx();
@@ -7294,7 +7359,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         try {
             context.eventSource.on(context.eventTypes.CHAT_CHANGED, () => {
                 healEntryUids().catch(e => warn('校正条目位置失败', e));
-                if (panelEl && panelEl.classList.contains('eo-open')) renderPanel();
+                if (S.panelEl && S.panelEl.classList.contains('eo-open')) renderPanel();
             });
         } catch (e) {
             warn('事件绑定失败', e);
@@ -7308,8 +7373,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 // 立刻重绘会读到还没有表格的楼层，导致记忆来源判定成「最近楼层」。
                 // 延后再绘一次，让判定跑在数据落盘之后
                 setTimeout(() => {
-                    lastAdapterSig = null;  // 强制重判，否则去重会跳过这次变化
-                    if (panelEl && panelEl.classList.contains('eo-open')) renderPanel();
+                    S.lastAdapterSig = null;  // 强制重判，否则去重会跳过这次变化
+                    if (S.panelEl && S.panelEl.classList.contains('eo-open')) renderPanel();
                 }, 1500);
             });
             context.eventSource.on(context.eventTypes.GENERATION_ENDED, () => {
@@ -7321,31 +7386,31 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     }
 
     // 自动盘点：消息事件触发后延迟检查，避免和酒馆自身的渲染抢时序
-    let autoCheckTimer = null;
-    let autoRunning = false;
+    let autoCheckTimer = S.autoCheckTimer; // 引用指向 S，值统一存 S
+    let autoRunning = S.autoRunning; // 引用指向 S，值统一存 S
 
     function scheduleAutoInventoryCheck() {
-        if (autoCheckTimer) clearTimeout(autoCheckTimer);
-        autoCheckTimer = setTimeout(() => {
-            autoCheckTimer = null;
+        if (S.autoCheckTimer) clearTimeout(S.autoCheckTimer);
+        S.autoCheckTimer = setTimeout(() => {
+            S.autoCheckTimer = null;
             checkAutoInventory().catch(e => warn('自动盘点检查失败', e));
         }, 1200);
     }
 
     async function checkAutoInventory() {
-        if (autoRunning) return;
+        if (S.autoRunning) return;
         const hit = shouldAutoInventory();
         if (!hit) return;
-        autoRunning = true;
+        S.autoRunning = true;
         try {
             log(`自动盘点触发：距上次盘点已过 ${hit.since} 层（阈值 ${hit.every} 层）`);
             await runInventory();
             log('自动盘点完成');
-            if (panelEl && panelEl.classList.contains('eo-open')) renderPanel();
+            if (S.panelEl && S.panelEl.classList.contains('eo-open')) renderPanel();
         } catch (e) {
             error('自动盘点失败：' + (e && e.message || e));
         } finally {
-            autoRunning = false;
+            S.autoRunning = false;
         }
     }
 

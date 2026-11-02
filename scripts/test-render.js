@@ -133,10 +133,13 @@ function grabConst(name) {
     return m ? m[0] : '';
 }
 
+// 状态对象 S 从源码原样搬过来（2026-11-02 收口后，各模块状态都在这里）
+const S_BLOCK = (src.match(/^ {4}const S = \{[\s\S]*?^ {4}\};$/m) || [''])[0];
+
 function makeSandbox(stubs, fnNames, constNames) {
     const helpers = fnNames.map(grabFunction).filter(Boolean).join(SEP);
     const consts = (constNames || []).map(grabConst).filter(Boolean).join('\n');
-    const body = stubs + '\n' + consts + '\n' + helpers + '\nreturn { ' + fnNames.join(', ') + ' };';
+    const body = stubs + '\n' + S_BLOCK + '\n' + consts + '\n' + helpers + '\nreturn { ' + fnNames.join(', ') + ' };';
     const factory = new Function('document', 'window', 'navigator', 'console', body);
     return factory(docStub, winStub, {}, console);
 }

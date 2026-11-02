@@ -876,7 +876,7 @@ exports.r = renderOutlineText;
     check('重置会清空草稿', /function resetDraftPrefs\(\)[\s\S]{0,200}draftPrefs = null/.test(src));
     check('重置会清空事件名', /function resetDraftPrefs\(\)[\s\S]{0,220}draftName = ''/.test(src));
     check('事件名存进草稿', src.includes('draftName = nameInput.value'));
-    check('事件名从草稿回填', src.includes("nameInput.value = draftName || ''"));
+    check('事件名从草稿回填', src.includes("nameInput.value = S.draftName || ''"));
 
     // 生成成功后不许重置：选项要停在生成时的那份
     const goStart = src.indexOf("btnGo.addEventListener");
