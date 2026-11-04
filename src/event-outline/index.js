@@ -9,7 +9,7 @@
     'use strict';
 
     const MODULE = 'event_outline';
-    const VERSION = '0.1.3';
+    const VERSION = '0.1.4';
     const ENTRY_PREFIX = '▸事件｜';
     // 待选事件最多留几个：生成不再直接写世界书，草稿得有个上限
     const MAX_DRAFTS = 3;
@@ -57,6 +57,11 @@
             enabled: true,
             // 字数上限，超出按 order 顺序截断；0 = 不限
             maxChars: 30000,
+            // 事件条目写进世界书时的 order（2026-11-04 危晓定，默认 200）。
+            // 这一个数同时决定两件事：世界书列表里排第几、↑Char 那一组里谁先写进提示词。
+            // 写死 100 时事件条目夹在一堆蓝灯设定中间，既不好找也不够靠前；调到 200 让它优先。
+            // 已有的旧条目要等下一次盘点写回才会跟着变，扩展不会主动改历史条目的设置。
+            entryOrder: 200,
         },
         request: {
             // 直连接口最长等多久（毫秒）。超时就报错并放开 busy，不会一直转圈
@@ -77,6 +82,11 @@
     };
 
     const SHUJUKU_EXPORT_PREFIX = 'TavernDB-ACU-CustomExport-';
+
+    // 事件条目写进世界书的 order（2026-11-04 危晓定）。默认值与上下限：
+    // 200 是危晓点的数，比原来写死的 100 靠前；上限 9999 与酒馆自己排序能认的范围一致。
+    const DEFAULT_ENTRY_ORDER = 200;
+    const MAX_ENTRY_ORDER = 9999;
 
     // 悬浮窗尺寸（吸附竖条与展开图标）
     const FAB_TAB_VISIBLE = 20;   // 吸附时可见宽度
@@ -116,6 +126,13 @@
         autoRunning: false,
         progress: { steps: [], startedAt: 0, timer: null },
         previewDraftIds: new Set(),
+        // 和 previewDraftIds 分开：看原文不必连大纲一起展开（2026-11-04）
+        previewRawDraftIds: new Set(),
+        // 当前事件的「事件大纲」「模型原始输出」两块由按钮控制显示还是收起（2026-11-04 危晓要求）。
+        // 和待选事件一样做成开关，而不是只能靠折叠块自己点：以前原始输出藏在事件大纲下面，
+        // 想单独看原文也得先把大纲点开。默认都收着，避免一进生成页就是几百行。
+        currentShowOutline: false,
+        currentShowRaw: false,
     };
 
     // ==================== 2. 上下文 ====================
@@ -399,6 +416,17 @@
         return max + 1;
     }
 
+    /**
+     * 事件条目的世界书顺序值。设置里改的就是这个数（默认 200，见 DEFAULT_SETTINGS.worldbook.entryOrder）。
+     * order 越大越靠前：列表按它排，↑Char 那一组也按它决定谁先拼进提示词。
+     * 取值不合法（不是数字、越界）时退回 200，别让一条坏设置把条目写进 queue 外面。
+     */
+    function eventOrderValue() {
+        const v = Number((getSettings().worldbook || {}).entryOrder);
+        if (!Number.isFinite(v)) return DEFAULT_ENTRY_ORDER;
+        return Math.min(MAX_ENTRY_ORDER, Math.max(0, Math.round(v)));
+    }
+
     function buildEntry(uid, content, comment) {
         return {
             uid,
@@ -411,7 +439,7 @@
             selective: true,
             selectiveLogic: 0,
             addMemo: true,
-            order: 100,
+            order: eventOrderValue(),
             position: 0,
             disable: false,
             excludeRecursion: false,
@@ -462,6 +490,18 @@
                     uid = found;
                 } else if (found != null) {
                     uid = found;
+                }
+            }
+
+            // 「往前挪」对已有条目同样成立（2026-11-04）：order 改成设置里的值，老的 ▸事件 条目
+            // 不能因为设置变了就永远停在旧的 100。只拨 order，位置、深度、概率一个都不碰——
+            // 那几项用户可能在酒馆界面里手动调过，扩展没资格覆盖。
+            const wantOrder = eventOrderValue();
+            for (const [k, e] of Object.entries(data.entries)) {
+                if (!e || !String(e.comment || '').startsWith(ENTRY_PREFIX)) continue;
+                if (Number(e.order) !== wantOrder) {
+                    debug(`事件条目 uid=${k} 的顺序 ${e.order} → ${wantOrder}`);
+                    e.order = wantOrder;
                 }
             }
 
@@ -3550,6 +3590,11 @@
             // 采用即视为这套生成设置已经用掉，清空表单（危晓 2026-11-01 的规矩）
             clearGenFormOnAdopt();
             log(`已采用事件「${event.name}」，世界书条目 uid=${res.uid}`);
+            // 2026-11-04 危晓反馈：采用后在世界书面板里搜不到条目，F5 一次才出现。
+            // 根因是世界书面板读的是页面加载那一刻的数据，服务端写入不会让面板自己变新；
+            // 最危险的是在那份旧数据上手动编辑再保存，会把刚写入的条目（以及 shujuku 维护的纪要条目）一起盖掉。
+            // 所以写完给一句明确的动作，别让人以为没写成功。
+            toast('已写入世界书。要查看或手动编辑世界书，请先刷新页面（F5），否则改的是旧数据，会把这批内容盖掉', { ms: 9000 });
             return event;
         } catch (e) {
             failProgress(e && e.message || String(e));
@@ -3896,6 +3941,8 @@
             event.floorBase = countFloors();
 
             saveMeta();
+            // 同采用：盘点也改了世界书，面板那份数据已经旧了（2026-11-04）
+            toast('盘点已写回世界书。要查看或手动编辑世界书，请先刷新页面（F5），否则改的是旧数据，会把这批内容盖掉', { ms: 9000 });
             return { record, event };
         } catch (e) {
             failProgress(e && e.message || String(e));
@@ -5361,6 +5408,31 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 });
                 useActs.appendChild(btnDrop);
 
+                // 「展示原文」只在调试模式开着时给（2026-11-04 危晓要求）：
+                // 原来要先点「展示大纲」才能在底下看到原文，想看原文还得先展开几百行大纲。
+                // 现在和展示大纲、编辑并排，各管各的。
+                const editingMe = S.editingDraftId === d.id;
+                if (d.outlineRaw && debugEnabled()) {
+                    const rawOn = S.previewRawDraftIds.has(d.id);
+                    const btnRaw = el('button', 'eo-btn eo-btn-toggle' + (rawOn && !editingMe ? ' eo-on' : ''),
+                        rawOn && !editingMe ? '收起原文' : '展示原文');
+                    btnRaw.type = 'button';
+                    // 编辑大纲时不给点（2026-11-04 危晓要求）：编辑状态下这张卡只画编辑器，
+                    // 点了也看不到原文，按钮就成了骗人的。关掉编辑自然回来。
+                    // 也不挂「?」帮助（2026-11-04 危晓要求）：按钮已经灰着，再挂个问号
+                    // 反而多一个要点的小玩意。禁用就是禁用，不加解释。
+                    if (editingMe) {
+                        btnRaw.disabled = true;
+                    } else {
+                        btnRaw.addEventListener('click', () => {
+                            if (rawOn) S.previewRawDraftIds.delete(d.id);
+                            else S.previewRawDraftIds.add(d.id);
+                            renderPanel();
+                        });
+                    }
+                    lookActs.appendChild(btnRaw);
+                }
+
                 // 展示大纲是开关，但开关态靠文案和左侧竖条表达，不靠底色（2026-11-02）：
                 // 底色和「采用」的主按钮长得太像，一眼分不清哪个会真生效
                 const showing = isPreviewing(d.id);
@@ -5425,6 +5497,21 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     body.appendChild(txt);
                     item.appendChild(body);
                 }
+
+                // 模型原始输出单独一个开关（2026-11-04 危晓要求），不再跟着大纲一起展开。
+                // 仍旧只在调试模式开着时给：它是含英文字段名的技术细节，平时摆着容易误读。
+                // 点了「展示原文」就直接摊开正文，不再套一层折叠块（2026-11-04 危晓反馈：
+                // 按钮写着展示原文、下面还挂一个要点开才知道是什么的折叠块，等于点了两次），
+                // 只在顶上留一行小标题说明这段是什么。
+                if (d.outlineRaw && debugEnabled() && S.previewRawDraftIds.has(d.id)
+                    && S.editingDraftId !== d.id) {
+                    const rawBody = el('div', 'eo-draft-body');
+                    rawBody.appendChild(el('div', 'eo-hint', '模型原始输出（排查用，含英文字段名）'));
+                    const ob = el('div', 'eo-outline-text');
+                    ob.textContent = d.outlineRaw;
+                    rawBody.appendChild(ob);
+                    item.appendChild(rawBody);
+                }
                 return item;
         return item;
     }
@@ -5433,28 +5520,18 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         // 当前进行中的事件：拆函数时它原本在 renderGenStatus 里，
         // 这里要用到（完结/废弃按钮、大纲、原始输出），所以自己取一次（2026-11-02 回归 bug）
         const ev = getCurrentEvent();
-        // --- 待选事件 ---
-        // 生成只产出待选，不写世界书；点「采用」才真正生效。
-        // 这样反复重生成不会来回写删世界书条目
-        const drafts = Object.values(getMeta().events)
-            .filter(e => e && e.status === 'draft')
-            .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
-        if (drafts.length) {
-            const dHead = el('div', 'eo-sec eo-sec-inline');
-            dHead.appendChild(el('span', null, `待选事件（${drafts.length}/${MAX_DRAFTS}）`));
-            attachHelp(dHead, '生成后先放在这里，不写世界书、不设为当前事件。看看满意就点「采用」，'
-                + '不满意就点「丢弃」，或者调一调偏好再生成一个来比较。最多同时保留 '
-                + MAX_DRAFTS + ' 个，超出时最早的会被挤掉。');
-            page.appendChild(dHead);
 
-            const draftBox = el('div', 'eo-drafts');
-            for (const d of drafts) {
-                draftBox.appendChild(renderDraftCard(d));
-            }
-            page.appendChild(draftBox);
-        }
-
+        // --- 当前事件 ---
+        // 顺序在 2026-11-04 调换过：以前「待选事件」在上面，当前事件挤在下面，
+        // 一进生成页先看到一堆还没生效的草稿，反而看不到正在跑的是哪件事。
+        // 现在当前事件在上，跟它的盘点、完结、废弃、大纲、原文一起收成一组子项。
         if (ev) {
+            const evHead = el('div', 'eo-sec eo-sec-inline');
+            evHead.appendChild(el('span', null, `当前事件 · ${ev.name || '（未命名）'}`));
+            attachHelp(evHead, '正在跑的那件事。它已经写进世界书，下面几项都只针对它：'
+                + '去盘点这一页改节点进度、完结或废弃把它收掉、事件大纲和模型原始输出看它这次生成的内容。');
+            page.appendChild(evHead);
+
             const opOut = el('div', 'eo-hint');
             const row = el('div', 'eo-row');
 
@@ -5497,10 +5574,34 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 } finally { btnAb.disabled = false; }
             });
             row.appendChild(btnAb);
+
+            // 大纲与原文各一个开关，和待选卡那边的「展示大纲 / 展示原文」同一套用法（2026-11-04 危晓要求）。
+            // 以前这两块是自动展开的折叠块，原始输出还压在大纲底下，想看原文得先展开几百行大纲。
+            const hasOutline = !!renderOutlineText(ev.outline);
+            const canRaw = !!ev.outlineRaw && debugEnabled();
+            if (hasOutline) {
+                const btnOutline = el('button', 'eo-btn eo-btn-toggle' + (S.currentShowOutline ? ' eo-on' : ''),
+                    S.currentShowOutline ? '收起大纲' : '展示大纲');
+                btnOutline.type = 'button';
+                btnOutline.addEventListener('click', () => {
+                    S.currentShowOutline = !S.currentShowOutline;
+                    renderPanel();
+                });
+                row.appendChild(btnOutline);
+            }
+            if (canRaw) {
+                const btnRaw = el('button', 'eo-btn eo-btn-toggle' + (S.currentShowRaw ? ' eo-on' : ''),
+                    S.currentShowRaw ? '收起原文' : '展示原文');
+                btnRaw.type = 'button';
+                btnRaw.addEventListener('click', () => {
+                    S.currentShowRaw = !S.currentShowRaw;
+                    renderPanel();
+                });
+                row.appendChild(btnRaw);
+            }
             page.appendChild(row);
             page.appendChild(opOut);
 
-            // 大纲正文：优先展示中文渲染结果，原文折叠备查
             // 解析质量有问题时，先在顶上摆一条红色警示——不能让残缺的大纲看起来像正常的
             const q = ev.parseQuality;
             if (q && !q.ok) {
@@ -5509,33 +5610,53 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     + '。节点进度将无法正常跟踪。可把当前事件废弃后在生成页重新生成，或到日志页查看模型原始输出。';
                 page.appendChild(bad);
             }
-            const outlineText = renderOutlineText(ev.outline);
-            if (outlineText) {
-                const det = el('details', 'eo-details');
-                det.open = true;
-                det.appendChild(el('summary', null, '事件大纲'));
+
+            // 点「展示大纲」就直接摊开（2026-11-04 危晓要求）：不再套折叠块，
+            // 否则点了按钮还得多点一次才看得到内容，和原文那边一个道理
+            if (hasOutline && S.currentShowOutline) {
+                page.appendChild(el('div', 'eo-hint', '事件大纲'));
                 // 用 outline-text 而不是 eo-box：后者有 220px 高度上限，
                 // 大纲几百行会被压在一条小滚动条里，看起来就像没有排版
                 const ob = el('div', 'eo-outline-text');
-                ob.textContent = outlineText;
-                det.appendChild(ob);
-                page.appendChild(det);
+                ob.textContent = renderOutlineText(ev.outline);
+                page.appendChild(ob);
             }
             // 模型原始输出只在调试模式开着时给（2026-11-02 危晓要求）：
-            // 它是排查用的技术细节，平时摆着只会让人误点或误读，关掉后整块不渲染
-            if (ev.outlineRaw && debugEnabled()) {
-                const det = el('details', 'eo-details');
-                const sum = el('summary', null, '模型原始输出（排查用，含英文字段名）');
-                det.appendChild(sum);
+            // 它是排查用的技术细节，平时摆着只会让人误点或误读，关掉后整块不渲染。
+            // 和待选卡一致：点了就摊开，不再套一层折叠块（2026-11-04）
+            if (canRaw && S.currentShowRaw) {
+                page.appendChild(el('div', 'eo-hint', '模型原始输出（排查用，含英文字段名）'));
                 const ob = el('div', 'eo-box');
                 ob.textContent = ev.outlineRaw;
-                det.appendChild(ob);
-                page.appendChild(det);
+                page.appendChild(ob);
             }
-            // 不再 return：待选机制允许在事件进行中继续生成新的来比较，
-            // 只是「采用」时要先把当前这件事收掉
-            page.appendChild(el('div', 'eo-sec', '再生成一个待选'));
         }
+
+        // --- 待选事件 ---
+        // 生成只产出待选，不写世界书；点「采用」才真正生效。
+        // 这样反复重生成不会来回写删世界书条目。
+        // 2026-11-04 起挪到当前事件下面：先看正在跑的，再看攒着的候补。
+        const drafts = Object.values(getMeta().events)
+            .filter(e => e && e.status === 'draft')
+            .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+        if (drafts.length) {
+            const dHead = el('div', 'eo-sec eo-sec-inline');
+            dHead.appendChild(el('span', null, `待选事件（${drafts.length}/${MAX_DRAFTS}）`));
+            attachHelp(dHead, '生成后先放在这里，不写世界书、不设为当前事件。看看满意就点「采用」，'
+                + '不满意就点「丢弃」，或者调一调偏好再生成一个来比较。最多同时保留 '
+                + MAX_DRAFTS + ' 个，超出时最早的会被挤掉。');
+            page.appendChild(dHead);
+
+            const draftBox = el('div', 'eo-drafts');
+            for (const d of drafts) {
+                draftBox.appendChild(renderDraftCard(d));
+            }
+            page.appendChild(draftBox);
+        }
+
+        // 不再 return：待选机制允许在事件进行中继续生成新的来比较，
+        // 只是「采用」时要先把当前这件事收掉
+        if (ev) page.appendChild(el('div', 'eo-sec', '再生成一个待选'));
     }
 
     /** 生成页：新建事件的表单与体验偏好 */
@@ -6373,15 +6494,19 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         // 下面全是空白，用户完全不知道发生了什么。现在把错误画进页面并写日志，其余段照画
         // 注意：分段以后各段是独立函数，看不到本函数的局部变量，所以 s 要显式传进去
         const setS = getSettings();
+        // 顺序按「先配好怎么跑，再调细节，排障开关垫底」排（2026-11-04 危晓定）：
+        // 模型与世界书是跑起来的前提，紧接着是素材来源与打勾规则，历史保留与界面属于细枝末节，
+        // 调试模式只是排障用，占第一位只会让人以为必须先设置它。
         const sections = [
-            ['调试模式', renderSetDebug],
             ['模型', renderSetModel],
+            ['世界书', renderSetBook],
             ['记忆来源', renderSetMemory],
             ['打勾与自动盘点', renderSetTrack],
+            ['自动盘点', renderSetAuto],
+            ['难度档位', renderSetLevels],
             ['历史保留', renderSetRetention],
             ['界面', renderSetUi],
-            ['世界书', renderSetBook],
-            ['难度档位', renderSetLevels],
+            ['调试模式', renderSetDebug],
         ];
         for (const [name, fn] of sections) {
             try {
@@ -6432,7 +6557,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     /**
      * 设置页：调试模式（2026-11-02 危晓要求）
      * 原来叫「调试日志」、挂在「界面」段下面，跟悬浮窗开关混在一起不搭。
-     * 现在改叫「调试模式」，单独放设置页最前面——它是给排障用的总开关，
+     * 现在改叫「调试模式」，排障用的总开关，放在设置页最末（2026-11-04 危晓定：
+     * 它只在排障时用，占第一位会让人以为必须先设置它）。
      * 打开后除了收 debug 级日志，生成页的「模型原始输出」也跟着出现。
      */
     function renderSetDebug(page, s) {
@@ -7006,7 +7132,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     /** 设置页：打勾模式与自动盘点的楼层阈值 */
     function renderSetTrack(page, s) {
         const trSec = el('div', 'eo-sec eo-sec-inline');
-        trSec.appendChild(el('span', null, '打勾模式'));
+        // 屏幕文案与代码里的段名统一成「打勾与自动盘点」（2026-11-04）
+        trSec.appendChild(el('span', null, '打勾与自动盘点'));
         attachHelp(trSec, '「打勾」= 把大纲里的某个节点标成已达成。剧情推进到某个节点时，谁来判断、谁来点，就是这个模式决定的。');
         page.appendChild(trSec);
         const trRow = el('div', 'eo-row');
@@ -7029,7 +7156,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         // 三档各占一行，换行显示，避免糊成一段
         const modeLines = {
-            auto: '自动：盘点后模型自己判断碰没碰到节点，碰到就直接打勾。你什么都不用管。下面还能设每积累多少层楼自动盘点一次。勾错了点节点「撤销」即可，撤销过的节点以后不会再被自动勾上。',
+            auto: '自动：盘点后模型自己判断碰没碰到节点，碰到就直接打勾。你什么都不用管。想在攒够若干层楼时自动盘点，到下面「自动盘点」那一组里设。勾错了点节点「撤销」即可，撤销过的节点以后不会再被自动勾上。',
             semi: '半自动：盘点后模型只给建议，列在盘点页顶部的「待确认的建议」里，节点标成 ◐。点「确认」才算打勾，点「忽略」就不算。适合想保留决定权、又不想自己逐条比对大纲的时候。',
             manual: '手动：模型完全不插手，节点全由你点。适合心里有数、想严格按自己的理解记录进度。',
         };
@@ -7045,70 +7172,87 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         }
         page.appendChild(modeList);
 
-        // 自动模式的子项：自动盘点的楼层间隔
-        if (s.tracker.mode === 'auto') {
-            const sub = el('div', 'eo-sub');
-            sub.appendChild(el('div', 'eo-sub-title', '└ 自动检测间隔'));
-            const afRow = el('div', 'eo-row');
-            afRow.appendChild(el('label', null, '每'));
-            const afIn = el('input', 'eo-input');
-            markKey(afIn, 'set.autoEvery');
-            afIn.type = 'number';
-            afIn.min = '0';
-            afIn.max = '200';
-            afIn.value = String(s.tracker.autoEveryFloors);
-            afIn.style.width = '76px';
-            afIn.addEventListener('change', () => {
-                const v = Math.max(0, Math.min(200, Number(afIn.value) || 0));
-                afIn.value = String(v);
-                getSettings().tracker.autoEveryFloors = v;
-                saveSettings();
-                renderPanel();
-            });
-            afRow.appendChild(afIn);
-            afRow.appendChild(el('span', 'eo-hint', '层楼自动盘点一次'));
-            sub.appendChild(afRow);
-
-            if (getCurrentEvent()) {
-                const cur = countFloors();
-                const base = Number(getCurrentEvent().floorBase);
-                const since = Number.isFinite(base) ? Math.max(0, cur - base) : 0;
-                const every = Math.max(0, Number(s.tracker.autoEveryFloors) || 0);
-                const line = el('div', 'eo-hint',
-                    every > 0
-                        ? `当前对话共 ${cur} 层，距上次盘点已过 ${since} 层，还差 ${Math.max(0, every - since)} 层触发下一次自动盘点。`
-                        : `当前对话共 ${cur} 层。填 0 即关闭自动盘点，只在你手动点「开始盘点」时才跑。`);
-                sub.appendChild(line);
-            }
-            sub.appendChild(el('div', 'eo-hint',
-                '楼层按「玩家楼 + AI 楼」合计，系统消息不算。基点在新建事件和每次盘点成功后归零重计。触发时机是每收到一条新回复后自动检查，攒够间隔就自己跑一次盘点；填 0 则完全关闭自动盘点。'));
-
-            // 手动触发一次
-            const afBtn = el('button', 'eo-btn eo-primary', '现在盘点一次');
-            afBtn.addEventListener('click', async () => {
-                try {
-                    afBtn.disabled = true;
-                    afBtn.textContent = '盘点中…';
-                    await runInventory();
-                    renderPanel();
-                } catch (e) {
-                    afBtn.disabled = false;
-                    afBtn.textContent = '现在盘点一次';
-                    toast('盘点失败：' + (e && e.message || e), { bad: true });
-                }
-            });
-            const afRow2 = el('div', 'eo-row');
-            afRow2.appendChild(afBtn);
-            sub.appendChild(afRow2);
-            page.appendChild(sub);
-        }
-
         page.appendChild(el('div', 'eo-hint',
             '无论哪一档，已触发的节点都会写进世界书条目，供模型下一轮参考。'));
 
         // --- shujuku 诊断已上移到「记忆来源」子项（见上） ---
 
-        // --- 保留数量 ---
+    }
+
+    /**
+     * 设置页：自动盘点（2026-11-04 从「打勾与自动盘点」里拆出来）。
+     * 原来这段挂在打勾模式下面、还是「自动模式才显示」的子项，
+     * 想调自动盘点的楼层间隔得先看懂打勾模式那一屏说明，两件事挤在一组里。
+     */
+    function renderSetAuto(page, s) {
+        const auSec = el('div', 'eo-sec eo-sec-inline');
+        auSec.appendChild(el('span', null, '自动盘点'));
+        attachHelp(auSec, '每收到一条新回复后自动检查一次，攒够设定的楼层数就自己跑一趟盘点。'
+            + '填 0 就是关掉自动盘点，只在你自己点「开始盘点」时才跑。');
+        page.appendChild(auSec);
+
+        // 打勾模式不是自动时，自动盘点这条链路本身不成立，如实写清楚，别让人以为设了会跑
+        const mode = String((s.tracker || {}).mode || 'auto');
+        if (mode !== 'auto') {
+            page.appendChild(el('div', 'eo-hint',
+                '当前打勾模式是「' + (TRACKER_MODES[mode] || mode) + '」，盘点不会自己跑，'
+                + '这一组只在「自动」模式下生效。想让它自动跑，就到「打勾与自动盘点」里改成「自动」。'));
+        }
+
+        const sub = el('div', 'eo-sub');
+        sub.appendChild(el('div', 'eo-sub-title', '└ 自动检测间隔'));
+        const afRow = el('div', 'eo-row');
+        afRow.appendChild(el('label', null, '每'));
+        const afIn = el('input', 'eo-input');
+        markKey(afIn, 'set.autoEvery');
+        afIn.type = 'number';
+        afIn.min = '0';
+        afIn.max = '200';
+        afIn.value = String(s.tracker.autoEveryFloors);
+        afIn.style.width = '76px';
+        afIn.addEventListener('change', () => {
+            const v = Math.max(0, Math.min(200, Number(afIn.value) || 0));
+            afIn.value = String(v);
+            getSettings().tracker.autoEveryFloors = v;
+            saveSettings();
+            renderPanel();
+        });
+        afRow.appendChild(afIn);
+        afRow.appendChild(el('span', 'eo-hint', '层楼自动盘点一次'));
+        sub.appendChild(afRow);
+
+        if (getCurrentEvent()) {
+            const cur = countFloors();
+            const base = Number(getCurrentEvent().floorBase);
+            const since = Number.isFinite(base) ? Math.max(0, cur - base) : 0;
+            const every = Math.max(0, Number(s.tracker.autoEveryFloors) || 0);
+            const line = el('div', 'eo-hint',
+                every > 0
+                    ? `当前对话共 ${cur} 层，距上次盘点已过 ${since} 层，还差 ${Math.max(0, every - since)} 层触发下一次自动盘点。`
+                    : `当前对话共 ${cur} 层。填 0 即关闭自动盘点，只在你手动点「开始盘点」时才跑。`);
+            sub.appendChild(line);
+        }
+        sub.appendChild(el('div', 'eo-hint',
+            '楼层按「玩家楼 + AI 楼」合计，系统消息不算。基点在新建事件和每次盘点成功后归零重计。触发时机是每收到一条新回复后自动检查，攒够间隔就自己跑一次盘点；填 0 则完全关闭自动盘点。'));
+
+        // 手动触发一次
+        const afBtn = el('button', 'eo-btn eo-primary', '现在盘点一次');
+        afBtn.addEventListener('click', async () => {
+            try {
+                afBtn.disabled = true;
+                afBtn.textContent = '盘点中…';
+                await runInventory();
+                renderPanel();
+            } catch (e) {
+                afBtn.disabled = false;
+                afBtn.textContent = '现在盘点一次';
+                toast('盘点失败：' + (e && e.message || e), { bad: true });
+            }
+        });
+        const afRow2 = el('div', 'eo-row');
+        afRow2.appendChild(afBtn);
+        sub.appendChild(afRow2);
+        page.appendChild(sub);
     }
 
     /** 设置页：历史事件保留数量 */
@@ -7208,8 +7352,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 error('世界书自检失败：', e);
             } finally { btnCheck.disabled = false; }
         });
-        bookRow.appendChild(btnCheck);
 
+        // 写入测试与删除测试只给开发排障用（2026-11-04 危晓定），平时不该出现在界面上：
+        // 它们会真的往世界书里写一条、再删掉，对普通使用者是纯粹的风险。
+        // 只在设置里开着「调试模式」时才渲染这两个按钮，连事件监听一起不挂，不留死代码。
         const btnTest = el('button', 'eo-btn', '写入测试');
         const TEST_MARK = '测试条目（可删）';
         const btnClean = el('button', 'eo-btn', '删除测试');
@@ -7261,9 +7407,60 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             } finally { btnClean.disabled = false; }
         });
 
-        bookRow.appendChild(btnTest);
-        bookRow.appendChild(btnClean);
+        bookRow.appendChild(btnCheck);
+        if (s && s.debug) {
+            bookRow.appendChild(btnTest);
+            bookRow.appendChild(btnClean);
+        }
         page.appendChild(bookRow);
+
+        // --- 条目顺序（2026-11-04 危晓要求：事件条目在世界书里往前挪） ---
+        // order 一个数管两件事：世界书列表里排第几、↑Char 那一组里谁先拼进提示词。
+        // 列表是降序显示，数越大越靠前；提示词那侧同样是数大的先写。
+        page.appendChild(el('div', 'eo-hint',
+            '事件条目写进世界书时的顺序值。世界书列表按它从大到小排，模型读到的顺序也按它，'
+            + '数越大越靠前。改动后，已有的事件条目会在下一次盘点写回时一并改成这个数；'
+            + '位置、深度、触发概率不受影响，你在酒馆界面里手动调过的这几项不会被改回去。'));
+        const ordRow = el('div', 'eo-row');
+        ordRow.appendChild(el('label', null, '条目顺序'));
+        const ordIn = el('input', 'eo-input');
+        ordIn.type = 'number';
+        ordIn.min = '0';
+        ordIn.max = String(MAX_ENTRY_ORDER);
+        ordIn.step = '1';
+        ordIn.style.width = '90px';
+        ordIn.value = String(eventOrderValue());
+        markKey(ordIn, 'set.entryOrder');
+        const ordOut = el('div', 'eo-hint');
+        const commitOrder = () => {
+            const raw = String(ordIn.value || '').trim();
+            const n = Number(raw);
+            if (!raw || !Number.isFinite(n)) {
+                ordOut.className = 'eo-bad';
+                ordOut.textContent = '请填一个 0 到 ' + MAX_ENTRY_ORDER + ' 之间的整数，已退回当前值 ' + eventOrderValue();
+                ordIn.value = String(eventOrderValue());
+                return;
+            }
+            const v = Math.min(MAX_ENTRY_ORDER, Math.max(0, Math.round(n)));
+            getSettings().worldbook.entryOrder = v;
+            saveSettings();
+            ordIn.value = String(v);
+            ordOut.className = 'eo-ok';
+            ordOut.textContent = '已保存：' + v + '（默认 ' + DEFAULT_ENTRY_ORDER + '）';
+            log(`事件条目的世界书顺序值改为 ${v}`);
+        };
+        ordIn.addEventListener('change', commitOrder);
+        ordIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') commitOrder(); });
+        const btnOrdDefault = el('button', 'eo-btn', '恢复默认');
+        btnOrdDefault.type = 'button';
+        btnOrdDefault.addEventListener('click', () => {
+            ordIn.value = String(DEFAULT_ENTRY_ORDER);
+            commitOrder();
+        });
+        ordRow.appendChild(ordIn);
+        ordRow.appendChild(btnOrdDefault);
+        page.appendChild(ordRow);
+        page.appendChild(ordOut);
 
         // --- 难度档位 ---
     }

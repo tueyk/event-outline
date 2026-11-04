@@ -22,6 +22,7 @@ const fns = [
     'parseChronicle', 'findChronicleSheet', 'resolveAdapter',
     'upsertEventEntry', 'deleteEventEntry', 'withWriteLock',
     'collectSheetsFromChat', 'detectShujukuMode',
+    'eventOrderValue',
 ];
 for (const fn of fns) {
     const hasDef = new RegExp('function\\s+' + fn + '\\s*\\(').test(src);
@@ -34,6 +35,12 @@ const sandbox = {};
 const runner = new Function('exports', `
 const ENTRY_PREFIX = '▸事件｜';
 const SHUJUKU_EXPORT_PREFIX = 'TavernDB-ACU-CustomExport-';
+// buildEntry 现在要读设置里的顺序值（2026-11-04），这里给个可控的假设置
+const DEFAULT_ENTRY_ORDER = 200;
+const MAX_ENTRY_ORDER = 9999;
+let __entryOrder = 200;
+function getSettings() { return { worldbook: { entryOrder: __entryOrder } }; }
+${src.match(/function eventOrderValue[\s\S]*?\n    }/)[0]}
 ${src.match(/function hashString[\s\S]*?\n    }/)[0]}
 ${src.match(/function entryFingerprint[\s\S]*?\n    }/)[0]}
 ${src.match(/function isForeignManagedEntry[\s\S]*?\n    }/)[0]}
@@ -48,6 +55,8 @@ exports.snapshotForeignEntries = snapshotForeignEntries;
 exports.verifyForeignEntriesUnchanged = verifyForeignEntriesUnchanged;
 exports.nextUid = nextUid;
 exports.buildEntry = buildEntry;
+exports.setEntryOrder = (v) => { __entryOrder = v; };
+exports.takeConst = (name) => eval(name);
 `);
 
 try {
@@ -122,6 +131,24 @@ check('条目 constant=true', built.constant === true);
 check('条目无 ignoreBudget', !('ignoreBudget' in built) || built.ignoreBudget === false);
 check('条目 uid 正确', built.uid === 7);
 check('条目 key 为空', Array.isArray(built.key) && built.key.length === 0);
+// ---- 10b. 条目顺序值（2026-11-04 危晓定：事件条目在世界书里往前挪）----
+// order 一个数管两件事：列表排序与 ↑Char 组内的拼接先后。默认 200，设置里可改，越界与非法值都收敛。
+check('默认顺序是 200', built.order === 200, 'order=' + built.order);
+check('默认值常量是 200', sandbox.takeConst('DEFAULT_ENTRY_ORDER') === 200);
+check('上限常量是 9999', sandbox.takeConst('MAX_ENTRY_ORDER') === 9999);
+sandbox.setEntryOrder(500);
+check('改成 500 后写进去就是 500', sandbox.buildEntry(8, 'x', 'y').order === 500);
+sandbox.setEntryOrder('abc');
+check('非法值退回 200', sandbox.buildEntry(8, 'x', 'y').order === 200);
+sandbox.setEntryOrder(-50);
+check('负数收敛到 0', sandbox.buildEntry(8, 'x', 'y').order === 0);
+sandbox.setEntryOrder(123456);
+check('超上限收敛到 9999', sandbox.buildEntry(8, 'x', 'y').order === 9999);
+sandbox.setEntryOrder(120.6);
+check('小数四舍五入', sandbox.buildEntry(8, 'x', 'y').order === 121);
+sandbox.setEntryOrder(200);
+// 旧的写死值 100 不许再回来：它会把事件条目压在一堆蓝灯设定中间
+check('buildEntry 不再写死 100', !/order:\s*100\b/.test(src.match(/function buildEntry[\s\S]*?\n    }/)[0]));
 
 // ---- 11. collectSheetsFromChat：应取最新快照，不能被旧楼层覆盖 ----
 // 回归用例。shujuku 经典模式下每个 AI 楼层都存一份纪要表完整快照，逐层增长；
@@ -946,9 +973,12 @@ exports.r = renderOutlineText;
     check('不再沿用旧名「调试日志」', !src.includes("'调试日志'"));
     check('调试开关单独成段', src.includes('function renderSetDebug(page, s)'));
     const setPageIdx = src.indexOf('const sections = [');
-    const secChunk = src.slice(setPageIdx, setPageIdx + 400);
-    check('调试段排在设置页最前', secChunk.trim().startsWith("const sections = [\n            ['调试模式', renderSetDebug],"),
+    const secChunk = src.slice(setPageIdx, setPageIdx + 700);
+    // 2026-11-04 危晓改口：调试是排障开关，放最末；打头的是模型与世界书
+    check('模型段排在设置页最前', secChunk.trim().startsWith("const sections = [\n            ['模型', renderSetModel],"),
         secChunk.split('\n').slice(0, 3).join(' / '));
+    check('调试段排在设置页最末', secChunk.indexOf("['调试模式', renderSetDebug],") > secChunk.indexOf("['界面', renderSetUi],"),
+        '调试段没有出现在界面段之后');
     check('界面段不再管调试', !/function renderSetUi\(page, s\) \{[\s\S]*?dbgChk/.test(src),
         'renderSetUi 里还有调试开关');
 
