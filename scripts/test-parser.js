@@ -22,6 +22,15 @@ const qualitySrc = (() => {
     return src.slice(s, e);
 })();
 
+// 骨架单一真源（2026-11-04 A1）：checkOutlineQuality 现在靠 OUTLINE_TOP_KEYS 决定还要查哪些键，
+// 沙箱里必须把真源码那份常量带进来，不能在这里另抄一份键名表
+const skeletonSrc = (() => {
+    const s = src.indexOf('const OUTLINE_SKELETON = [');
+    const t = src.indexOf('const OUTLINE_TOP_KEYS');
+    const e = src.indexOf('})();', t) + 5;
+    return src.slice(s, e);
+})();
+
 // 节点字段统一读取，checkOutlineQuality 依赖
 const nodeHelpersSrc = (() => {
     const parts = ['NODE_TEXT_KEYS', 'NODE_TRIGGER_KEYS'].map((name) => {
@@ -51,6 +60,7 @@ ${src.match(/function parseOutline[\s\S]*?\n    }/)[0]}
 ${src.match(/function parseInventory[\s\S]*?\n    }/)[0]}
 ${qualitySrc}
 ${nodeHelpersSrc}
+${skeletonSrc}
 exports.extractCodeBlock = extractCodeBlock;
 exports.parseSimpleYaml = parseSimpleYaml;
 exports.checkOutlineQuality = checkOutlineQuality;
@@ -176,11 +186,19 @@ check('无 JSON 时不崩', inv3.structured === null && typeof inv3.raw === 'str
 // 这套检查存在的理由：块标量那个 bug 把 nodes 整块吞掉，当时只落一句 warn，
 // 事件卡看起来跟正常的一样，用户以为「就是这么设计的」。现在结构缺陷要能自报。
 {
+    // A1（2026-11-04）之后，校验会把骨架里每个一级键都查一遍，所以「完整大纲」得真的把
+    // 十一个键都写全；以前只写五项就算完整，那是校验漏查，不是大纲完整
     const good = {
+        event_name: '石桥镇失踪案',
         event_brief: '简介', core_truth: '真相',
+        event_type: { primary: '案件推理', secondary: ['悬疑'] },
         nodes: [{ id: 1, type: '物证', info: '内容' }],
         min_nodes_for_deduction: [1],
         characters: { helpers: [{ name: '甲' }] },
+        paths: [{ step: 1, node: 1, route: '走', must: '必经' }],
+        time_pressure: { countdown: '傍晚前', duration: '一天', timeout_result: '挂账', delay_cost: '线索变冷' },
+        danger: { lethality: '低', failure: '受伤', tolerance: '一次', threat_source: '家仆' },
+        forbidden: ['不得透露'],
     };
     const q = sandbox.checkOutlineQuality(good);
     check('完整大纲判定通过', q.ok === true, JSON.stringify(q.missing));
@@ -207,15 +225,24 @@ check('无 JSON 时不崩', inv3.structured === null && typeof inv3.raw === 'str
     // 实机回归：「入学首日」那次模型用 points_to 写节点正文，旧规则只认 info/desc/content，
     // 于是 8 个节点全被判成「没有内容」，事件详情页挂着红色警示
     const withPointsTo = {
+        event_name: '入学首日',
         event_brief: 'b', core_truth: 'c', min_nodes_for_deduction: [1],
+        event_type: { primary: '案件推理', secondary: ['悬疑'] },
         characters: { helpers: [{ name: '甲' }] },
+        paths: [{ step: 1, node: 1, route: '走', must: '必经' }],
+        time_pressure: { countdown: '傍晚前', duration: '一天', timeout_result: '挂账', delay_cost: '线索变冷' },
+        danger: { lethality: '低', failure: '受伤', tolerance: '一次', threat_source: '家仆' },
+        forbidden: ['不得透露'],
         nodes: [
             { id: 1, type: '环境', trigger: '走廊', points_to: '校规像普通女校', is_misleading: true, refute_by: [4] },
             { id: 2, type: '物证', trigger: '看证', points_to: '印位全空' },
         ],
     };
     const q = sandbox.checkOutlineQuality(withPointsTo);
-    check('points_to 也算有内容', q.ok === true, JSON.stringify(q.missing));
+    // A1 之后 q.ok 还要求另外六个顶层键齐全，所以这里单独盯「节点有没有被判成没内容」，
+    // 否则这条用例会被无关的缺键报错连带打挂，看不出它本来测的是什么
+    check('points_to 也算有内容',
+        !q.missing.some(m => m.includes('没有内容')), JSON.stringify(q.missing));
     check('points_to 节点被正确识别', sandbox.nodeText(withPointsTo.nodes[0]) === '校规像普通女校');
 }
 

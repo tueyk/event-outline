@@ -344,6 +344,10 @@ const labelSrc = src.match(/const OUTLINE_KEY_LABEL = \{[\s\S]*?\n    \};/)[0];
 const nodeTypeSrc = src.match(/const NODE_TYPE_LABEL = \{[\s\S]*?\n    \};/)[0];
 const eventTypeSrc = src.match(/const EVENT_TYPE_LABEL = \{[\s\S]*?\n    \};/)[0];
 const labelFnSrc = src.match(/function labelOf[\s\S]*?\n    }/)[0];
+// keyText 是 renderOutlineText 的依赖（2026-11-04 加），沙箱里必须一起带进来。
+// 注意顺序：new Function 里 const 提升不跨块，keyText 用到了 labelOf 与 OUTLINE_KEY_LABEL，
+// 所以这两样必须排在它前面；eventTypeSrc 也必须在 renderSrc 之前。
+const keyTextSrc = src.match(/function keyText[\s\S]*?\n    }\n/)[0];
 const renderBox = {};
 const nodeHelpersSrc = (() => {
     const parts = ['NODE_TEXT_KEYS', 'NODE_TRIGGER_KEYS'].map((name) => {
@@ -361,7 +365,7 @@ const nodeHelpersSrc = (() => {
     }
     return parts.join('\n');
 })();
-new Function('exports', `${labelSrc}\n${nodeTypeSrc}\n${eventTypeSrc}\n${labelFnSrc}\n${nodeHelpersSrc}\n${renderSrc}\nexports.render = renderOutlineText;`)(renderBox);
+new Function('exports', `${labelSrc}\n${nodeTypeSrc}\n${eventTypeSrc}\n${labelFnSrc}\n${keyTextSrc}\n${nodeHelpersSrc}\n${renderSrc}\nexports.render = renderOutlineText;`)(renderBox);
 
 {
     const outline = {
@@ -1100,17 +1104,53 @@ exports.r = renderOutlineText;
         else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
     }
     const body = src.slice(s, e);
+    const posFn = 0; // body 已经是函数内部，从 0 开始搜
+    // A1（2026-11-04）：骨架本身已抽成 OUTLINE_SKELETON 常量，不在 buildOutlinePrompt 里了。
+    // 所以「骨架内容」这批判据改成对常量取，函数里只查它有没有引用常量。
+    const sk0 = src.indexOf('const OUTLINE_SKELETON = [');
+    const sk1 = src.indexOf('].join(', sk0);
+    const skBody = src.slice(sk0, sk1);
 
     check('prompt 含 yaml 骨架', body.includes('```yaml'));
+    check('prompt 引用骨架常量', body.includes('OUTLINE_SKELETON,'));
+    // 顶层键清单必须从骨架派生，不能手写第二份（2026-11-04 A1）。
+    // 这一条盯的就是「手抄清单」这个动作本身：以前正是那一句手写的九键清单与骨架打架，
+    // 模型信短的、骨架里多的两个键就丢了。改完把清单写回去，这里要立刻红。
+    check('顶层键清单从骨架派生', body.includes('OUTLINE_TOP_KEYS.join('));
+    check('清单没有手写第二份', !/顶层键为 [a-z_]+ \/ [a-z_]+/.test(body));
     check('骨架要求逐字照用', body.includes('字段名必须逐字照用'));
     check('骨架禁止改成中文键', body.includes('不许改写成中文'));
-    check('骨架含角色 name', /-\s*name:\s*<角色名>/.test(body));
-    check('骨架含角色 identity', /identity:\s*<身份>/.test(body));
-    check('骨架含路径 route', /route:\s*<这一步发生什么>/.test(body));
-    check('骨架含路径 must', /must:\s*<必经\|可跳过>/.test(body));
-    check('骨架含时间压力', body.includes('time_pressure:'));
-    check('骨架含危险程度', body.includes('danger:'));
+    // A2（2026-11-04）：骨架从「半填模板」换成「填好的完整示例」，值不再是 <角色名> 这类占位符。
+    // 判据改成「这几个键真的出现在示例里，而且后面跟着实际内容」，不再盯尖括号写法。
+    check('骨架含角色 name', /name: \S+/.test(skBody));
+    check('骨架含角色 identity', /identity: \S+/.test(skBody));
+    check('骨架含路径 route', /route: \S+/.test(skBody));
+    check('骨架含路径 must', /must: (必经|可跳过)/.test(skBody));
+    // 示例里不该再有尖括号占位符：那正是 A2 要消掉的东西，回来一个就红
+    check('骨架里没有尖括号占位符', !/<[^>\n]{1,20}>/.test(skBody), (skBody.match(/<[^>\n]{1,20}>/g) || []).join(','));
+    // 块标量与内联列表是 YAML 解析失败的头号来源，示例里不许出现。
+    // 骨架常量每行是 'xxx', 形式，行尾先有引号再有逗号，所以正则不能拿 $ 收尾，
+    // 第一次就是写成 /:\s*[|>]\s*$/ 才漏过去的（反向验证抓出来的）
+    check('骨架里没有块标量', !/:\s*[|>]\s*',$/m.test(skBody),
+        (skBody.match(/:\s*[|>]\s*',$/gm) || []).join(','));
+    check('骨架里没有内联列表', !/:\s*\[/.test(skBody));
+    check('骨架含时间压力', skBody.includes('time_pressure:'));
+    check('骨架含危险程度', skBody.includes('danger:'));
     check('骨架说明大纲外写法', body.includes('step 填 "【大纲外】"'));
+    // 骨架必须排在【世界观设定】与【当前剧情】之后（2026-11-04 A2）。
+    // 盯的是「生成点之前最后读到的是骨架」这一点：只比较这几块在函数里的先后。
+    // 找文本要从函数开头往后搜（带 start 参数），否则可能命中函数外的同名注释；
+    // 而且必须比「真正的世界观正文行」，光比标题会命中开头那句指针。
+    const after = (needle, from) => body.indexOf(needle, from == null ? posFn : from);
+    const posWb = after('【世界观设定】（角色世界书的常驻条目');
+    const posCtx = after('【当前剧情】', posWb);
+    const posSk = after('OUTLINE_SKELETON,');
+    const posCons = after('【一致性】', posSk > 0 ? posSk : 0);
+    check('骨架排在世界观与剧情之后',
+        posWb >= 0 && posCtx > posWb && posSk > posCtx,
+        `世界观 ${posWb} / 剧情 ${posCtx} / 骨架 ${posSk}`);
+    // 【一致性】是骨架的后半截约束，必须紧跟在骨架后面，不能被世界观劈开
+    check('一致性与骨架挨着', posCons > posSk && posSk > 0, `骨架 ${posSk} / 一致性 ${posCons}`);
     check('骨架要求节点连续编号', body.includes('从 1 连续编号'));
 }
 
@@ -1123,15 +1163,46 @@ exports.r = renderOutlineText;
         else if (src[i] === '}') { d--; if (d === 0) { e = i + 1; break; } }
     }
     const qSrc = src.slice(s, e);
+    // A1（2026-11-04）：校验集合改成从骨架派生，沙箱里必须有这两份常量，
+    // 而且要用真源码里那两份，不能在这里另抄一份——抄一份就又把「三处手抄」请回来了
+    const skStart = src.indexOf('const OUTLINE_SKELETON = [');
+    const skEnd = src.indexOf('].join(', skStart);
+    const skEndLine = src.indexOf('\n', skEnd) + 1;
+    const skTextEnd = src.indexOf('})();', src.indexOf('const OUTLINE_TOP_KEYS')) + 5;
+    const skConsts = src.slice(skStart, skTextEnd);
     const box = {};
     new Function('exports', `
 function log(){} function warn(){} function error(){} function debug(){}
 const NODE_TEXT_KEYS = ['info','desc','content','points_to','detail','description','reveal'];
 function nodeText(n){ for(const k of NODE_TEXT_KEYS){ if(n&&n[k]) return String(n[k]); } return ''; }
 function nodeId(n){ return n && n.id != null ? Number(n.id) : null; }
+${skConsts}
 ${qSrc}
 exports.q = checkOutlineQuality;
+exports.topKeys = OUTLINE_TOP_KEYS;
+exports.skeleton = OUTLINE_SKELETON;
 `)(box);
+
+    // ---- 骨架单一真源（A1）----
+    // 以前清单、骨架、校验三处各写一份，清单漏 2 个键、校验只查 5 个。
+    // 这里盯的是「它们确实来自同一份骨架」，不是某几个键名恰好写对了。
+    check('顶层键从骨架派生', box.topKeys.length === 11, '实际 ' + box.topKeys.length + ' 个：' + box.topKeys.join(','));
+    check('派生清单含 time_pressure', box.topKeys.indexOf('time_pressure') >= 0);
+    check('派生清单含 danger', box.topKeys.indexOf('danger') >= 0);
+    check('派生清单顺序与骨架一致',
+        box.topKeys[0] === 'event_name' && box.topKeys[box.topKeys.length - 1] === 'forbidden',
+        box.topKeys.join(','));
+    // 骨架里每个一级键，都必须能被校验查到（缺了要报）
+    const eachKeyReported = box.topKeys.every(k => {
+        const r = box.q({
+            nodes: [{ id: 1, info: 'x' }], min_nodes_for_deduction: [1], event_brief: 'b', core_truth: 'c',
+            characters: { helpers: [{ name: 'a' }] }, paths: [{ step: 1, node: 1, route: 'r', must: '必经' }],
+            event_type: { primary: '案件推理' }, forbidden: ['x'], time_pressure: { countdown: 'x' }, danger: { lethality: 'x' },
+            [k]: undefined,
+        });
+        return r.missing.some(x => x.indexOf(k) >= 0 || x.indexOf('）缺失') > 0 && k === 'event_name');
+    });
+    check('骨架里每个一级键缺失都会报', eachKeyReported, box.topKeys.join(','));
 
     // 按骨架写：无漂移
     const good = box.q({
@@ -1173,13 +1244,19 @@ exports.q = checkOutlineQuality;
     const box = {};
     new Function('exports', `
 function log(){} function warn(){} function error(){} function debug(){}
-function labelOf(k){ return k; }
-const EVENT_TYPE_LABEL = {};
+// 这里用真源码的 OUTLINE_KEY_LABEL / EVENT_TYPE_LABEL / labelOf / keyText，不能再自己编一个假 labelOf。
+// 以前沙箱里 labelOf 是 function labelOf(k){ return k; }，等于把「查表翻中文」这件事整个跳过，
+// 于是「时间压力的子键露英文」这个 bug 在测试里一直是绿的（2026-11-04 发现）。
+// 注意 eval 一个 const 声明放进本作用域会撞名，所以直接用源码文本拼进来。
+${src.match(/const OUTLINE_KEY_LABEL = \{[\s\S]*?\n    \};/)[0]}
+function labelOf(k){ const s = String(k||''); return OUTLINE_KEY_LABEL[s] || OUTLINE_KEY_LABEL[s.toLowerCase()] || s; }
+${src.match(/const EVENT_TYPE_LABEL = \{[\s\S]*?\n    \};/)[0]}
 const NODE_TYPE_LABEL = {};
 const NODE_TEXT_KEYS = ['info','desc','content','points_to','detail','description','reveal'];
 const NODE_TRIGGER_KEYS = ['trigger'];
-${cut('nodeId')}${cut('nodeText')}${cut('nodeTrigger')}${cut('renderOutlineText')}
+${cut('nodeId')}${cut('nodeText')}${cut('nodeTrigger')}${cut('keyText')}${cut('renderOutlineText')}
 exports.r = renderOutlineText;
+exports.keyText = keyText;
 `)(box);
 
     const out = box.r({
@@ -1198,6 +1275,31 @@ exports.r = renderOutlineText;
     check('角色 identity 可读', out.includes('千夏（2班班长）'), '');
     check('时间压力会显示', out.includes('时间压力：') && out.includes('倒计时：傍晚前'), '');
     check('危险程度会显示', out.includes('危险程度：') && out.includes('致死性：低'), '');
+
+    // ---- 英文键不许露到界面上（2026-11-04 危晓实机报的 bug）----
+    // A2 把骨架换成英文键的完整示例后，模型开始输出 countdown / lethality 这类英文子键，
+    // 而 dumpGroup 当时直接打原始键名，展示大纲整段变英文。
+    const en = box.r({
+        event_brief: 'b',
+        event_type: { primary: 'investigation', secondary: ['mystery'] },
+        nodes: [{ id: 1, type: 'evidence', trigger: 'walk', info: '内容' }],
+        min_nodes_for_deduction: [1],
+        characters: { helpers: [{ name: '甲' }] },
+        paths: [{ step: 1, node: 1, route: '走廊', must: '必经' }],
+        time_pressure: { countdown: 'a', duration: 'b', timeout_result: 'c', delay_cost: 'd' },
+        danger: { lethality: 'x', failure: 'y', tolerance: 'z', threat_source: 'w' },
+        forbidden: ['x'],
+    });
+    check('时间压力子键译成中文', en.includes('倒计时：a') && en.includes('拖延代价：d'), '');
+    check('危险程度子键译成中文', en.includes('致死性：x') && en.includes('威胁来源：w'), '');
+    // 事件类型也要翻：模型写 investigation / mystery 时不能原样显示英文。
+    // 这一条单独写，因为整体兜底那条只查「行首英文键」，看不见行内出现的类型词
+    check('事件类型译成中文', en.includes('事件类型：案件推理（兼 悬疑）'), en.split('\n')[1] || '');
+    // 整体兜底：渲染结果里除了模型写的值，不该再有「英文单词：」形式的键
+    const rawKeyLines = en.split('\n').filter(l => /^\s*[a-z_]{3,}\s*[:：]/.test(l));
+    check('渲染结果没有裸英文键', rawKeyLines.length === 0, rawKeyLines.join(' / '));
+    // 标签表之外的键也要有中文兜底，不能原样吐回来
+    check('未知键有兜底', box.keyText('some_unknown_key') !== 'some_unknown_key', box.keyText('some_unknown_key'));
 }
 
 // ---- 31. 条目位置定位（世界书被重排后仍能找到） ----

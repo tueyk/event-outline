@@ -9,7 +9,7 @@
     'use strict';
 
     const MODULE = 'event_outline';
-    const VERSION = '0.1.4';
+    const VERSION = '0.1.5';
     const ENTRY_PREFIX = '▸事件｜';
     // 待选事件最多留几个：生成不再直接写世界书，草稿得有个上限
     const MAX_DRAFTS = 3;
@@ -87,6 +87,159 @@
     // 200 是危晓点的数，比原来写死的 100 靠前；上限 9999 与酒馆自己排序能认的范围一致。
     const DEFAULT_ENTRY_ORDER = 200;
     const MAX_ENTRY_ORDER = 9999;
+
+    // ---------- 大纲骨架（单一真源，2026-11-04 A1）----------
+    // 以前骨架写死在 buildOutlinePrompt 里，顶层键清单是另一句手写的话，checkOutlineQuality
+    // 的必查集合又是第三份手抄——三处各自漂移，结果是清单漏 2 个键、校验只查 5 个。
+    // 现在只有这一份骨架：清单从它数键，校验也从它数键，改骨架就是改这三处。
+    // 注意 OUTLINE_TOP_KEYS 用正则从骨架原文里取一级键，不依赖解析器（解析器只为模型输出服务，
+    // 不该被自己的模板反过来依赖）。
+    // 两条完整示例，不是半填的模板（2026-11-04 A2，危晓定：A 档第 2 条）。
+    // 理由见 2026-11-04 复核那份：原骨架 51 行里 36 行带尖括号，模型在「照抄模板」和
+    // 「替换内容」之间摇摆，最常见的是把 <事件名>、[<可选，误导项填节点编号>] 原样留在输出里。
+    // 给一条填好的完整示例，图的不是省字，是让每个值都显得「这次必须重写」。
+    // 第二条只差一处：第一个节点是误导项，带 refute_by。「refute_by 是可选的」这件事
+    // 用示例表达，不用尖括号描述——这是原来最容易照抄的一行。
+    // 两条都是纯单行标量，没有块标量（| 或 >）与内联列表，这两样是 YAML 解析失败的头号来源。
+    const OUTLINE_SKELETON = [
+        'event_name: 石桥镇失踪案',
+        'event_brief: 镇上第二个女孩在同一个雨夜消失，玩家要在钟声停下前找出把人带走的东西。',
+        'event_type:',
+        '  primary: 案件推理',
+        '  secondary:',
+        '    - 悬疑',
+        '    - 失踪',
+        'core_truth: 表面是连环拐带，实际是镇长用女孩替换矿难遇难者名册；真正的动机是他自己要掩盖那场矿难。',
+        'nodes:',
+        '  - id: 1',
+        '    type: 物证',
+        '    trigger: 玩家走进失踪女孩的卧室',
+        '    info: 床单上有向外拖拽的压痕，说明她不是自己走的。',
+        '  - id: 2',
+        '    type: 证言',
+        '    trigger: 玩家询问巷口的洗衣妇',
+        '    info: 她说那晚听见钟声响了两次，比平时多一次。',
+        'min_nodes_for_deduction:',
+        '  - 1',
+        '  - 2',
+        'characters:',
+        '  helpers:',
+        '    - name: 周向文',
+        '      identity: 镇上的老更夫',
+        '      motive: 他认得那口多余的钟声',
+        '      cost: 要玩家先替他打一壶酒',
+        '  obstructers:',
+        '    - name: 镇长',
+        '      identity: 主持失踪调查的人',
+        '      reason: 他会把调查引向山上的狼',
+        '      resolvable_by: 拿名册上的替换痕迹当面问他',
+        '  informants:',
+        '    - name: 洗衣妇',
+        '      info_known: 钟声在那一夜响过两次，第二次没有更夫在场',
+        '  behind_scenes:',
+        '    - name: 矿场东家',
+        '      reveal: forbidden',
+        '      exposure_path: 名册、钟声、镇长三处对不上时才浮出来',
+        'paths:',
+        '  - step: 1',
+        '    node: 1',
+        '    route: 玩家进卧室看压痕，决定去向洗衣妇打听',
+        '    must: 必经',
+        '    risk: 低',
+        '    fail: 被镇长撞见，后面问名册要多绕一圈',
+        'time_pressure:',
+        '  countdown: 当晚的第二次钟声之前',
+        '  duration: 约两个时辰',
+        '  timeout_result: 第三个女孩被带走',
+        '  delay_cost: 洗衣妇会被支走，钟声这条线索断掉',
+        'danger:',
+        '  lethality: 低',
+        '  failure: 被当成外人赶出镇子',
+        '  tolerance: 一次',
+        '  threat_source: 镇长的家仆与夜里的看守',
+        'forbidden:',
+        '  - 不得提前说出矿难',
+        '  - 不得让镇长直接交出真相',
+    ].join('\n');
+
+    // 第二条示例：只差一处——节点 1 是误导项，带 refute_by 指向能推翻它的节点 4。
+    // 用来示范「refute_by 什么时候写、怎么写」，把可选语义放进示例里而不是说明里。
+    const OUTLINE_SKELETON_MISLEAD = [
+        'event_name: 石桥镇失踪案',
+        'event_brief: 镇上第二个女孩在同一个雨夜消失，玩家要在钟声停下前找出把人带走的东西。',
+        'event_type:',
+        '  primary: 案件推理',
+        '  secondary:',
+        '    - 悬疑',
+        '    - 失踪',
+        'core_truth: 表面是连环拐带，实际是镇长用女孩替换矿难遇难者名册；真正的动机是他自己要掩盖那场矿难。',
+        'nodes:',
+        '  - id: 1',
+        '    type: 物证',
+        '    trigger: 玩家走进失踪女孩的卧室',
+        '    info: 床单上有向外拖拽的压痕，看着像是被人硬拖走的。',
+        '    refute_by:',
+        '      - 4',
+        '  - id: 2',
+        '    type: 证言',
+        '    trigger: 玩家询问巷口的洗衣妇',
+        '    info: 她说那晚听见钟声响了两次，比平时多一次。',
+        'min_nodes_for_deduction:',
+        '  - 1',
+        '  - 2',
+        'characters:',
+        '  helpers:',
+        '    - name: 周向文',
+        '      identity: 镇上的老更夫',
+        '      motive: 他认得那口多余的钟声',
+        '      cost: 要玩家先替他打一壶酒',
+        '  obstructers:',
+        '    - name: 镇长',
+        '      identity: 主持失踪调查的人',
+        '      reason: 他会把调查引向山上的狼',
+        '      resolvable_by: 拿名册上的替换痕迹当面问他',
+        '  informants:',
+        '    - name: 洗衣妇',
+        '      info_known: 钟声在那一夜响过两次，第二次没有更夫在场',
+        '  behind_scenes:',
+        '    - name: 矿场东家',
+        '      reveal: forbidden',
+        '      exposure_path: 名册、钟声、镇长三处对不上时才浮出来',
+        'paths:',
+        '  - step: 1',
+        '    node: 1',
+        '    route: 玩家进卧室看压痕，决定去向洗衣妇打听',
+        '    must: 必经',
+        '    risk: 低',
+        '    fail: 被镇长撞见，后面问名册要多绕一圈',
+        'time_pressure:',
+        '  countdown: 当晚的第二次钟声之前',
+        '  duration: 约两个时辰',
+        '  timeout_result: 第三个女孩被带走',
+        '  delay_cost: 洗衣妇会被支走，钟声这条线索断掉',
+        'danger:',
+        '  lethality: 低',
+        '  failure: 被当成外人赶出镇子',
+        '  tolerance: 一次',
+        '  threat_source: 镇长的家仆与夜里的看守',
+        'forbidden:',
+        '  - 不得提前说出矿难',
+        '  - 不得让镇长直接交出真相',
+    ].join('\n');
+
+    /**
+     * 骨架里的一级键（顶格、以「键:」或「键: 值」开头的那些行）。
+     * 缩进的行都属于上一层，不计入；列表项的「- 」也不计入。
+     * 清单与校验都从这里取，别在别处再手写一份。
+     */
+    const OUTLINE_TOP_KEYS = (() => {
+        const keys = [];
+        for (const line of OUTLINE_SKELETON.split('\n')) {
+            const m = /^([A-Za-z_][A-Za-z0-9_]*):/.exec(line);
+            if (m && keys.indexOf(m[1]) < 0) keys.push(m[1]);
+        }
+        return keys;
+    })();
 
     // 悬浮窗尺寸（吸附竖条与展开图标）
     const FAB_TAB_VISIBLE = 20;   // 吸附时可见宽度
@@ -2005,76 +2158,46 @@
             '- 误导：允许 1-2 个误导性信息，但每个误导信息必须有一条可推翻它的反向证据，且该证据必须是信息节点清单中的条目，须注明 refute_by 节点编号',
             '- 允许根据当前情况设计大纲之外的合理路径，但每条必须标注「【大纲外】」并说明为什么现在会出现这条路径',
             '',
-            '输出格式：只输出一个 YAML 代码块，顶层键为 event_name / event_brief / event_type / core_truth / nodes / min_nodes_for_deduction / characters / paths / forbidden。',
-            '',
-            '【字段名必须逐字照用】下面这份骨架列出了每个键的确切拼写。',
-            '键名一律用英文小写加下划线，不许改写成中文、不许自造同义词、不许增减层级。',
-            '只有尖括号里的内容要你填，其余照抄。',
-            '',
-            '```yaml',
-            'event_name: <事件名>',
-            'event_brief: <一句话简介>',
-            'event_type:',
-            '  primary: <案件推理|谈判交涉|探险探索|生存危机|社交博弈|战斗冲突|日常委托|禁忌秘辛>',
-            '  secondary: [<最多3个>]',
-            'core_truth: |',
-            '  <多层真相，逐条列>',
-            'nodes:',
-            '  - id: 1',
-            '    type: <物证|证言|环境|时间线|关系>',
-            '    trigger: <触发条件>',
-            '    info: <指向的信息或后果>',
-            '    refute_by: [<可选，误导项填节点编号>]',
-            'min_nodes_for_deduction: [<推理必需的节点编号>]',
-            'characters:',
-            '  helpers:',
-            '    - name: <角色名>',
-            '      identity: <身份>',
-            '      motive: <动机，各人不同>',
-            '      cost: <条件或代价，无则填 无>',
-            '  obstructers:',
-            '    - name: <角色名>',
-            '      identity: <身份>',
-            '      reason: <阻碍理由>',
-            '      resolvable_by: <化解方式>',
-            '  informants:',
-            '    - name: <角色名>',
-            '      info_known: <掌握的信息>',
-            '  behind_scenes:',
-            '    - name: <角色名或势力>',
-            '      reveal: forbidden',
-            '      exposure_path: <暴露路径>',
-            'paths:',
-            '  - step: 1',
-            '    node: <对应节点编号，纯数字>',
-            '    route: <这一步发生什么>',
-            '    must: <必经|可跳过>',
-            '    risk: <无|低|中|高>',
-            '    fail: <失败后果>',
-            'time_pressure:',
-            '  countdown: <描述>',
-            '  duration: <描述>',
-            '  timeout_result: <描述>',
-            '  delay_cost: <描述>',
-            'danger:',
-            '  lethality: <描述>',
-            '  failure: <描述>',
-            '  tolerance: <描述>',
-            '  threat_source: <描述>',
-            'forbidden:',
-            '  - <禁止事项>',
-            '```',
-            '',
-            '【大纲外路径】的写法：与普通路径同结构，但 step 填 "【大纲外】"，并多加一个 why: <为什么现在会出现这条路径>。',
-            '【一致性】nodes 的 id 必须从 1 连续编号；paths 里的 node 只能引用已列出的节点编号；',
-            'min_nodes_for_deduction、refute_by 里的编号同样只能引用已列出的节点。',
-            '',
-            '---',
+            // 【骨架挪到最后】（2026-11-04 A2，危晓定）。
+            // 以前骨架在 prompt 中段，它后面还压着【世界观设定】与【当前剧情】两块，
+            // 常见三五千字；模型开始生成时最后读到的是别人的剧情摘要，不是自己对格式的承诺。
+            // 生成点之前的信息权重大于更早的信息，所以骨架必须贴着生成点。
+            // 回滚：把这一段整块挪回【硬性要求】后面即可，内容一个字不用改。
             '【世界观设定】（角色世界书的常驻条目，本世界的规则与设定，所有内容必须与之相容）',
             worldBook || '（未加载）',
             '',
             '【当前剧情】',
             contextText || '（无）',
+            '',
+            '---',
+            // 顶层键清单由骨架派生（2026-11-04 A1）：以前这里手写九个键，骨架里其实有十一个，
+            // 模型信了这句更短的硬约束，time_pressure 与 danger 就省了，校验也查不出来
+            '输出格式：只输出一个 YAML 代码块，顶层键为 ' + OUTLINE_TOP_KEYS.join(' / ') + '。',
+            '',
+            '【字段名必须逐字照用】下面是一条填好的完整示例，结构照抄，内容全部按本次事件重写。',
+            '键名一律用英文小写加下划线，不许改写成中文、不许自造同义词、不许增减层级。',
+            '示例里的值（事件名、人名、文本）都是上一件事留下来的，没有一个字能用，全部换成本次的内容。',
+            '',
+            // 骨架从这里引用单一真源（2026-11-04 A1）。以前这 53 行原样抄在本函数里，
+            // 与顶层键清单、checkOutlineQuality 的必查集合各自独立，三处会慢慢漂移
+            '```yaml',
+            OUTLINE_SKELETON,
+            '```',
+            '',
+            '【误导项怎么写】上面第一条示例里所有节点都是真实线索。如果本次设计了误导性信息，',
+            '那么被误导的那个节点要多一个 refute_by，列出能推翻它的节点编号，写法照下例：',
+            '',
+            '```yaml',
+            OUTLINE_SKELETON_MISLEAD,
+            '```',
+            '',
+            '两条示例只差一处：第一条没有任何节点带 refute_by，第二条的第一个节点带 refute_by。',
+            '没有误导项就照第一条写，有误导项就照第二条写，不要两种混着来。',
+            '【大纲外路径】的写法：与普通路径同结构，但 step 填 "【大纲外】"，并多加一个 why: 为什么现在会出现这条路径。',
+            // 【一致性】必须跟着骨架走（2026-11-04 A2）：它是骨架的后半截约束，
+            // 留在前面会被世界观与剧情劈开，等于同一组要求分成两半说
+            '【一致性】nodes 的 id 必须从 1 连续编号；paths 里的 node 只能引用已列出的节点编号；',
+            'min_nodes_for_deduction、refute_by 里的编号同样只能引用已列出的节点。',
         ].join('\n');
     }
 
@@ -2930,6 +3053,20 @@
         if (!o.event_brief) missing.push('事件简介（event_brief）缺失');
         if (!o.core_truth) missing.push('核心真相（core_truth）缺失');
 
+        // 骨架里列出、这里却没单独查的键，统一按「缺失或空」补一遍（2026-11-04 A1）。
+        // 以前必查集合是第三份手抄，只盯着 nodes / min_nodes_for_deduction / characters /
+        // event_brief / core_truth 五项，骨架里的 event_type、paths、forbidden、time_pressure、
+        // danger 丢了不吭声。现在从骨架派生，以后改骨架自动跟着查，不必记着来改这一处。
+        const checked = ['nodes', 'min_nodes_for_deduction', 'characters', 'event_brief', 'core_truth'];
+        for (const k of OUTLINE_TOP_KEYS) {
+            if (checked.indexOf(k) >= 0) continue;
+            const v = o[k];
+            const empty = v == null || v === ''
+                || (Array.isArray(v) && !v.length)
+                || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length);
+            if (empty) missing.push(`顶层键 ${k} 缺失或为空`);
+        }
+
         const nodeN = nodes ? nodes.length : 0;
         const charN = (chars && typeof chars === 'object')
             ? Object.values(chars).reduce((a, v) => a + (Array.isArray(v) ? v.length : 0), 0) : 0;
@@ -3133,8 +3270,8 @@
         timeout_result: '超时后果',
         delay_cost: '拖延代价',
         lethality: '致死性',
-        // danger 组的失败后果是 failure，paths 里的失败情形才是 fail；两个都要有名字
-        failure: '失败后果',
+        // 注意：failure / fail 两个名字在上面已经给过了（danger 组用 failure，paths 组用 fail），
+        // 这里不要再写一遍——写重复了不报错，但标签表就出现两条一样的键，查起来费劲
         tolerance: '容错率',
         threat_source: '威胁来源',
     };
@@ -3147,6 +3284,18 @@
     const EVENT_TYPE_LABEL = {
         案件: '案件', 谈判: '谈判', 探险: '探险', 危机: '危机', 社交博弈: '社交博弈', 其他: '其他',
         case: '案件', negotiation: '谈判', exploration: '探险', crisis: '危机', social: '社交博弈', other: '其他',
+        // 2026-11-04 补：模型常按英文写类型，原来只认上面那几个，写 investigation 就原样显示英文。
+        // 这里收的是实际见过的写法，认不得的走 keyText() 兜底，不再裸奔
+        案件推理: '案件推理', investigation: '案件推理', detective: '案件推理', mystery: '悬疑',
+        谈判交涉: '谈判交涉', persuasion: '谈判交涉',
+        探险探索: '探险探索', adventure: '探险探索',
+        生存危机: '生存危机', survival: '生存危机',
+        战斗冲突: '战斗冲突', combat: '战斗冲突', battle: '战斗冲突',
+        日常委托: '日常委托', daily: '日常委托', commission: '日常委托',
+        禁忌秘辛: '禁忌秘辛', forbidden: '禁忌秘辛', secret: '禁忌秘辛',
+        悬疑: '悬疑', suspense: '悬疑',
+        恐怖: '恐怖', horror: '恐怖',
+        情感: '情感', romance: '情感',
     };
 
     /** 键名转中文，认不出就保留原样 */
@@ -3167,14 +3316,14 @@
         const et = outline.event_type;
         if (et) {
             if (typeof et === 'string') {
-                lines.push(`事件类型：${EVENT_TYPE_LABEL[et] || et}`);
+                lines.push(`事件类型：${EVENT_TYPE_LABEL[et] || keyText(et)}`);
             } else {
                 const main = et.primary || et.main || et['主类型'] || '';
                 const subs = Array.isArray(et.secondary) ? et.secondary
                     : (Array.isArray(et.sub) ? et.sub
                     : (Array.isArray(et['次类型']) ? et['次类型'] : []));
-                const mainText = EVENT_TYPE_LABEL[main] || main;
-                lines.push(`事件类型：${mainText}${subs.length ? '（兼 ' + subs.join('、') + '）' : ''}`);
+                const mainText = EVENT_TYPE_LABEL[main] || keyText(main);
+                lines.push(`事件类型：${mainText}${subs.length ? '（兼 ' + subs.map(x => EVENT_TYPE_LABEL[x] || keyText(x)).join('、') + '）' : ''}`);
             }
         }
         if (outline.core_truth) {
@@ -3189,7 +3338,7 @@
             lines.push(`信息节点（共 ${nodes.length} 条，按发现顺序）：`);
             for (const n of nodes) {
                 const id = nodeId(n);
-                const type = NODE_TYPE_LABEL[n.type] || n.type || '';
+                const type = NODE_TYPE_LABEL[n.type] || (n.type ? keyText(n.type) : '');
                 lines.push(`${id}.〔${type}〕${nodeText(n)}`);
                 if (nodeTrigger(n)) {
                     lines.push(`   触发：${nodeTrigger(n)}`);
@@ -3285,7 +3434,11 @@
             lines.push('');
             lines.push(`${title}：`);
             for (const [k, v] of entries) {
-                lines.push(`  ${k}：${Array.isArray(v) ? v.join('、') : String(v).trim()}`);
+                // 子键要走 labelOf（2026-11-04 修）。这里以前直接打原始键名 k，
+                // 而历史样本全是中文键（倒计时 / 致死性），所以一直没露；
+                // A2 把骨架换成英文键的完整示例后，模型开始照示例吐 countdown / lethality，
+                // 展示大纲里就整段变成英文了。认不得的键也不要裸奔，见 keyText()。
+                lines.push(`  ${keyText(k)}：${Array.isArray(v) ? v.join('、') : String(v).trim()}`);
             }
         };
         dumpGroup(outline.time_pressure, '时间压力');
@@ -3333,6 +3486,36 @@
         if (!n || typeof n !== 'object') return null;
         const v = n.id != null ? n.id : n.index;
         return v == null ? null : Number(v);
+    }
+
+    /**
+     * 取一个键的中文名，取不到也不要裸奔（2026-11-04 加）。
+     * 背景：标签表是手抄的白名单，模型换个写法就漏一个英文键到界面上。
+     * 白名单命不中就退到这层的归纳：已知后缀按词根翻，还不行就把下划线拆成空格。
+     * 宁可显示「某 描述」这种半通不通的中文，也不要让界面上出现 countdown、hazard 这类原样英文。
+     */
+    function keyText(key) {
+        const labeled = labelOf(key);
+        if (labeled !== String(key || '')) return labeled;
+        const k = String(key || '').trim();
+        if (!k) return '';
+        const tail = [
+            [/(countdown|timer|deadline)$/i, '倒计时'],
+            [/(duration|length|span)$/i, '时长'],
+            [/(result|outcome|consequence)$/i, '后果'],
+            [/(cost|penalty|price)$/i, '代价'],
+            [/(source|origin|from)$/i, '来源'],
+            [/(tolerance|margin|buffer)$/i, '容错'],
+            [/(lethality|deadliness)$/i, '致死性'],
+            [/(failure|fail|risk|hazard|danger)$/i, '风险后果'],
+            [/(descr?|detail|note|remark|comment)$/i, '说明'],
+            [/(reason|why|cause)$/i, '理由'],
+            [/(path|route|way)$/i, '路径'],
+            [/(name|title)$/i, '名字'],
+            [/(info|content|value|text)$/i, '内容'],
+        ];
+        for (const [re, zh] of tail) if (re.test(k)) return zh;
+        return k.replace(/[_-]+/g, ' ');
     }
 
     /** HTML 转义，进度条等少量需要拼字符串的地方用 */

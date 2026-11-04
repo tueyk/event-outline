@@ -153,10 +153,14 @@ check('一字不改的往返完全一致', round === EN_YAML, '往返不一致')
     const labelKeys = new Set();
     for (const m of body.matchAll(/^\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*'[^']+'/gm)) labelKeys.add(m[1]);
 
-    // 骨架：从 event_name 那行到收尾的反引号
-    const s0 = src.indexOf("'event_name: <事件名>'");
-    const s1 = src.indexOf("'```'", s0);
-    const skeleton = src.slice(s0, s1);
+    // 骨架：单一真源 OUTLINE_SKELETON 常量（2026-11-04 A1 起骨架不再抄在 prompt 里）。
+    // 以前是从 buildOutlinePrompt 里截 'event_name: <事件名>' 到收尾反引号；
+    // 抽成常量后换个地方取，判据不变：骨架里不许有中文键，每个英文键都要有中文显示名。
+    const c0 = src.indexOf("const OUTLINE_SKELETON = [");
+    if (c0 < 0) { check('找到骨架常量', false, 'OUTLINE_SKELETON 没找到'); }
+    const c1 = src.indexOf("].join(", c0);
+    const skeleton = c0 >= 0 && c1 > c0 ? src.slice(c0, c1) : '';
+    check('找到骨架常量', skeleton.length > 0);
     // 逐行剥掉行首的引号再取「键名:」，别拿整行去匹配——行首那个引号会把正则挡住
     // （第一版就是这么写的，结果把中文键塞进骨架它也不报错，反向验证才发现）
     const CN_CHAR = /[\u4e00-\u9fa5]/;
