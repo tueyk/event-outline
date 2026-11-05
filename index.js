@@ -9,7 +9,7 @@
     'use strict';
 
     const MODULE = 'event_outline';
-    const VERSION = '0.1.5';
+    const VERSION = '0.1.6';
     const ENTRY_PREFIX = '▸事件｜';
     // 待选事件最多留几个：生成不再直接写世界书，草稿得有个上限
     const MAX_DRAFTS = 3;
@@ -45,10 +45,22 @@
         preset: {
             // 自定义难度档位。空数组 = 用内置默认档（日常琐事/小麻烦/正经事件/重大危机/生死关头）
             difficultyLevels: [],
+            // 自定义事件主类型 / 次类型。空数组 = 用内置默认（含 NSFW）
+            mainTypes: [],
+            subTypes: [],
+            // 事件参数的预存手写取值（2026-11-04）：key 是偏好项的键，值是一行一条的说法。
+            // 和生成页「＋ 自定义…」不是一回事：那里是当场打一次，这里存下来以后反复可选
+            customOptions: {},
         },
         memory: {
             source: 'auto',
+            // 15 这个数写在这里，但真正的口径在 clampFloors/FLOORS_DEFAULT 那对常量和函数上，
+            // 界面、切换折算、读楼三处都走它，避免各写一个默认值对不上
             recentFloors: 15,
+            // 转述模式（2026-11-04）：开着时最近楼层只读 AI 楼，不读用户楼。
+            // 有些卡里玩家的输入只是给 AI 的指令，AI 楼会把用户楼的内容转述一遍，
+            // 两份都读就是同一件事读了两遍，既浪费 token 又让模型以为发生了两次。
+            narrationMode: false,
             jiyaoOverviewMax: 60,
             jiyaoRecentRows: 30,
         },
@@ -1452,6 +1464,34 @@
     // 以前每组固定 open = false：开新事件要展开三次才能看全，点一下别的又折回去。
     const openPrefGroups = new Set();
 
+    // 设置页各节的折叠状态（2026-11-04 危晓要求：难度档位、事件类型加折叠）
+    // 记在模块里而不是 DOM 上，重绘设置页后还能保持用户上次开合的样子。
+    // 默认都折起来：这两节的说明文字很长，展开着会把整页撑得像一份说明书
+    const openSetSections = new Set();
+
+    /**
+     * 把一段设置内容包进可折叠的 details 里。
+     * 统一走这里的好处：折叠壳、标题、展开状态三处的写法只有一份，
+     * 以后再加可折叠的节不用各抄一遍（抄多了必然出现有的记住状态、有的不记）。
+     * @param {HTMLElement} page 目标容器
+     * @param {string} name 节名，也是折叠状态的键，必须唯一
+     * @param {string} title 折叠条上显示的文字
+     * @param {string} [hint] 折叠条右侧的一行小字，用来在折着的时候也能看出里面是什么
+     */
+    function appendCollapsibleSection(page, name, title, hint) {
+        const box = el('details', 'eo-setsec');
+        box.open = openSetSections.has(name);
+        box.addEventListener('toggle', () => {
+            if (box.open) openSetSections.add(name); else openSetSections.delete(name);
+        });
+        const sum = el('summary', 'eo-setsec-sum');
+        sum.appendChild(el('span', 'eo-setsec-title', title));
+        if (hint) sum.appendChild(el('span', 'eo-hint eo-setsec-hint', hint));
+        box.appendChild(sum);
+        page.appendChild(box);
+        return box;
+    }
+
     // ---------- 重绘时的滚动与焦点保持（2026-11-02 C1 止血版） ----------
     // 整页重绘会把 #eo_body 整个清空重建，浏览器随之把滚动位置归零、焦点丢到 body。
     // 这里在重绘前记下「滚到哪」「焦点在哪个关键元素、光标在第几个字」，重绘后按稳定 key 找回来。
@@ -1641,6 +1681,68 @@
     const PREF_AUTO_BY_LEVEL = '根据难度等级自行设定';
     const PREF_AUTO_BY_NONE = '根据当前情况自行设定';
 
+    // ---- 最近楼层：全流程唯一的口径（2026-11-04）----
+    // 这个数字会被三处用到：设置页输入框、转述开关的折半/倍增、生成时读楼。
+    // 三处各自默认值或各自兜底过，就会出现「界面显示 15、实际读了别的」这种对不上的情况，
+    // 所以统一走这一对函数。
+    const FLOORS_DEFAULT = 15;
+    const FLOORS_MIN = 1;
+    const FLOORS_MAX = 100;
+    /**
+     * 把任意输入规整成合法的楼层数：先转数字，再取整，再夹到 [1,100]。
+     * 空串 / undefined / NaN 回默认值；负数、小数、超上限各自夹到合法区间。
+     * 返回值一定是 1..100 之间的整数。
+     * 注意：空串要先单独判掉——Number('') 是 0 不是 NaN，不判的话清空输入框
+     * 会变成「1 楼」而不是「回到默认 15」，用户看着像是数字被吃掉了。
+     */
+    function clampFloors(raw) {
+        if (raw === null || raw === undefined || String(raw).trim() === '') return FLOORS_DEFAULT;
+        const n = Math.round(Number(raw));
+        if (!Number.isFinite(n)) return FLOORS_DEFAULT;
+        return Math.max(FLOORS_MIN, Math.min(FLOORS_MAX, n));
+    }
+
+    /**
+     * 自动检测间隔的取值范围与折算（2026-11-04 危晓要求跟最近楼层一样折算）。
+     * 0 在业务上是「关闭自动盘点」，不能被折算成非 0，也不能被下限顶成 1，
+     * 所以单独放行 0；其余按 1..200 夹取。
+     */
+    const AUTO_EVERY_MIN = 1;
+    const AUTO_EVERY_MAX = 200;
+
+    function clampAutoEvery(raw, allowZero) {
+        const n = Math.round(Number(raw));
+        if (!Number.isFinite(n)) return 0;
+        if (allowZero && n <= 0) return 0;
+        return Math.max(AUTO_EVERY_MIN, Math.min(AUTO_EVERY_MAX, n));
+    }
+
+    /**
+     * 转述模式切换时，把「楼层数」类的设置按新口径折算。
+     * 两种模式的读数不是一回事（转述只取 AI 楼，非转述两边都取），沿用同一个数字
+     * 会让实际读到的剧情量差一倍，所以切到转述乘 2、切到非转述除 2，一律四舍五入。
+     * 折半与倍增是一对逆运算，来回切两次能回到原数（15→8→16 会漂 1，四舍五入的固有代价）。
+     * 返回 { before, after }，调用方拿去记日志和显示。
+     */
+    function rebalanceFloorsOnModeChange(settings, nowNarration) {
+        const mem = settings.memory || (settings.memory = {});
+        const before = clampFloors(mem.recentFloors);
+        const after = clampFloors(nowNarration ? before * 2 : before / 2);
+        mem.recentFloors = after;
+
+        // 自动检测间隔同样按口径折算。但它是「关闭」的信号：0 表示不自动盘点，
+        // 0 除 2 还是 0，乘 2 也还是 0，不需要也不该被动。
+        const tr = settings.tracker || (settings.tracker = {});
+        let everyBefore = null;
+        let everyAfter = null;
+        if (Number(tr.autoEveryFloors) > 0) {
+            everyBefore = clampAutoEvery(tr.autoEveryFloors, false);
+            everyAfter = clampAutoEvery(nowNarration ? everyBefore * 2 : everyBefore / 2, false);
+            tr.autoEveryFloors = everyAfter;
+        }
+        return { before, after, everyBefore, everyAfter };
+    }
+
     /** 当前生效的难度档位列表（用户可在设置里自定义，为空则用内置默认） */
     function getDifficultyLevels() {
         const s = getSettings();
@@ -1718,23 +1820,49 @@
     const EVENT_MAIN_TYPES = [
         '案件推理', '谈判交涉', '探险探索', '生存危机',
         '社交博弈', '战斗冲突', '日常委托', '禁忌秘辛',
+        'NSFW',
     ];
     const EVENT_SUB_TYPES = [
         '悬疑', '复仇', '背叛', '失踪', '盗窃', '走私',
         '政治阴谋', '超自然', '瘟疫', '营救', '交易', '追捕',
         '守护', '潜入', '解谜', '人情',
+        'NSFW',
     ];
     const MAX_SUB_TYPES = 3;
 
+    /** 当前生效的主类型列表（设置里可增删自定义类型，为空则用内置默认） */
+    function getMainTypes() {
+        const s = getSettings();
+        const custom = (s.preset && Array.isArray(s.preset.mainTypes)) ? s.preset.mainTypes : null;
+        const list = (custom || []).map(x => String(x || '').trim()).filter(Boolean);
+        return list.length ? list : EVENT_MAIN_TYPES.slice();
+    }
+
+    /** 当前生效的次类型列表（设置里可增删自定义类型，为空则用内置默认） */
+    function getSubTypes() {
+        const s = getSettings();
+        const custom = (s.preset && Array.isArray(s.preset.subTypes)) ? s.preset.subTypes : null;
+        const list = (custom || []).map(x => String(x || '').trim()).filter(Boolean);
+        return list.length ? list : EVENT_SUB_TYPES.slice();
+    }
+
+    /**
+     * 难度等级不属于「事件参数」（2026-11-04 危晓要求）。
+     * 它是整个事件的强度档，选项来自设置页「难度等级」那一节编的档位，
+     * 又是其他子项「根据难度等级自行设定」的推导依据，地位比单项偏好高一档。
+     * 所以从 PREF_GROUPS 里单独摘出来：生成页把它排在事件参数之上，
+     * 设置页也表示成一节独立内容，两处叫法统一成「难度等级」。
+     */
+    const PREF_LEVEL_ITEM = {
+        key: 'difficultyLevel',
+        label: '难度等级',
+        // 选项来自设置里的自定义档位，由界面动态填充
+        options: [],
+        dynamic: 'difficulty',
+        desc: '这次事件整体的强度档位。选定后，凡是写着「根据难度等级自行设定」的项，都会按这个等级成套推导。',
+    };
+
     const PREF_GROUPS = [
-        {
-            key: 'difficultyLevel',
-            label: '难度等级',
-            // 选项来自设置里的自定义档位，这里留空由界面动态填充
-            options: [],
-            dynamic: 'difficulty',
-            desc: '这次事件整体的强度档位。选定后，凡是写着「根据难度等级自行设定」的项，都会按这个等级成套推导。',
-        },
         {
             key: 'nodeCount',
             label: '节点数量',
@@ -1927,9 +2055,42 @@
         return [autoPreset(groupName, prefs)].concat((PREF_PRESETS[groupName] || {}).options || []);
     }
 
+    // ---- 事件参数的自定义取值（2026-11-04 危晓要求）----
+    // 他的原话是「让用户直接手动输入内容，而不是让用户去新增档位」。所以这里有两套东西：
+    //   · 自定义档位（preset.customLevels）：在设置页预先编好，选项里就能选，属于「预设」；
+    //   · 自定义取值（prefsCustom）：在生成页当场手打一句话，属于「这一项我就要这么写」。
+    // 前者是给以后反复用的，后者是这一次的临时发挥，两者别混。
+    //
+    // 手打的值和内置选项存在同一个 prefs[key] 里：只要它不等于任何内置选项，就按自定义处理。
+    // 这样不用另开一份存储，保存/沿用的逻辑一行都不用改。
+    const PREF_CUSTOM_OPTION = '__eo_pref_custom__';
+
+    /** 该分组/该项当前在界面上的自定义文案；不是自定义就返回空串 */
+    function customValueOf(prefs, key) {
+        const v = String((prefs || {})[key] || '').trim();
+        if (!v) return '';
+        const def = PREF_GROUPS.find(x => x.key === key);
+        const opts = (def && def.options) ? def.options : [];
+        // 内置选项、占位符、各种「自行设定」文案都不算自定义
+        if (opts.includes(v)) return '';
+        if (v === SUB_AUTO || v === PREF_AUTO_NEW || v === PREF_AUTO_BY_NONE || v === PREF_AUTO_BY_LEVEL) return '';
+        if (/^根据.*自行设定$/.test(v)) return '';
+        return v;
+    }
+
+    /** 用户为该偏好项预存的手写取值（设置页「参数自定义项」里编的），生成页下拉里排在自定义之前 */
+    function getPrefPresetExtra(key) {
+        const s = getSettings();
+        const all = (s.preset && s.preset.customOptions) ? s.preset.customOptions : {};
+        const list = Array.isArray(all[key]) ? all[key] : [];
+        return list.map(x => String(x || '').trim()).filter(Boolean);
+    }
+
     function defaultPrefs() {
         const p = {};
         for (const g of PREF_GROUPS) p[g.key] = PREF_AUTO_NEW;
+        // 难度等级已经从 PREF_GROUPS 摘出去了，默认值仍要给，否则界面上读不到
+        p[PREF_LEVEL_ITEM.key] = PREF_AUTO_NEW;
         p.eventMainType = EVENT_TYPE_DEFAULT;
         p.eventSubTypes = [];
         p.extra = '无';
@@ -2038,7 +2199,7 @@
     }
 
     function buildPrefsBlock(prefs) {
-        const lines = ['【体验偏好（已在界面选定，直接采用，不要再询问）】'];
+        const lines = ['【事件参数（已在界面选定，直接采用，不要再询问）】'];
         // 事件类型：主类型单选，次类型最多三个
         const main = String(prefs.eventMainType || '').trim();
         const subs = Array.isArray(prefs.eventSubTypes) ? prefs.eventSubTypes.filter(Boolean) : [];
@@ -2048,6 +2209,15 @@
         const autoText = autoByText(prefs);
         const lv = String(prefs.difficultyLevel || '').trim();
         const useByLevel = autoText === PREF_AUTO_BY_LEVEL;
+        // 难度等级已经不在 PREF_GROUPS 里了（2026-11-04 提到事件参数之上），
+        // 但它必须继续出现在提示词里，否则模型不知道按哪个档推导，所以单独写一行
+        {
+            const lvVal = String(prefs[PREF_LEVEL_ITEM.key] || autoText).trim() || autoText;
+            const lvCustom = customValueOf(prefs, PREF_LEVEL_ITEM.key);
+            lines.push(lvCustom && lvCustom === lvVal
+                ? `- 难度等级：${lvVal}（此项由用户手写，照此执行，不要用常见档位去替换或改写）`
+                : `- 难度等级：${lvVal}`);
+        }
         let curGroup = null;
         for (const g of PREF_GROUPS) {
             if (g.group && g.group !== curGroup) {
@@ -2061,7 +2231,14 @@
                 v = `根据难度等级「${lv}」自行设定`;
             }
             const indent = g.group ? '  · ' : '- ';
-            lines.push(`${indent}${g.label}：${v}`);
+            // 用户手打的值（2026-11-04）：原话照抄进提示词，但要标出来这是他的原话，
+            // 模型才明白不能拿内置选项去套，也不会以为这是系统预设而擅自改写
+            const cv = customValueOf(prefs, g.key);
+            if (cv && cv === v) {
+                lines.push(`${indent}${g.label}：${v}（此项由用户手写，照此执行，不要用常见档位去替换或改写）`);
+            } else {
+                lines.push(`${indent}${g.label}：${v}`);
+            }
         }
         if (useByLevel) {
             lines.push(`说明：难度等级已定为「${lv}」，凡写「根据难度等级自行设定」的子项，请按该等级应有的难度、危险程度与时间压力成套推导，同一组内要互相匹配。`);
@@ -2086,7 +2263,9 @@
             const v = prefs.linkPrevious;
             if (v === '完全独立') shape.push('本事件与之前的线索完全独立，不要引用其他事件的内容');
             else if (v === '承接已有线索') shape.push('本事件承接之前遗留的线索，把【当前剧情】里已有的伏笔接起来');
-            else shape.push('本事件在解决自身问题的同时，要为后续留下可用的伏笔，写进 forbidden 或 paths');
+            else if (v === '主动留下后续伏笔') shape.push('本事件在解决自身问题的同时，要为后续留下可用的伏笔，写进 forbidden 或 paths');
+            // 手写的关联方式没有内置话术可套，原话照传，不要硬塞进上面三档之一
+            else shape.push(`与前事的关联按用户原话执行：${v}`);
         }
         if (shape.length) {
             lines.push('事件形态（已在界面选定，按此生成，不要自行改动规模）：');
@@ -2232,7 +2411,7 @@
         parts.push('OOC: 暂停扮演，做一次状态盘点。基于本事件开场大纲和到目前为止的对话，输出：');
         parts.push('A. 已确认信息（只列对话中已实际出现的，注明大致的楼层或纪要编号）');
         parts.push('B. 尚未触发的信息节点（对照大纲，列出还没出现的节点编号及各自触发词）');
-        parts.push('C. 按体验偏好核对当前状态：');
+        parts.push('C. 按事件参数核对当前状态：');
         parts.push('   - 线索充足度：当前信息是否足以支撑下一步推进？如不足，说明缺什么、可经由哪条未触发节点补上');
         parts.push('   - 误导状态：已出现的误导是否已被反向证据推翻？如未推翻，提醒其存在');
         parts.push('   - 隐藏环节：当前是否卡在需推理补全的环节？如是，指出已有哪些信息可作为推理依据');
@@ -2283,13 +2462,39 @@
     }
 
     /** 楼层总数（玩家楼 + AI 楼，不含系统消息），用于自动盘点的计数 */
+    /**
+     * 按当前模式统计楼层数（2026-11-04 危晓定：口径一）。
+     * 非转述模式下用户楼也在推进剧情，玩家楼与 AI 楼合计；
+     * 转述模式下用户楼只是给 AI 的指令、内容会在 AI 楼里重述一遍，所以只数 AI 楼。
+     * 这个函数既用于「最近楼层」，也用于自动盘点的间隔判断，两边必须是同一个口径，
+     * 否则会出现「读 8 层剧情，却按 6 条消息触发盘点」这种对不上的情况。
+     */
     function countFloors() {
-        return getChatMessages().length;
+        const msgs = getChatMessages();
+        // 读设置失败时按非转述处理：宁可多算一层，也不要因为异常把楼层数成 0。
+        // 注意 getSettings() 本身也要包在 try 里——它抛的话整段函数就断了，
+        // 只包住读属性那一步接不住
+        let narration = false;
+        try {
+            const s = getSettings();
+            narration = !!(s && s.memory && s.memory.narrationMode);
+        } catch (e) {
+            narration = false;
+        }
+        if (!narration) return msgs.length;
+        return msgs.filter(m => !m.is_user).length;
     }
 
     /**
-     * 自动盘点是否该跑：自上次盘点以来，新积累的楼层数（玩家楼 + AI 楼）达到设置值就返回。
+     * 自动盘点是否该跑：自上次盘点以来新积累的楼层数达到设置值就返回。
      * autoEveryFloors = 0 关闭自动盘点；没有进行中事件时不跑。
+     *
+     * 楼层口径跟着转述模式走（2026-11-04 危晓定）：非转述时玩家楼也在推进剧情，
+     * 玩家楼 + AI 楼合计；转述时用户楼只是指令、内容会在 AI 楼里重述，所以只数 AI 楼。
+     * 因为口径会变，基线必须连着「当时是哪种口径」一起记：
+     * 用户切了模式，旧基线就作废，按新口径在当前位置重挂一次，从这一刻重新累计。
+     * 不这么做的话，一开转述，计数从「全部楼」掉成「只数 AI」，since 会突然变负；
+     * 关掉转述又会让攒了很久的差额一次性冒出来，直接把盘点触发掉。
      */
     function shouldAutoInventory() {
         const s = getSettings();
@@ -2299,10 +2504,20 @@
         const ev = getCurrentEvent();
         if (!ev || ev.status !== 'active') return false;
         const cur = countFloors();
+        const narrationNow = !!(s.memory && s.memory.narrationMode);
         // 老事件没有 floorBase：以当前楼层为基线，从现在开始累计
         if (!Number.isFinite(Number(ev.floorBase))) {
             ev.floorBase = cur;
+            ev.floorBaseNarration = narrationNow;
             saveMeta();
+            return false;
+        }
+        // 模式换了，旧基线是按另一种口径量的，现在重挂
+        if (!!ev.floorBaseNarration !== narrationNow) {
+            ev.floorBase = cur;
+            ev.floorBaseNarration = narrationNow;
+            saveMeta();
+            log(`转述模式${narrationNow ? '开启' : '关闭'}，自动盘点基线按新口径重挂到第 ${cur} 层`);
             return false;
         }
         const since = cur - Number(ev.floorBase);
@@ -2310,13 +2525,21 @@
         return { cur, since, every };
     }
 
-    /** 按 token 预算从最新往前累加楼层 */
+    /**
+     * 收集最近楼层。
+     * 转述模式（2026-11-04）：开着时只取 AI 楼。有些卡的玩家楼只是给 AI 的指令，
+     * AI 楼会把内容转述一遍，两边都读等于同一段剧情读两遍，
+     * 既浪费 token，又可能让模型把一件事当成发生了两次。
+     * 上限按「实际取到的楼数」算，不是按扫过的消息数——转述模式下用户楼被跳过，要一直往前够到够数为止。
+     */
     async function collectRecentFloors(limit) {
-        const context = ctx();
+        const s = getSettings();
+        const narration = !!(s.memory && s.memory.narrationMode);
         const msgs = getChatMessages();
         const out = [];
         for (let i = msgs.length - 1; i >= 0 && out.length < limit; i--) {
             const m = msgs[i];
+            if (narration && m.is_user) continue;
             const name = m.name || (m.is_user ? '玩家' : '角色');
             out.unshift(`${name}：\n${String(m.mes || '').trim()}`);
         }
@@ -2413,8 +2636,10 @@
         }
 
         // 第三层：最近楼层
-        const floors = Math.max(1, Number(s.memory.recentFloors) || 15);
-        step(`读取最近 ${floors} 楼`);
+        // 读楼也走同一套规整：手改过设置文件、存了个 0 或 9999，这里也要收在 1..100
+        const floors = clampFloors(s.memory.recentFloors);
+        const narration = !!(s.memory && s.memory.narrationMode);
+        step(narration ? `读取最近 ${floors} 楼（转述模式，只取 AI 楼）` : `读取最近 ${floors} 楼`);
         out.recentChat = await collectRecentFloors(floors);
         step(`最近剧情已载入：${out.recentChat.length} 字`);
         if (!out.recentChat.length) {
@@ -2426,7 +2651,7 @@
             + out.jiyaoList.length + out.jiyaoDetail.length + out.recentChat.length;
         log(`上下文汇总：世界书 ${out.worldBook.length} 字、事件卡 ${out.stateCard.length} 字、`
             + `纪要概览 ${out.jiyaoList.length} 字、纪要正文 ${out.jiyaoDetail.length} 字、`
-            + `最近楼层 ${floors} 楼共 ${out.recentChat.length} 字，合计 ${total} 字`);
+            + `最近楼层 ${floors} 楼${narration ? '（转述模式，只取 AI 楼）' : ''}共 ${out.recentChat.length} 字，合计 ${total} 字`);
         if (total < 500) {
             warn(`上下文总量只有 ${total} 字，模型可参考的信息很少，生成结果可能凭空发挥`);
         }
@@ -3692,8 +3917,10 @@
                 worldBook: book,
                 entryUid: null,
                 entryVersion: 1,
-                // 自动盘点的计数基线：自上次盘点以来的楼层数（玩家楼 + AI 楼）
+                // 自动盘点的计数基线：自上次盘点以来的楼层数（口径随转述模式变，见 countFloors）
                 floorBase: countFloors(),
+                // 记下基线是按哪种口径量的。模式一变，旧基线就失效，要按新口径重挂
+                floorBaseNarration: !!getSettings().memory.narrationMode,
                 // 只存真正的偏好项；界面草稿状态不进事件卡
                 prefs: (() => {
                     const o = Object.assign({}, prefs);
@@ -3768,6 +3995,7 @@
             event.entryUid = res.uid;
             event.status = 'active';
             event.floorBase = countFloors();
+            event.floorBaseNarration = !!getSettings().memory.narrationMode;
             meta.currentEventId = id;
             saveMeta();
             // 采用即视为这套生成设置已经用掉，清空表单（危晓 2026-11-01 的规矩）
@@ -4120,8 +4348,10 @@
                 event.entryUid = res.uid;
             }
             record.committedToBook = true;
-            // 盘点成功即把计数基线挪到当前楼层，下一轮从零开始累计
+            // 盘点成功即把计数基线挪到当前楼层，下一轮从零开始累计。
+            // 基线要连模式一起记，否则用户切换转述后这个基线就按错口径算了
             event.floorBase = countFloors();
+            event.floorBaseNarration = !!getSettings().memory.narrationMode;
 
             saveMeta();
             // 同采用：盘点也改了世界书，面板那份数据已经旧了（2026-11-04）
@@ -4396,6 +4626,8 @@
   background:var(--eo-bg-soft);margin-bottom:9px;white-space:pre-wrap;word-break:break-word;
   max-height:none;overflow:visible;line-height:1.55;}
 .eo-hint{color:var(--eo-text-3);font-size:12px;line-height:1.5;}
+/* 行内提醒（2026-11-04）：跟着输入框走，不带边框和背景，只把字染色，免得撑开行高 */
+.eo-hint-note{color:#a35c00;font-weight:600;}
 /* 大纲正文：保留换行与缩进，不加高度上限（大纲本来就有几百行，截断反而看不到全貌） */
 .eo-outline-text{white-space:pre-wrap;word-break:break-word;line-height:1.7;
   font-size:13px;color:var(--eo-text);background:var(--eo-bg);border:1px solid rgba(184,134,11,.28);
@@ -4549,7 +4781,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-subtype{padding:2px 9px;font-size:12px;line-height:1.5;}
 .eo-subtype-on{background:var(--eo-accent-soft);color:var(--eo-dark);font-weight:700;border-color:#c9a13a;}
 
-/* 体验偏好：可折叠分组 + 大致/详细 */
+/* 事件参数：可折叠分组 + 大致/详细 */
 .eo-prefgroup{margin:6px 0;border:1px solid #e8dbb3;border-radius:8px;background:var(--eo-bg);}
 .eo-prefgroup-sum{cursor:pointer;padding:7px 10px;font-weight:600;color:var(--eo-text-2);font-size:13px;
   list-style:none;user-select:none;}
@@ -4557,6 +4789,18 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-prefgroup-sum::before{content:'▸ ';color:var(--eo-accent);}
 .eo-prefgroup[open] .eo-prefgroup-sum::before{content:'▾ ';}
 .eo-prefgroup-body{padding:2px 10px 8px;}
+/* 设置页可折叠节（2026-11-04）：难度档位、事件类型、参数自定义项都用它 */
+.eo-setsec{margin:4px 0 10px;border:1px solid #e8dbb3;border-radius:8px;padding:0 10px 6px;}
+.eo-setsec-sum{cursor:pointer;padding:8px 2px;font-weight:700;color:var(--eo-text-2);font-size:13px;
+  list-style:none;user-select:none;display:flex;align-items:center;gap:8px;}
+.eo-setsec-sum::-webkit-details-marker{display:none;}
+.eo-setsec-sum::before{content:'▸ ';color:var(--eo-accent);}
+.eo-setsec[open] .eo-setsec-sum::before{content:'▾ ';}
+.eo-setsec-title{flex:0 0 auto;}
+.eo-setsec-hint{font-weight:400;font-size:12px;}
+/* 偏好项的自定义输入行：缩进一格，表示从属于上面那个下拉 */
+.eo-customrow{padding-left:6px;}
+.eo-prefopt-row{align-items:flex-start;}
 .eo-prefmode{display:flex;align-items:center;gap:6px;padding:2px 0 6px;}
 .eo-modebtn{padding:3px 12px;font-size:12px;}
 .eo-modebtn-on{background:var(--eo-accent-soft);color:var(--eo-dark);font-weight:700;}
@@ -5842,7 +6086,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         if (ev) page.appendChild(el('div', 'eo-sec', '再生成一个待选'));
     }
 
-    /** 生成页：新建事件的表单与体验偏好 */
+    /** 生成页：新建事件的表单与事件参数 */
     function renderGenForm(page) {
         // --- 新建事件表单 ---
         page.appendChild(el('div', 'eo-sec', '事件'));
@@ -5870,21 +6114,100 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         // --- 事件类型：主类型单选，次类型最多三个 ---
         page.appendChild(el('div', 'eo-sec', '事件类型'));
         page.appendChild(el('div', 'eo-hint',
-            `主类型只能选一个，次类型最多选 ${MAX_SUB_TYPES} 个，两个都可以不选，不选就由模型按当前剧情判断。`));
+            `主类型只能选一个，次类型最多选 ${MAX_SUB_TYPES} 个，两个都可以不选，不选就由模型按当前剧情判断。`
+            + '末尾的「自定义」可以直接手打一个类型，打了就记住，下次还在列表里。'));
+
+        // 自定义类型（2026-11-04）：选「＋自定义」就地弹输入框，输入的名字存进设置，
+        // 写回 mainTypes / subTypes，之后和内置类型一样出现在列表里
+        function addCustomType(kind) {
+            const isMain = kind === 'main';
+            const cur = isMain ? getMainTypes() : getSubTypes();
+            const input = window.prompt(
+                isMain ? '输入一个主类型名称（会和内置类型一起出现在下拉里）' : '输入一个次类型名称（会加进下面的选项按钮里）',
+                '');
+            if (input === null) return '';
+            const name = String(input).trim();
+            if (!name) return '';
+            if (cur.includes(name) || name === EVENT_TYPE_DEFAULT) {
+                log(`类型「${name}」已经存在，没有重复添加`);
+                return name;
+            }
+            const s = getSettings();
+            const key = isMain ? 'mainTypes' : 'subTypes';
+            const base = isMain ? EVENT_MAIN_TYPES : EVENT_SUB_TYPES;
+            const stored = (s.preset && Array.isArray(s.preset[key])) ? s.preset[key].slice() : [];
+            // 第一次改就从内置那套的基础上加，否则用户会发现自己加了一个类型、内置的全没了
+            const merged = (stored.length ? stored : base.slice());
+            if (!merged.includes(name)) merged.push(name);
+            s.preset[key] = merged;
+            saveSettings();
+            log(`已添加${isMain ? '主' : '次'}类型「${name}」，共 ${merged.length} 个`);
+            repaintPage();
+            return name;
+        }
 
         const mainRow = el('div', 'eo-row');
         mainRow.appendChild(el('label', null, '主类型'));
         const mainSel = el('select', 'eo-sel');
         mainSel.style.flex = '1';
-        for (const t of [EVENT_TYPE_DEFAULT].concat(EVENT_MAIN_TYPES)) {
+        for (const t of [EVENT_TYPE_DEFAULT].concat(getMainTypes())) {
             const o = el('option', null, t);
             o.value = t;
             mainSel.appendChild(o);
         }
-        mainSel.value = prefs.eventMainType || EVENT_TYPE_DEFAULT;
-        mainSel.addEventListener('change', () => { prefs.eventMainType = mainSel.value; persistGenForm(); });
+        const MAIN_CUSTOM = '__eo_main_custom__';
+        const mainCustomOpt = el('option', null, '＋ 自定义…');
+        mainCustomOpt.value = MAIN_CUSTOM;
+        mainSel.appendChild(mainCustomOpt);
+        // 手打过的类型名也记在草稿里，重绘后仍能选中
+        const curMain = prefs.eventMainType || EVENT_TYPE_DEFAULT;
+        if (!Array.from(mainSel.options).some(o => o.value === curMain) && curMain !== MAIN_CUSTOM) {
+            const o = el('option', null, curMain);
+            o.value = curMain;
+            mainSel.appendChild(o);
+        }
+        mainSel.value = curMain;
+        mainSel.addEventListener('change', () => {
+            if (mainSel.value === MAIN_CUSTOM) {
+                const added = addCustomType('main');
+                prefs.eventMainType = added || curMain;
+                persistGenForm();
+                if (!added) repaintPage();
+                return;
+            }
+            prefs.eventMainType = mainSel.value;
+            persistGenForm();
+        });
         mainRow.appendChild(mainSel);
         page.appendChild(mainRow);
+
+        // 主类型列表里已有的自定义类型，给一个删除入口，否则加错了只能去设置里改
+        {
+            const customMains = getMainTypes().filter(x => !EVENT_MAIN_TYPES.includes(x));
+            if (customMains.length) {
+                const box = el('div', 'eo-hint');
+                box.appendChild(el('span', null, '自定义主类型：'));
+                for (const name of customMains) {
+                    const del = el('button', 'eo-btn', `✕ ${name}`);
+                    del.type = 'button';
+                    del.title = '从主类型列表里移除';
+                    del.style.marginRight = '6px';
+                    del.addEventListener('click', () => {
+                        const s = getSettings();
+                        const stored = (s.preset && Array.isArray(s.preset.mainTypes) && s.preset.mainTypes.length)
+                            ? s.preset.mainTypes.slice() : EVENT_MAIN_TYPES.slice();
+                        s.preset.mainTypes = stored.filter(x => x !== name);
+                        if (prefs.eventMainType === name) prefs.eventMainType = EVENT_TYPE_DEFAULT;
+                        saveSettings();
+                        persistGenForm();
+                        log(`已移除主类型「${name}」`);
+                        repaintPage();
+                    });
+                    box.appendChild(del);
+                }
+                page.appendChild(box);
+            }
+        }
 
         // 次类型：多选按钮，点一下选中/取消，超过上限就拦住
         const subWrap = el('div', 'eo-row eo-subtype-wrap');
@@ -5896,7 +6219,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             counter.textContent = `已选 ${selSet.size}/${MAX_SUB_TYPES}`;
             counter.className = selSet.size >= MAX_SUB_TYPES ? 'eo-warn' : 'eo-hint';
         };
-        for (const t of EVENT_SUB_TYPES) {
+        // 选中的次类型里可能有已经从列表删掉的，也要显示出来，否则用户看不见自己选了什么
+        const subList = getSubTypes().slice();
+        for (const t of selSet) if (!subList.includes(t)) subList.push(t);
+        for (const t of subList) {
             const b = el('button', 'eo-btn eo-subtype' + (selSet.has(t) ? ' eo-subtype-on' : ''), t);
             b.type = 'button';
             b.addEventListener('click', () => {
@@ -5917,12 +6243,28 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             });
             subBox.appendChild(b);
         }
+        // 自定义次类型入口：加完如果还有名额就顺手选中，省一次点击
+        {
+            const b = el('button', 'eo-btn eo-subtype', '＋ 自定义');
+            b.type = 'button';
+            b.addEventListener('click', () => {
+                const name = addCustomType('sub');
+                if (!name) return;
+                if (selSet.size < MAX_SUB_TYPES && !selSet.has(name)) {
+                    selSet.add(name);
+                    prefs.eventSubTypes = Array.from(selSet);
+                    persistGenForm();
+                }
+                repaintPage();
+            });
+            subBox.appendChild(b);
+        }
         subWrap.appendChild(subBox);
         page.appendChild(subWrap);
         paintCounter();
         page.appendChild(counter);
 
-        // 事件目的与框架提示放在体验偏好之前：这两个是「想要什么」，
+        // 事件目的与框架提示放在事件参数之前：这两个是「想要什么」，
         // 偏好是「多难多险」，先想清楚要什么再调强度，顺序才对
         page.appendChild(el('div', 'eo-sec eo-sec-inline', '事件目的'));
         page.appendChild(el('div', 'eo-hint',
@@ -5946,14 +6288,38 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         hintInput.addEventListener('change', persistGenForm);
         page.appendChild(hintInput);
 
-        // 体验偏好标题旁带「沿用上次」（2026-11-02）：上次那套就在 genForm 里，
-        // 以前只有「重置为默认」，想回到上次的配置只能一项一项点回来
+        // 难度等级挪到事件参数之上（2026-11-04 危晓要求）：
+        // 它定的是整件事的强度档，下面那些子项里写「根据难度等级自行设定」的都按它推导，
+        // 所以位置要在事件参数之上，不能埋在参数里面
+        page.appendChild(el('div', 'eo-sec eo-sec-inline', PREF_LEVEL_ITEM.label));
+        page.appendChild(el('div', 'eo-hint',
+            '这次事件整体的强度档位。下面是事件参数，其中凡是显示「根据难度等级自行设定」的项，'
+            + '都会按这里选的等级成套推导。档位可以在设置页「难度等级」里按你的角色卡改。'));
+        {
+            const lvOpts = [PREF_AUTO_NEW].concat(getDifficultyLevels());
+            const lvRow = makePrefSelect(PREF_LEVEL_ITEM.key, PREF_LEVEL_ITEM.label,
+                lvOpts.map(o => ({ value: o, label: o })),
+                PREF_LEVEL_ITEM.desc);
+            page.appendChild(lvRow);
+            // 等级变了，下面各组的「自行设定」文案跟着变。
+            // 注意 repaintAllGroups 是 const 声明的，此刻还没初始化（当前页面构建到一半），
+            // 所以不能在构建期就拿它，只能在回调里通过闭包找到它——那时它已经赋好值了
+            const lvSel = lvRow.querySelector('select');
+            if (lvSel) {
+                lvSel.addEventListener('change', () => {
+                    try { repaintAllGroups(); } catch (e) { warn('刷新偏好文案失败', e); }
+                });
+            }
+        }
+
+        // 事件参数标题旁带「沿用上次」（2026-11-02）：上次那套就在 genForm 里，
+        // 以前只有「重置为默认」，想回到上次的配置只能一项一项点回来。
+        // 问号挂在这一行上、排在按钮右边（2026-11-04 危晓要求）：
+        // 以前是挂在按钮内部，看上去像按钮里带了个问号，现在挪到框外
         const prefSec = el('div', 'eo-sec eo-sec-inline');
-        prefSec.appendChild(el('span', null, '体验偏好'));
+        prefSec.appendChild(el('span', null, '事件参数'));
         const btnLast = el('button', 'eo-btn', '沿用上次');
         btnLast.type = 'button';
-        attachHelp(btnLast, '把体验偏好恢复成上一次用过的那套。上次的值一直留着，'
-            + '点「重置为默认」才会清掉。已经在用上次那套时这个按钮不会亮。');
         btnLast.addEventListener('click', () => {
             const last = loadGenForm();
             if (!last.prefs) { toast('还没有上一次的配置，生成一次之后就有了'); return; }
@@ -5963,10 +6329,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             Object.assign(prefs, fresh);
             if (last.groupModes) Object.assign(groupMode, last.groupModes);
             persistGenForm();
-            log('体验偏好已沿用上次的配置');
+            log('事件参数已沿用上次的配置');
             repaintPage();
         });
         prefSec.appendChild(btnLast);
+        // 问号挂在 prefSec（标题行）上，不挂按钮，这样它在按钮边框外面
+        attachHelp(prefSec, '把下面这套事件参数恢复成上一次用过的那一套。上次的值一直留着，'
+            + '点「重置为默认」才会清掉。已经在用上次那套时这个按钮不会亮。');
         page.appendChild(prefSec);
         page.appendChild(el('div', 'eo-hint',
             '这里是「这次想玩什么样的体验」，会原样写进生成大纲的提示词，模型按你的选择决定难度和危险程度。不确定选哪个的，留着「根据当前情况自行设定」就行，模型会自己配一套合理的。'));
@@ -5997,6 +6366,70 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             sel.addEventListener('change', () => onChange(sel.value));
             row.appendChild(sel);
             return sel;
+        }
+
+        /**
+         * 带「自定义」的偏好下拉（2026-11-04 危晓要求：让用户直接手动输入内容）。
+         * 不做成「再新增一个档位」——档位是设置页里预先编好的成套取值，
+         * 这里给的是「这一项我就要这么写」的一次性输入。
+         * 选中「＋ 自定义…」后旁边就长出一个输入框，边打边同步进 prefs，
+         * 切回任意内置选项时自定义值自动作废，不会留下一条看不见的脏数据。
+         * @param {string} key prefs 里的键
+         * @param {Array<{value:string,label:string}>} options 内置选项（第一项通常是自行设定）
+         * @returns {HTMLElement} 一行，直接 append 到容器
+         */
+        function makePrefSelect(key, labelText, options, desc) {
+            const row = el('div', 'eo-row');
+            const cur = prefs[key] || (options[0] && options[0].value) || PREF_AUTO_NEW;
+            const custom = customValueOf(prefs, key);
+            // 当前值不在选项里 = 用户手打过一句，下拉要选中「自定义…」并把那句话回填进输入框
+            // 设置页预存的那些手写取值也拼进来，排在「＋ 自定义…」之前，选了就等于选了一句原话
+            const preset = getPrefPresetExtra(key).filter(x => !options.some(o => o.value === x));
+            const base = options.map(o => ({ value: o.value, label: o.label }))
+                .concat(preset.map(x => ({ value: x, label: '倍 · ' + x })));
+            const selOpts = base.concat([{ value: PREF_CUSTOM_OPTION, label: '＋ 自定义…' }]);
+            const sel = makeSelect(row, labelText,
+                selOpts,
+                custom ? PREF_CUSTOM_OPTION : (base.some(o => o.value === cur) ? cur : selOpts[0].value),
+                (v) => {
+                    if (v === PREF_CUSTOM_OPTION) {
+                        // 从内置切到自定义：先清掉旧值，等用户打字再填
+                        prefs[key] = '';
+                        paintCustom('');
+                        inp.focus();
+                    } else {
+                        prefs[key] = v;
+                        inputWrap.style.display = 'none';
+                    }
+                    persistGenForm();
+                },
+                desc);
+            row.appendChild(sel);
+
+            // 自定义输入区：默认隐藏，只有选中「自定义…」时才出现
+            const inputWrap = el('div', 'eo-row eo-customrow');
+            const inp = el('input', 'eo-input');
+            inp.type = 'text';
+            inp.placeholder = '直接写你要的内容，例如：只留一处能要人命的地方';
+            inp.value = custom;
+            inp.style.flex = '1';
+            const paintCustom = (v) => {
+                inp.value = v;
+                inputWrap.style.display = '';
+            };
+            inputWrap.style.display = custom ? '' : 'none';
+            inp.addEventListener('input', () => {
+                prefs[key] = inp.value;
+                persistGenForm();
+            });
+            // 打完回车收起来，看着像确认过了
+            inp.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+            });
+            inputWrap.appendChild(el('span', 'eo-hint', '↳'));
+            inputWrap.appendChild(inp);
+            row.appendChild(inputWrap);
+            return row;
         }
 
         // 重绘某个分组的内容区（折叠壳与按钮不动）
@@ -6034,19 +6467,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 return;
             }
 
-            // 详细模式：逐项列出
+            // 详细模式：逐项列出，每一项都能选「＋ 自定义…」当场手打
             const autoText = autoByText(prefs);
             for (const g of items) {
-                const row = el('div', 'eo-row');
                 const opts = g.options.map(o => (o === SUB_AUTO ? autoText : o));
-                const curVal = prefs[g.key] || autoText;
-                makeSelect(row, g.label,
+                body.appendChild(makePrefSelect(g.key, g.label,
                     opts.map(o => ({ value: o, label: o })),
-                    // 历史值可能是另一句文案，归一化后选中
-                    opts.includes(curVal) ? curVal : autoText,
-                    (v) => { prefs[g.key] = v; },
-                    g.desc);
-                body.appendChild(row);
+                    g.desc));
             }
         }
 
@@ -6062,22 +6489,12 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             const isGrouped = !!g.group && !!PREF_PRESETS[g.group];
 
             if (!isGrouped) {
-                // 独立项：直接一行（难度等级在这里，选项来自设置里的自定义档位）
-                const opts = g.dynamic === 'difficulty'
-                    ? [PREF_AUTO_NEW].concat(getDifficultyLevels())
-                    // 独立项里也有带 SUB_AUTO 占位的（节点数量等），
-                    // 不换掉的话下拉框会直接显示成 __eo_sub_auto__
-                    : (g.options || []).map(o => (o === SUB_AUTO ? autoByText(prefs) : o));
-                const row = el('div', 'eo-row');
-                makeSelect(row, g.label,
+                // 独立项：直接一行（难度等级已单独提到上方，这里只剩节点数量等）
+                // 选项里带 SUB_AUTO 占位的（节点数量等），不换掉的话下拉框会直接显示成 __eo_sub_auto__
+                const opts = (g.options || []).map(o => (o === SUB_AUTO ? autoByText(prefs) : o));
+                // 独立项同样支持当场手打，打的内容原样进提示词
+                const row = makePrefSelect(g.key, g.label,
                     opts.map(o => ({ value: o, label: o })),
-                    // 历史值可能是另一句「自行设定」文案，归一化后选中
-                    opts.includes(prefs[g.key]) ? prefs[g.key] : (opts[0] || PREF_AUTO_NEW),
-                    (v) => {
-                        prefs[g.key] = v;
-                        // 难度等级变了，下面各组的「自行设定」文案要跟着变
-                        if (g.key === 'difficultyLevel') repaintAllGroups();
-                    },
                     g.desc);
                 page.appendChild(row);
                 continue;
@@ -6156,7 +6573,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             repaintPage();
         });
         rstRow.appendChild(btnReset);
-        attachHelp(rstRow, '把事件名、事件目的、框架提示、额外要求和全部体验偏好拨回默认值。'
+        attachHelp(rstRow, '把事件名、事件目的、框架提示、额外要求和全部事件参数拨回默认值。'
             + '已经生成的待选事件不受影响，它们各自记着自己生成时的那份设置。', true);
         page.appendChild(rstRow);
 
@@ -6686,7 +7103,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             ['记忆来源', renderSetMemory],
             ['打勾与自动盘点', renderSetTrack],
             ['自动盘点', renderSetAuto],
-            ['难度档位', renderSetLevels],
+            // 2026-11-04 顺序对齐生成页：事件类型 → 难度等级 → 事件参数
+            ['事件类型', renderSetTypes],
+            ['难度等级', renderSetLevels],
+            ['参数自定义项', renderSetPrefOptions],
             ['历史保留', renderSetRetention],
             ['界面', renderSetUi],
             ['调试模式', renderSetDebug],
@@ -7231,12 +7651,14 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const flIn = el('input', 'eo-input');
         markKey(flIn, 'set.recentFloors');
         flIn.type = 'number';
-        flIn.min = '1';
-        flIn.max = '100';
-        flIn.value = String(s.memory.recentFloors);
+        flIn.min = String(FLOORS_MIN);
+        flIn.max = String(FLOORS_MAX);
+        // 显示也走规整：存档里若是手改过 settings.json、留了个 0 或 999，
+        // 界面不能跟着显示错的值，否则用户看到 999 以为生效了
+        flIn.value = String(clampFloors(s.memory.recentFloors));
         flIn.style.width = '76px';
         flIn.addEventListener('change', () => {
-            const v = Math.max(1, Math.min(100, Number(flIn.value) || 15));
+            const v = clampFloors(flIn.value);
             flIn.value = String(v);
             getSettings().memory.recentFloors = v;
             saveSettings();
@@ -7244,6 +7666,44 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         flRow.appendChild(flIn);
         flRow.appendChild(el('span', 'eo-hint', '楼'));
         page.appendChild(flRow);
+
+        // --- 转述模式（2026-11-04）---
+        // 放在「最近楼层」正下方：它改的正是最近楼层的取法，挨着才找得到
+        const narRow = el('div', 'eo-row');
+        const narChk = el('input');
+        narChk.type = 'checkbox';
+        markKey(narChk, 'set.narrationMode');
+        narChk.checked = !!(s.memory && s.memory.narrationMode);
+        narChk.addEventListener('change', () => {
+            const st = getSettings();
+            const wasOn = !!st.memory.narrationMode;
+            const nowOn = narChk.checked;
+            st.memory.narrationMode = nowOn;
+            // 只在「真的发生切换」时动，重复点同一个状态不改数。
+            // 折算规则见 rebalanceFloorsOnModeChange：最近楼层与自动检测间隔一起折，
+            // 两者是同一个口径问题，只折一个会互相打架
+            let note = '';
+            if (wasOn !== nowOn) {
+                const r = rebalanceFloorsOnModeChange(st, nowOn);
+                note = `，最近楼层 ${r.before} → ${r.after}`;
+                if (r.everyBefore !== null) {
+                    note += `，自动检测间隔 ${r.everyBefore} → ${r.everyAfter}`;
+                    log(`自动检测间隔按模式折算：${r.everyBefore} → ${r.everyAfter}（切到${nowOn ? '转述' : '非转述'}）`);
+                }
+                log(`最近楼层按模式折算：${r.before} → ${r.after}（切到${nowOn ? '转述' : '非转述'}）`);
+            }
+            saveSettings();
+            log(`转述模式：${nowOn ? '开（最近楼层只读 AI 楼）' : '关（用户楼与 AI 楼都读）'}${note}`);
+            repaintPage();
+        });
+        narRow.appendChild(narChk);
+        const narLab = el('span', null, '转述模式（最近楼层只读 AI 楼）');
+        attachHelp(narLab, '有些角色卡里，你的输入只是给 AI 的指令（比如「继续」「去酒馆」），'
+            + 'AI 那一楼会把内容转述一遍。这种卡开着本项：读最近楼层时跳过用户楼，只取 AI 楼，'
+            + '避免同一段剧情读两遍——既省 token，也免得模型把一件事当成发生了两次。'
+            + '如果你的卡是用户楼写场景、AI 楼写回应这种分工，那就保持关闭。', true);
+        narRow.appendChild(narLab);
+        page.appendChild(narRow);
 
         // --- 角色世界书 ---
         const wbBox = el('div', 'eo-row');
@@ -7390,11 +7850,12 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         markKey(afIn, 'set.autoEvery');
         afIn.type = 'number';
         afIn.min = '0';
-        afIn.max = '200';
+        afIn.max = String(AUTO_EVERY_MAX);
         afIn.value = String(s.tracker.autoEveryFloors);
         afIn.style.width = '76px';
         afIn.addEventListener('change', () => {
-            const v = Math.max(0, Math.min(200, Number(afIn.value) || 0));
+            // 0 单独放行（关闭自动盘点），其余夹到 1..200
+            const v = clampAutoEvery(afIn.value, true);
             afIn.value = String(v);
             getSettings().tracker.autoEveryFloors = v;
             saveSettings();
@@ -7402,21 +7863,40 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         });
         afRow.appendChild(afIn);
         afRow.appendChild(el('span', 'eo-hint', '层楼自动盘点一次'));
+        // 奇数提示（2026-11-04）：切转述模式时这个数要折半再翻倍，奇数折半会四舍五入掉 1，
+        // 来回切一次就对不上了（15→8→16）。建议偶数，漂移就没了
+        const everyVal = Number(s.tracker.autoEveryFloors) || 0;
+        if (everyVal > 0 && everyVal % 2 !== 0) {
+            afRow.appendChild(el('span', 'eo-hint eo-hint-note', '建议填偶数'));
+        }
         sub.appendChild(afRow);
 
         if (getCurrentEvent()) {
             const cur = countFloors();
+            const narration = !!(s.memory && s.memory.narrationMode);
+            // 这里也要跟 shouldAutoInventory 一样判模式：口径不同时这个数没有可比性，
+            // 直接显示「已过多少层」会得到一个负数或虚高的数，用户看着莫名其妙
+            const modeChanged = !!getCurrentEvent().floorBaseNarration !== narration;
             const base = Number(getCurrentEvent().floorBase);
-            const since = Number.isFinite(base) ? Math.max(0, cur - base) : 0;
+            const since = (Number.isFinite(base) && !modeChanged) ? Math.max(0, cur - base) : 0;
             const every = Math.max(0, Number(s.tracker.autoEveryFloors) || 0);
+            const unit = narration ? '层 AI 楼' : '层';
             const line = el('div', 'eo-hint',
                 every > 0
-                    ? `当前对话共 ${cur} 层，距上次盘点已过 ${since} 层，还差 ${Math.max(0, every - since)} 层触发下一次自动盘点。`
-                    : `当前对话共 ${cur} 层。填 0 即关闭自动盘点，只在你手动点「开始盘点」时才跑。`);
+                    ? `当前对话共 ${cur} ${unit}，距上次盘点已过 ${since} ${unit}，`
+                    + `还差 ${Math.max(0, every - since)} ${unit}触发下一次自动盘点。`
+                    // 基线口径换了，这里从 0 重新算，正好跟 shouldAutoInventory 的实际行为对上
+                    + (modeChanged ? '（刚切换过转述模式，计数从此刻重新开始）' : '')
+                    : `当前对话共 ${cur} ${unit}。填 0 即关闭自动盘点，只在你手动点「开始盘点」时才跑。`);
             sub.appendChild(line);
         }
         sub.appendChild(el('div', 'eo-hint',
-            '楼层按「玩家楼 + AI 楼」合计，系统消息不算。基点在新建事件和每次盘点成功后归零重计。触发时机是每收到一条新回复后自动检查，攒够间隔就自己跑一次盘点；填 0 则完全关闭自动盘点。'));
+            '楼层口径跟着转述模式走：转述模式下只数 AI 楼（用户楼只是给 AI 的指令，内容会在 AI 楼里重述），'
+            + '非转述模式下玩家楼也在推进剧情，所以玩家楼 + AI 楼合计。系统消息不算。'
+            + '基点在新建事件、每次盘点成功后归零重计；切换转述模式时也会按新口径重挂一次。'
+            + '切换转述模式时这个间隔会自动折算（切到转述乘 2，切到非转述除 2），'
+            + '跟最近楼层用的是同一套规则，所以建议填偶数——奇数折半会被四舍五入，来回切会对不上。'
+            + '触发时机是每收到一条新回复后自动检查，攒够间隔就自己跑一次盘点；填 0 则完全关闭自动盘点。'));
 
         // 手动触发一次
         const afBtn = el('button', 'eo-btn eo-primary', '现在盘点一次');
@@ -7436,6 +7916,148 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         afRow2.appendChild(afBtn);
         sub.appendChild(afRow2);
         page.appendChild(sub);
+    }
+
+    /** 设置页：事件类型自定义（2026-11-04） */
+    function renderSetTypes(page, s) {
+        const main0 = (s.preset && Array.isArray(s.preset.mainTypes)) ? s.preset.mainTypes : [];
+        const sub0 = (s.preset && Array.isArray(s.preset.subTypes)) ? s.preset.subTypes : [];
+        // 折叠条上标出当前用的是自定义还是内置，省得展开才知道改没改过
+        const sumHint = (main0.length || sub0.length)
+            ? `自定义 主 ${main0.length || '内置'} / 次 ${sub0.length || '内置'}`
+            : '内置默认';
+        const box = appendCollapsibleSection(page, 'types', '事件类型', sumHint);
+        box.appendChild(el('div', 'eo-hint',
+            '生成页「事件类型」里可选的主类型与次类型。一行一个，按这里写的顺序出现。'
+            + '留空则用内置默认：主类型 '
+            + EVENT_MAIN_TYPES.join(' / ')
+            + '；次类型 '
+            + EVENT_SUB_TYPES.join(' / ')
+            + '。内置那套里已经有 NSFW。'
+            + '在生成页点「＋自定义」也能直接加，加完会回到这里。'));
+
+        const makeBox = (title, key, defaults, previewFn) => {
+            box.appendChild(el('div', 'eo-sub-title', '└ ' + title));
+            const ta = el('textarea', 'eo-input eo-textarea');
+            ta.rows = key === 'mainTypes' ? 5 : 7;
+            ta.placeholder = '每行一个。例如：\n' + defaults.slice(0, 3).join('\n');
+            const custom = (s.preset && Array.isArray(s.preset[key])) ? s.preset[key] : [];
+            ta.value = custom.join('\n');
+            box.appendChild(ta);
+
+            const row = el('div', 'eo-row');
+            const btnSave = el('button', 'eo-btn eo-primary', '保存');
+            const btnFill = el('button', 'eo-btn', '填入内置默认');
+            const btnReset = el('button', 'eo-btn', '恢复默认');
+            btnFill.type = 'button';
+            btnFill.addEventListener('click', () => {
+                ta.value = defaults.join('\n');
+                out.className = 'eo-hint';
+                out.textContent = '已填入内置默认，改完记得点「保存」。';
+            });
+            const out = el('div', 'eo-hint');
+            btnSave.addEventListener('click', () => {
+                const list = String(ta.value || '').split('\n').map(x => x.trim()).filter(Boolean);
+                const seen = new Set();
+                const clean = [];
+                for (const x of list) { if (!seen.has(x)) { seen.add(x); clean.push(x); } }
+                const st = getSettings();
+                st.preset[key] = clean;
+                saveSettings();
+                out.className = 'eo-ok';
+                out.textContent = clean.length
+                    ? `已保存 ${clean.length} 个：${clean.join(' / ')}`
+                    : '已清空，将使用内置默认';
+                log(`${title}已更新：${clean.length ? clean.join(' / ') : '（恢复默认）'}`);
+                if (previewFn) previewFn();
+            });
+            btnReset.addEventListener('click', () => {
+                ta.value = '';
+                const st = getSettings();
+                st.preset[key] = [];
+                saveSettings();
+                out.className = 'eo-ok';
+                out.textContent = '已恢复默认：' + defaults.join(' / ');
+                log(`${title}已恢复默认`);
+                if (previewFn) previewFn();
+            });
+            row.appendChild(btnSave);
+            row.appendChild(btnFill);
+            row.appendChild(btnReset);
+            box.appendChild(row);
+            box.appendChild(out);
+        };
+
+        makeBox('主类型', 'mainTypes', EVENT_MAIN_TYPES);
+        makeBox('次类型', 'subTypes', EVENT_SUB_TYPES);
+    }
+
+    /**
+     * 设置页：事件参数的自定义选项（2026-11-04 危晓要求）。
+     * 他在生成页手打的话是一次性的；要反复用同一句，就在这里预存。
+     * 存进 preset.customOptions[key] = ['一句', '两句']，
+     * 生成页对应那一项的下拉里就会多出这几项，排在「＋ 自定义…」之前。
+     */
+    function renderSetPrefOptions(page, s) {
+        const box = appendCollapsibleSection(page, 'prefOptions', '参数自定义项', '预存手写取值');
+        box.appendChild(el('div', 'eo-hint',
+            '这里填的是「以后经常要用到、想让它直接出现在下拉里」的说法。'
+            + '只是这一次想换个写法的话，不用来这儿——生成页每一项的下拉里都有「＋ 自定义…」，'
+            + '选中后当场打一句就行。'
+            + '一行一个，按写的顺序排在下拉里。'));
+
+        const store = () => {
+            const st = getSettings();
+            if (!st.preset.customOptions) st.preset.customOptions = {};
+            return st.preset.customOptions;
+        };
+
+        // 只列事件参数里的项。难度等级不在这里：它是独立的「难度等级」节，
+        // 档位本身就在那一节编，不该在事件参数里再出现一次（2026-11-04 危晓指出重复）
+        for (const g of PREF_GROUPS) {
+            const sub = el('div', 'eo-row eo-prefopt-row');
+            const lab = el('label', null, g.group ? `${g.group}·${g.label}` : g.label);
+            lab.style.minWidth = '130px';
+            sub.appendChild(lab);
+
+            const ta = el('textarea', 'eo-input eo-textarea');
+            ta.rows = 2;
+            ta.placeholder = '一行一条，例如：只留一处能要人命的地方';
+            const saved = store();
+            ta.value = (Array.isArray(saved[g.key]) ? saved[g.key] : []).join('\n');
+            ta.style.flex = '1';
+            sub.appendChild(ta);
+
+            const out = el('div', 'eo-hint');
+            let timer = null;
+            // 边打边存，但不每敲一个字就写一遍存储：停手 600ms 再落盘
+            const commit = () => {
+                const list = String(ta.value || '').split('\n').map(x => x.trim()).filter(Boolean);
+                const seen = new Set();
+                const clean = [];
+                for (const x of list) { if (!seen.has(x)) { seen.add(x); clean.push(x); } }
+                const all = store();
+                if (clean.length) all[g.key] = clean;
+                else delete all[g.key];
+                saveSettings();
+                out.textContent = clean.length ? `已存 ${clean.length} 条` : '已清空';
+                out.className = 'eo-hint';
+            };
+            ta.addEventListener('input', () => {
+                if (timer) clearTimeout(timer);
+                timer = setTimeout(commit, 600);
+            });
+
+            const btn = el('button', 'eo-btn', '清空');
+            btn.type = 'button';
+            btn.addEventListener('click', () => {
+                ta.value = '';
+                commit();
+            });
+            sub.appendChild(btn);
+            sub.appendChild(out);
+            box.appendChild(sub);
+        }
     }
 
     /** 设置页：历史事件保留数量 */
@@ -7645,13 +8267,18 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         page.appendChild(ordRow);
         page.appendChild(ordOut);
 
-        // --- 难度档位 ---
+        // --- 难度等级 ---
     }
 
-    /** 设置页：难度档位自定义 */
+    /** 设置页：难度等级自定义（可折叠，2026-11-04）。叫法跟生成页统一，不再叫「难度档位」 */
     function renderSetLevels(page, s) {
-        page.appendChild(el('div', 'eo-sec', '难度档位'));
-        page.appendChild(el('div', 'eo-hint',
+        const custom0 = (s.preset && Array.isArray(s.preset.difficultyLevels)) ? s.preset.difficultyLevels : [];
+        // 折叠条上直接把当前有几档写出来，折着也知道里面是什么状态，不用展开一个个数
+        const sumHint = custom0.length
+            ? `自定义 ${custom0.length} 档`
+            : `内置默认 ${DEFAULT_DIFFICULTY_LEVELS.length} 档`;
+        const box = appendCollapsibleSection(page, 'levels', PREF_LEVEL_ITEM.label, sumHint);
+        box.appendChild(el('div', 'eo-hint',
             '生成事件时「难度等级」下拉里可选的档位。一行一个，从低到高排，下拉里就按这个顺序出现。'
             + '留空则使用内置默认档：'
             + DEFAULT_DIFFICULTY_LEVELS.join(' / ')
@@ -7661,7 +8288,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         lvInput.placeholder = '每行一个档位，从低到高。例如：\nF 级\nE 级\nD 级\nC 级\nB 级';
         const custom = (s.preset && Array.isArray(s.preset.difficultyLevels)) ? s.preset.difficultyLevels : [];
         lvInput.value = custom.join('\n');
-        page.appendChild(lvInput);
+        box.appendChild(lvInput);
 
         const lvRow = el('div', 'eo-row');
         const btnLvSave = el('button', 'eo-btn eo-primary', '保存档位');
@@ -7689,7 +8316,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             lvOut.textContent = clean.length
                 ? `已保存 ${clean.length} 个档位：${clean.join(' / ')}`
                 : '已清空，将使用内置默认档位';
-            log(`难度档位已更新：${clean.length ? clean.join(' / ') : '（恢复默认）'}`);
+            log(`难度等级已更新：${clean.length ? clean.join(' / ') : '（恢复默认）'}`);
         });
         btnLvReset.addEventListener('click', () => {
             lvInput.value = '';
@@ -7697,13 +8324,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             saveSettings();
             lvOut.className = 'eo-ok';
             lvOut.textContent = '已恢复默认档位：' + DEFAULT_DIFFICULTY_LEVELS.join(' / ');
-            log('难度档位已恢复默认');
+            log('难度等级已恢复默认');
         });
         lvRow.appendChild(btnLvSave);
         lvRow.appendChild(btnLvFill);
         lvRow.appendChild(btnLvReset);
-        page.appendChild(lvRow);
-        page.appendChild(lvOut);
+        box.appendChild(lvRow);
+        box.appendChild(lvOut);
 
     }
 
