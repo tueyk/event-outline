@@ -51,6 +51,14 @@
             // 事件参数的预存手写取值（2026-11-04）：key 是偏好项的键，值是一行一条的说法。
             // 和生成页「＋ 自定义…」不是一回事：那里是当场打一次，这里存下来以后反复可选
             customOptions: {},
+            // M7（2026-11-07）：自定义类型用哪套骨架。
+            // 形如 { "盗墓": "探险探索", "审问": "谈判交涉" }——键是用户自己起的类型名，
+            // 值是一个内置主类型名。没配映射的自定义类型一律套「其他」通用骨架。
+            //
+            // 为什么存映射而不是让用户在生成页直接选内置类型：
+            // 用户想要的是「我的类型叫盗墓」，但希望它按探险的字段来生成。
+            // 直接选探险就丢了「盗墓」这个名字，写进大纲的 event_type 也就成了探险。
+            customSkeletonMap: {},
         },
         memory: {
             source: 'auto',
@@ -103,9 +111,9 @@
     // ---------- 大纲骨架（单一真源，2026-11-04 A1）----------
     // 以前骨架写死在 buildOutlinePrompt 里，顶层键清单是另一句手写的话，checkOutlineQuality
     // 的必查集合又是第三份手抄——三处各自漂移，结果是清单漏 2 个键、校验只查 5 个。
-    // 现在只有这一份骨架：清单从它数键，校验也从它数键，改骨架就是改这三处。
-    // 注意 OUTLINE_TOP_KEYS 用正则从骨架原文里取一级键，不依赖解析器（解析器只为模型输出服务，
-    // 不该被自己的模板反过来依赖）。
+    // 2026-11-05 M2 之后的分工：示例只有这一份，键清单与校验各从对应的常量派生——
+    // 外层看 OUTLINE_OUTER_KEYS，内层看 OUTLINE_INNER_KEYS_BY_TYPE[主类型]，
+    // 示例本身只负责「让模型看到一条填满的样板」，不再被拿来数键。
     // 两条完整示例，不是半填的模板（2026-11-04 A2，危晓定：A 档第 2 条）。
     // 理由见 2026-11-04 复核那份：原骨架 51 行里 36 行带尖括号，模型在「照抄模板」和
     // 「替换内容」之间摇摆，最常见的是把 <事件名>、[<可选，误导项填节点编号>] 原样留在输出里。
@@ -121,44 +129,6 @@
         '  secondary:',
         '    - 悬疑',
         '    - 失踪',
-        'core_truth: 表面是连环拐带，实际是镇长用女孩替换矿难遇难者名册；真正的动机是他自己要掩盖那场矿难。',
-        'nodes:',
-        '  - id: 1',
-        '    type: 物证',
-        '    trigger: 玩家走进失踪女孩的卧室',
-        '    info: 床单上有向外拖拽的压痕，说明她不是自己走的。',
-        '  - id: 2',
-        '    type: 证言',
-        '    trigger: 玩家询问巷口的洗衣妇',
-        '    info: 她说那晚听见钟声响了两次，比平时多一次。',
-        'min_nodes_for_deduction:',
-        '  - 1',
-        '  - 2',
-        'characters:',
-        '  helpers:',
-        '    - name: 周向文',
-        '      identity: 镇上的老更夫',
-        '      motive: 他认得那口多余的钟声',
-        '      cost: 要玩家先替他打一壶酒',
-        '  obstructers:',
-        '    - name: 镇长',
-        '      identity: 主持失踪调查的人',
-        '      reason: 他会把调查引向山上的狼',
-        '      resolvable_by: 拿名册上的替换痕迹当面问他',
-        '  informants:',
-        '    - name: 洗衣妇',
-        '      info_known: 钟声在那一夜响过两次，第二次没有更夫在场',
-        '  behind_scenes:',
-        '    - name: 矿场东家',
-        '      reveal: forbidden',
-        '      exposure_path: 名册、钟声、镇长三处对不上时才浮出来',
-        'paths:',
-        '  - step: 1',
-        '    node: 1',
-        '    route: 玩家进卧室看压痕，决定去向洗衣妇打听',
-        '    must: 必经',
-        '    risk: 低',
-        '    fail: 被镇长撞见，后面问名册要多绕一圈',
         'time_pressure:',
         '  countdown: 当晚的第二次钟声之前',
         '  duration: 约两个时辰',
@@ -172,10 +142,94 @@
         'forbidden:',
         '  - 不得提前说出矿难',
         '  - 不得让镇长直接交出真相',
+        'structure:',
+        '  core_truth: 表面是连环拐带，实际是镇长用女孩替换矿难遇难者名册；真正的动机是他自己要掩盖那场矿难。',
+        '  nodes:',
+        '    - id: 1',
+        '      type: 物证',
+        '      trigger: 玩家走进失踪女孩的卧室',
+        '      info: 床单上有向外拖拽的压痕，说明她不是自己走的。',
+        '    - id: 2',
+        '      type: 证言',
+        '      trigger: 玩家询问巷口的洗衣妇',
+        '      info: 她说那晚听见钟声响了两次，比平时多一次。',
+        '    - id: 3',
+        '      type: 环境',
+        '      trigger: 玩家查看卧室后窗与院墙',
+        '      info: 后窗插销是从内侧拔开的，院墙上没有攀爬痕迹——人是自己出去的，或者是被熟人叫出去的。',
+        '    - id: 4',
+        '      type: 时间线',
+        '      trigger: 玩家去祠堂看更簿',
+        '      info: 更簿上第二声钟后面没有记录，那一声不是更夫敲的。',
+        '    - id: 5',
+        '      type: 关系',
+        '      trigger: 玩家查两个失踪女孩的交集',
+        '      info: 两人都在同一家织坊做工，工头是镇长的小舅子。',
+        '    - id: 6',
+        '      type: 物证',
+        '      trigger: 玩家进织坊后间的库房',
+        '      info: 库房角落堆着矿难那年封存的旧名册，其中有几页被裁掉又用新纸补上，笔迹不同。',
+        '  min_nodes_for_deduction:',
+        '    - 2',
+        '    - 4',
+        '    - 6',
+        '  suspects:',
+        '    - name: 镇长',
+        '      motive: 掩盖矿难中遇难者的真实数目',
+        '      alibi: 当晚他在祠堂主持守夜，有十几个人能作证',
+        '      lie: 他说那晚只听见一次钟声',
+        '  characters:',
+        '    helpers:',
+        '      - name: 周向文',
+        '        identity: 镇上的老更夫',
+        '        motive: 他认得那口多余的钟声',
+        '        cost: 要玩家先替他打一壶酒',
+        '    obstructers:',
+        '      - name: 镇长',
+        '        identity: 主持失踪调查的人',
+        '        reason: 他会把调查引向山上的狼',
+        '        resolvable_by: 拿名册上的替换痕迹当面问他',
+        '    informants:',
+        '      - name: 洗衣妇',
+        '        info_known: 钟声在那一夜响过两次，第二次没有更夫在场',
+        '    behind_scenes:',
+        '      - name: 矿场东家',
+        '        reveal: forbidden',
+        '        exposure_path: 名册、钟声、镇长三处对不上时才浮出来',
+        '  paths:',
+        '    - step: 1',
+        '      node: 1',
+        '      route: 玩家进卧室看压痕，决定去向洗衣妇打听',
+        '      must: 必经',
+        '      risk: 低',
+        '      fail: 被镇长撞见，后面问名册要多绕一圈',
+        '    - step: 2',
+        '      node: 2',
+        '      route: 从洗衣妇口中问出第二次钟声，再去祠堂查更簿',
+        '      must: 必经',
+        '      risk: 中',
+        '      fail: 问得太直白，洗衣妇被镇长家仆盯上，之后不敢再开口',
+        '    - step: 3',
+        '      node: 4',
+        '      route: 拿更簿上缺记录的那一声钟，对上织坊这条线',
+        '      must: 必经',
+        '      risk: 中',
+        '      fail: 只当是更夫偷懒，线断在钟声上',
+        '    - step: 4',
+        '      node: 6',
+        '      route: 进织坊库房找到被替换过的旧名册，回头当面对质',
+        '      must: 必经',
+        '      risk: 高',
+        '      fail: 被工头堵在库房里，名册当场被烧',
     ].join('\n');
 
-    // 第二条示例：只差一处——节点 1 是误导项，带 refute_by 指向能推翻它的节点 4。
+    // 第二条示例：与第一条只差「节点 1 变成误导项」这一件事——多一个 refute_by 指向能推翻它的节点 4。
     // 用来示范「refute_by 什么时候写、怎么写」，把可选语义放进示例里而不是说明里。
+    //
+    // 节点 1 的 info 措辞也跟第一条不同，这是有意为之、不是笔误：
+    //   第一条：床单上的压痕「说明她不是自己走的」——铁证，直接坐实。
+    //   第二条：「看着像是被人硬拖走的」——只是看着像，后面会被节点 4 推翻。
+    // 误导项如果写成铁证口吻，模型会学成「先给结论再给反证」，那就不是误导而是自我否定了。
     const OUTLINE_SKELETON_MISLEAD = [
         'event_name: 石桥镇失踪案',
         'event_brief: 镇上第二个女孩在同一个雨夜消失，玩家要在钟声停下前找出把人带走的东西。',
@@ -184,46 +238,6 @@
         '  secondary:',
         '    - 悬疑',
         '    - 失踪',
-        'core_truth: 表面是连环拐带，实际是镇长用女孩替换矿难遇难者名册；真正的动机是他自己要掩盖那场矿难。',
-        'nodes:',
-        '  - id: 1',
-        '    type: 物证',
-        '    trigger: 玩家走进失踪女孩的卧室',
-        '    info: 床单上有向外拖拽的压痕，看着像是被人硬拖走的。',
-        '    refute_by:',
-        '      - 4',
-        '  - id: 2',
-        '    type: 证言',
-        '    trigger: 玩家询问巷口的洗衣妇',
-        '    info: 她说那晚听见钟声响了两次，比平时多一次。',
-        'min_nodes_for_deduction:',
-        '  - 1',
-        '  - 2',
-        'characters:',
-        '  helpers:',
-        '    - name: 周向文',
-        '      identity: 镇上的老更夫',
-        '      motive: 他认得那口多余的钟声',
-        '      cost: 要玩家先替他打一壶酒',
-        '  obstructers:',
-        '    - name: 镇长',
-        '      identity: 主持失踪调查的人',
-        '      reason: 他会把调查引向山上的狼',
-        '      resolvable_by: 拿名册上的替换痕迹当面问他',
-        '  informants:',
-        '    - name: 洗衣妇',
-        '      info_known: 钟声在那一夜响过两次，第二次没有更夫在场',
-        '  behind_scenes:',
-        '    - name: 矿场东家',
-        '      reveal: forbidden',
-        '      exposure_path: 名册、钟声、镇长三处对不上时才浮出来',
-        'paths:',
-        '  - step: 1',
-        '    node: 1',
-        '    route: 玩家进卧室看压痕，决定去向洗衣妇打听',
-        '    must: 必经',
-        '    risk: 低',
-        '    fail: 被镇长撞见，后面问名册要多绕一圈',
         'time_pressure:',
         '  countdown: 当晚的第二次钟声之前',
         '  duration: 约两个时辰',
@@ -237,21 +251,1133 @@
         'forbidden:',
         '  - 不得提前说出矿难',
         '  - 不得让镇长直接交出真相',
+        'structure:',
+        '  core_truth: 表面是连环拐带，实际是镇长用女孩替换矿难遇难者名册；真正的动机是他自己要掩盖那场矿难。',
+        '  nodes:',
+        '    - id: 1',
+        '      type: 物证',
+        '      trigger: 玩家走进失踪女孩的卧室',
+        '      info: 床单上有向外拖拽的压痕，看着像是被人硬拖走的。',
+        '      refute_by:',
+        '        - 4',
+        '    - id: 2',
+        '      type: 证言',
+        '      trigger: 玩家询问巷口的洗衣妇',
+        '      info: 她说那晚听见钟声响了两次，比平时多一次。',
+        '    - id: 3',
+        '      type: 环境',
+        '      trigger: 玩家查看卧室后窗与院墙',
+        '      info: 后窗插销是从内侧拔开的，院墙上没有攀爬痕迹。',
+        '    - id: 4',
+        '      type: 时间线',
+        '      trigger: 玩家去祠堂看更簿',
+        '      info: 更簿上第二声钟后面没有记录，那一声不是更夫敲的；而拖痕的方向其实通向院门，不是墙外。',
+        '    - id: 5',
+        '      type: 关系',
+        '      trigger: 玩家查两个失踪女孩的交集',
+        '      info: 两人都在同一家织坊做工，工头是镇长的小舅子。',
+        '    - id: 6',
+        '      type: 物证',
+        '      trigger: 玩家进织坊后间的库房',
+        '      info: 库房角落堆着矿难那年封存的旧名册，其中有几页被裁掉又用新纸补上，笔迹不同。',
+        '  min_nodes_for_deduction:',
+        '    - 2',
+        '    - 4',
+        '    - 6',
+        '  suspects:',
+        '    - name: 镇长',
+        '      motive: 掩盖矿难中遇难者的真实数目',
+        '      alibi: 当晚他在祠堂主持守夜，有十几个人能作证',
+        '      lie: 他说那晚只听见一次钟声',
+        '  characters:',
+        '    helpers:',
+        '      - name: 周向文',
+        '        identity: 镇上的老更夫',
+        '        motive: 他认得那口多余的钟声',
+        '        cost: 要玩家先替他打一壶酒',
+        '    obstructers:',
+        '      - name: 镇长',
+        '        identity: 主持失踪调查的人',
+        '        reason: 他会把调查引向山上的狼',
+        '        resolvable_by: 拿名册上的替换痕迹当面问他',
+        '    informants:',
+        '      - name: 洗衣妇',
+        '        info_known: 钟声在那一夜响过两次，第二次没有更夫在场',
+        '    behind_scenes:',
+        '      - name: 矿场东家',
+        '        reveal: forbidden',
+        '        exposure_path: 名册、钟声、镇长三处对不上时才浮出来',
+        '  paths:',
+        '    - step: 1',
+        '      node: 1',
+        '      route: 玩家进卧室看压痕，决定去向洗衣妇打听',
+        '      must: 必经',
+        '      risk: 低',
+        '      fail: 被镇长撞见，后面问名册要多绕一圈',
+        '    - step: 2',
+        '      node: 2',
+        '      route: 从洗衣妇口中问出第二次钟声，再去祠堂查更簿',
+        '      must: 必经',
+        '      risk: 中',
+        '      fail: 问得太直白，洗衣妇被镇长家仆盯上，之后不敢再开口',
+        '    - step: 3',
+        '      node: 4',
+        '      route: 拿更簿上缺记录的那一声钟，对上织坊这条线',
+        '      must: 必经',
+        '      risk: 中',
+        '      fail: 只当是更夫偷懒，线断在钟声上',
+        '    - step: 4',
+        '      node: 6',
+        '      route: 进织坊库房找到被替换过的旧名册，回头当面对质',
+        '      must: 必经',
+        '      risk: 高',
+        '      fail: 被工头堵在库房里，名册当场被烧',
     ].join('\n');
 
-    /**
-     * 骨架里的一级键（顶格、以「键:」或「键: 值」开头的那些行）。
-     * 缩进的行都属于上一层，不计入；列表项的「- 」也不计入。
-     * 清单与校验都从这里取，别在别处再手写一份。
-     */
-    const OUTLINE_TOP_KEYS = (() => {
-        const keys = [];
-        for (const line of OUTLINE_SKELETON.split('\n')) {
-            const m = /^([A-Za-z_][A-Za-z0-9_]*):/.exec(line);
-            if (m && keys.indexOf(m[1]) < 0) keys.push(m[1]);
+    // 2026-11-05 M2：原来的 OUTLINE_TOP_KEYS（从骨架原文数一级键）已删除。
+    // 它当初存在是为了解决「清单、骨架、校验三处各写一份」，现在职责拆开了：
+    // 外层键由 OUTLINE_OUTER_KEYS 固定列出，内层键由 OUTLINE_INNER_KEYS_BY_TYPE 按主类型给，
+    // 两者都不再从示例文本里数——示例改成 structure 嵌套之后，数出来的只会是七个外层键，
+    // 拿去当校验清单等于不查内层了。留着它只会让后来人以为它还在管事。
+
+    // ---------- 战斗骨架示例（2026-11-05 M3，定稿 1C / 1M）----------
+    // 两条示例的分工与案件那两条一样：第一条常态（遭遇战，只写三个必填内层键），
+    // 第二条示范可选字段——援军会来、有撤退条件、有事先准备（preparation）。
+    //
+    // 第一条为什么是遭遇战而不是攻防战：如果第一条就带 preparation，模型会以为
+    // 「每场战斗都要先准备」，遇到没准备阶段的伏击也硬凑一份物资清单。
+    // 把 preparation 只放在第二条，可选语义就由示例本身说清楚了，不用另写一段解释。
+    //
+    // 数值口径：enemy_forces 的 level 用相对强弱（精锐/常备/乌合），不写具体血量与伤害，
+    // 那是战斗系统的事，大纲只管「对面是谁、多少、什么路数、还愿不愿意打」。
+    const OUTLINE_SKELETON_COMBAT = [
+        'event_name: 断桥伏击',
+        'event_brief: 车队必须在入夜前过桥，而桥头两侧的林子里已经有人先到了，玩家要在队尾被截断前打穿去路。',
+        'event_type:',
+        '  primary: 战斗冲突',
+        '  secondary:',
+        '    - 遭遇',
+        '    - 护送',
+        'time_pressure:',
+        '  countdown: 天色完全黑下来之前',
+        '  duration: 约半个时辰',
+        '  timeout_result: 对方借夜色合围，车队首尾不能相顾',
+        '  delay_cost: 队尾的驮马会被惊散，补给丢一半',
+        'danger:',
+        '  lethality: 中',
+        '  failure: 车队被迫退回原路，当天的行程作废',
+        '  tolerance: 两次',
+        '  threat_source: 桥头两侧林子里的弓手与堵在桥心的持矛人',
+        'forbidden:',
+        '  - 不得让玩家一击打穿整条封锁线',
+        '  - 不得让护送目标自行脱险',
+        'structure:',
+        '  enemy_forces:',
+        '    - name: 桥头持矛人',
+        '      strength: 约二十人',
+        '      level: 常备',
+        '      tactic: 结阵堵住桥心，逼车队停在无遮无挡的桥面上',
+        '      morale: 领钱办事，头目倒下就不愿再顶',
+        '    - name: 林中弓手',
+        '      strength: 五六人',
+        '      level: 乌合',
+        '      tactic: 只射队尾驮马与举灯的人，逼车队把灯熄掉',
+        '      morale: 怕被近身，一旦有人摸进林子就散',
+        '  objectives:',
+        '    - name: 打穿桥心',
+        '      type: 突破',
+        '      condition: 持矛人阵型被撕开一道能过车的口子',
+        '      fail: 车队被困在桥面，弓手可以从容点名',
+        '    - name: 保住队尾',
+        '      type: 守住',
+        '      condition: 驮马与车夫一个不少地过桥',
+        '      fail: 补给丢一半，后面两天的行程要改',
+        '  terrain:',
+        '    cover: 桥两侧的石栏只能挡蹲姿，车板能挡弓矢但挡不住近身',
+        '    elevation: 林子比桥面高出一人，弓手占高，玩家往上冲要多吃一轮箭',
+        '    chokepoint: 桥面只容一辆车并行，谁挤在桥心谁挨打',
+        '    note: 河水不深但急，落水的人爬不上岸，跌下去等于退出战斗',
+    ].join('\n');
+
+    // 第二条：有准备阶段的攻防战。与第一条的差别就是多出 preparation 与 reinforcements、retreat。
+    // preparation 的五个子项对应定稿 §5 的「物资/陷阱/情报/盟友/出发时间」。
+    const OUTLINE_SKELETON_COMBAT_PREP = [
+        'event_name: 守村之夜',
+        'event_brief: 山匪在夜里会来，村子只有一条进路，玩家要用一个下午把这条进路变成能守住的样子。',
+        'event_type:',
+        '  primary: 战斗冲突',
+        '  secondary:',
+        '    - 守城',
+        '    - 生存',
+        'time_pressure:',
+        '  countdown: 入夜之前必须布置完毕',
+        '  duration: 布置大半个下午，接战一整夜',
+        '  timeout_result: 天亮才动手，匪众会从两侧坡地绕过来',
+        '  delay_cost: 少设一道陷阱，第一波就要拿人去填',
+        'danger:',
+        '  lethality: 高',
+        '  failure: 村口被破，匪众进村抢粮放火',
+        '  tolerance: 一次',
+        '  threat_source: 山匪与他们的头目',
+        'forbidden:',
+        '  - 不得让玩家独自守完整夜',
+        '  - 不得提前说明匪首的真实身份',
+        'structure:',
+        '  enemy_forces:',
+        '    - name: 山匪主力',
+        '      strength: 约四十人',
+        '      level: 常备',
+        '      tactic: 先派小股试探，再趁乱冲进村口',
+        '      morale: 抢不到东西就会散，粮到手就会恋战',
+        '    - name: 匪首',
+        '      strength: 一人',
+        '      level: 精锐',
+        '      tactic: 躲在主力后面看哪段防线最弱',
+        '      morale: 只为财，一旦自己受伤就退',
+        '  objectives:',
+        '    - name: 守住村口',
+        '      type: 守住',
+        '      condition: 天亮之前匪众没能进村',
+        '      fail: 村口一破，后面就只能在巷子里打',
+        '  terrain:',
+        '    cover: 村口的石墙只到腰高，站着守会中箭，要蹲',
+        '    elevation: 两侧坡地略高于村口，是匪众最想拿的位置',
+        '    chokepoint: 进村只有一条土路，路窄到三人并行',
+        '    note: 土路雨后泥泞，跑起来会打滑，撤的时候容易被人追上',
+        '  preparation:',
+        '    supplies: 火油四罐、麻绳两捆、门板三块、伤药一小包',
+        '    traps: 土路两侧挖浅坑插削尖的木桩，坡地边缘埋绊绳',
+        '    intel: 从回来的猎户那里问到人数与来路，知道他们走的是西坡',
+        '    allies: 村里能拿弓的六个人，青壮十二人，都不经打但肯听指挥',
+        '    depart_time: 正午前必须开始布置，入夜后不再出去设置',
+        '  reinforcements:',
+        '    - wave: 第一波',
+        '      arrive: 入夜后不久',
+        '      size: 十来人，试探村口哪段最松',
+        '    - wave: 第二波',
+        '      arrive: 约三更',
+        '      size: 主力全上，匪首跟在后面',
+        '  retreat:',
+        '    condition: 村口已破且青壮死伤过半',
+        '    cost: 放弃村外的粮仓，带不走的粮全部烧掉',
+        '  casualty:',
+        '    note: 青壮若折损过半，这个村子下个月就交不上粮',
+    ].join('\n');
+
+    // ---------- 外层键（2026-11-05 一期 M1）----------
+    // 八套骨架改造的第一步：一个事件 = 公共外层 + 按主类型换的内层（定稿 1A「A2」）。
+    // 外层是所有类型共用的那几个键，解析层只认外层；内层按主类型换，原样存进事件条目。
+    //
+    // 为什么要单独列出来，而不是继续从 OUTLINE_SKELETON 里数键：
+    // 现在骨架只有案件一套，数出来的十一个键全是案件形状（core_truth / nodes / min_nodes…）。
+    // 分类型之后这些键属于「案件推理的内层」，不再是所有类型都该有的东西——
+    // 战斗事件没有 core_truth，拿它当必查就是逼模型硬凑。
+    //
+    // 这份清单就是定稿 §4 的外层字段表，改它等于改契约，改之前先看定稿。
+    const OUTLINE_OUTER_KEYS = [
+        'event_name',      // 事件名
+        'event_brief',     // 一两句话说清目标与处境
+        'event_type',      // primary 一个，secondary 最多三个
+        'contract',        // 可选：委托关系，不占结构包名额
+        'time_pressure',   // 事件级统一时间压力
+        'danger',          // 事件级风险基调
+        'forbidden',       // 模型不得提前透露的内容
+        'structure',       // 内层，按主类型换
+    ];
+
+    // 外层里真正必填的键（contract 是可选，不在此列）。
+    // 定稿 §9：「外层硬校验。缺了判失败并重试」。
+    const OUTLINE_OUTER_REQUIRED = [
+        'event_name', 'event_brief', 'event_type',
+        'time_pressure', 'danger', 'forbidden', 'structure',
+    ];
+
+    // ---------- 内层骨架：从 OUTLINE_SPEC_BY_TYPE 派生 ----------
+    // M6.1（2026-11-06）：这张表原来手写一份必填/可选清单，与 OUTLINE_SPEC_BY_TYPE 重复。
+    // 同一条规则写两遍就是漂移的开始（改了一处忘了另一处），所以改成派生。
+    // 这里保留这个名字与形状（{required:[], optional:[], progress}），
+    // 是为了不动 innerKeysOf / progressSpecOf 等既有调用方。
+    //
+    // 用惰性求值（首次访问时才算），因为 spec 表定义在本文件更后面；
+    // 直接 IIFE 会撞上 const 的暂时性死区。
+    let __innerKeysCache = null;
+    function innerKeysTable() {
+        if (__innerKeysCache) return __innerKeysCache;
+        const out = {};
+        for (const [type, spec] of Object.entries(OUTLINE_SPEC_BY_TYPE)) {
+            out[type] = {
+                required: Object.keys(spec.required || {}),
+                optional: Object.keys(spec.optional || {}),
+                progress: spec.progress || null,
+            };
+            // 列表元素里的可选子键也要暴露给校验层（如 nodes[].refute_by）
+            const extra = [];
+            for (const meta of Object.values(spec.required || {})) {
+                if (meta && meta.item) {
+                    for (const [k, m] of Object.entries(meta.item)) {
+                        if (m && m.optional) extra.push(k);
+                    }
+                }
+            }
+            for (const k of extra) {
+                if (!out[type].optional.includes(k)) out[type].optional.push(k);
+            }
         }
-        return keys;
-    })();
+        __innerKeysCache = out;
+        return out;
+    }
+    // 兼容既有代码里 OUTLINE_INNER_KEYS_BY_TYPE[x] 的读法（测试也直接读它）
+    const OUTLINE_INNER_KEYS_BY_TYPE = new Proxy({}, {
+        get(_, k) { return innerKeysTable()[k]; },
+        has(_, k) { return k in innerKeysTable(); },
+        ownKeys() { return Reflect.ownKeys(innerKeysTable()); },
+        getOwnPropertyDescriptor(_, k) {
+            const t = innerKeysTable();
+            return k in t ? { value: t[k], enumerable: true, configurable: true } : undefined;
+        },
+    });
+
+    /**
+     * M6.2（2026-11-07）：kind 的登记表——扩展点只有这一处。
+     *
+     * 为什么要这张表：M6.1 的 spec 里写了 kind，但代码从来没读过它
+     * （校验按字段实际内容判断，渲染也各写各的）。于是 kind 只是注释，
+     * 往后加一种新形态也没人知道该实现什么，写错了也不会报。
+     *
+     * 现在每个 kind 必须在下面登记，写明它要不要子键、允许哪些可选属性。
+     * 新增 kind 的动作变成「在这里加一行 + 实现它」，加完跑 check 会告诉你有没有漏。
+     *
+     * 每项的字段：
+     *   label     中文名，报错和日志里用
+     *   isEmpty   (值) => 布尔，判断这个形态下什么算空；
+     *             校验统一问它，不必每个消费方各写一遍 Array.isArray
+     *   attrs     这个 kind 认哪些可选属性（写错了报「属性不适用」）
+     *
+     * 所有形态通用的两个属性（不列进 attrs）：
+     *   optional  true 表示可以整块不写
+     *   note      写给人看的一句说明
+     *
+     * 新形态怎么加（分期文档 §M6.2 列的六种，随类型落地时补，不在这里预先实现）：
+     *   ① 在 KIND_SPECS 加一项；② 若需要新属性，写进 attrs；
+     *   ③ 在 validateFieldMeta 里补该形态的取值检查；④ 补一条测试。
+     * 只加 ① 不改 ②③：check-source 目前只报「spec 用了未登记的 kind」，
+     * 「登记了但没校验」这一条检查尚未实现（2026-11-09 评审 P2-4 指出注释大于实现）。
+     */
+    const KIND_SPECS = {
+        text: {
+            label: '文本',
+            attrs: ['when', 'not_when'],
+            isEmpty: v => typeof v !== 'string' || !v.trim(),
+        },
+        list: {
+            label: '列表',
+            // min/max 是建议条目数，只用于提示词与规格说明，不参与校验（2026-11-07 危晓裁定）。
+            // 手写一个 3 节点的精简案件不该被判错，那只是没按建议量级来。
+            attrs: ['when', 'not_when', 'min', 'max', 'refable', 'item'],
+            isEmpty: v => !Array.isArray(v) || !v.length,
+        },
+        map: {
+            label: '键值块',
+            // M6.4/M6.5（2026-11-07）：sub 是子键元数据（逐个子键声明 kind 与是否必需），
+            // 让 map 这一块也能被校验与提示词消费，而不是只写一串字段名。
+            attrs: ['when', 'not_when', 'keys', 'sub'],
+            isEmpty: v => !v || typeof v !== 'object' || Array.isArray(v) || !Object.keys(v).length,
+        },
+        int: {
+            label: '整数',
+            attrs: ['when', 'not_when', 'min', 'max', 'seq', 'ref'],
+            isEmpty: v => v == null || v === '' || !Number.isFinite(Number(v)),
+        },
+        'int[]': {
+            label: '整数数组',
+            attrs: ['when', 'not_when', 'ref'],
+            isEmpty: v => !Array.isArray(v) || !v.length,
+        },
+        enum: {
+            label: '枚举',
+            attrs: ['when', 'not_when', 'values', 'allowCustom'],
+            isEmpty: v => typeof v !== 'string' || !v.trim(),
+        },
+        bool: {
+            label: '真假',
+            attrs: ['when', 'not_when'],
+            isEmpty: v => typeof v !== 'boolean',
+        },
+        freeform: {
+            label: '自由结构',
+            attrs: ['when', 'not_when'],
+            isEmpty: v => v == null || v === '',
+        },
+    };
+
+    /**
+     * M6.2：校验一份 spec 的元数据本身写得对不对。
+     * 这一条盯的是「写 spec 的人」，不是「写大纲的模型」——
+     * 目的是让扩展 kind 时漏写、写错属性的情况当场现形，而不是等到某个类型上线才发现。
+     */
+    function validateSpecMeta(spec, typeName, path) {
+        const problems = [];
+        const walk = (meta, where) => {
+            if (!meta || typeof meta !== 'object') {
+                problems.push(`${where} 不是对象`);
+                return;
+            }
+            const k = meta.kind;
+            if (!k) {
+                problems.push(`${where} 没有 kind`);
+                return;
+            }
+            const def = KIND_SPECS[k];
+            if (!def) {
+                problems.push(`${where} 的 kind「${k}」没有在 KIND_SPECS 登记`);
+                return;
+            }
+            // 用了该 kind 不认识的属性 → 多半是笔误或抄错形态
+            // note 是所有形态通用的说明文字（写给人看），不算某个 kind 的专属属性
+            for (const key of Object.keys(meta)) {
+                if (key === 'kind' || key === 'optional' || key === 'note') continue;
+                if (!def.attrs.includes(key)) {
+                    problems.push(`${where} 的 kind「${k}」不认识属性「${key}」`);
+                }
+            }
+            if (k === 'enum' && (!Array.isArray(meta.values) || !meta.values.length) && !meta.allowCustom) {
+                problems.push(`${where} 是枚举但没给 values，也没允许自定义`);
+            }
+            if ((k === 'list' || k === 'map') && meta.item) {
+                for (const [ik, im] of Object.entries(meta.item)) walk(im, `${where}.item.${ik}`);
+            }
+            // M6.4/M6.5：map 的子键元数据也要自检，否则 sub 里写错 kind 没人发现
+            if (k === 'map' && meta.sub && typeof meta.sub === 'object') {
+                for (const [sk, sdef] of Object.entries(meta.sub)) {
+                    if (!sdef || typeof sdef !== 'object') {
+                        problems.push(`${where}.sub.${sk} 不是对象`);
+                        continue;
+                    }
+                    if (!sdef.kind) {
+                        problems.push(`${where}.sub.${sk} 没有 kind`);
+                    } else if (!KIND_SPECS[sdef.kind]) {
+                        problems.push(`${where}.sub.${sk} 的 kind「${sdef.kind}」没有在 KIND_SPECS 登记`);
+                    }
+                }
+                // sub 声明的子键必须在 keys 里，否则「声明了却不允许写」
+                if (Array.isArray(meta.keys) && meta.keys.length) {
+                    const notListed = Object.keys(meta.sub).filter(sk => !meta.keys.includes(sk));
+                    if (notListed.length) {
+                        problems.push(`${where} 的 sub 里有 keys 未列出的子键：${notListed.join('、')}`);
+                    }
+                }
+            }
+            if (k === 'list' && meta.min != null && meta.max != null && meta.min > meta.max) {
+                problems.push(`${where} 的 min(${meta.min}) 大于 max(${meta.max})`);
+            }
+        };
+        for (const grp of ['required', 'optional']) {
+            for (const [f, meta] of Object.entries(spec[grp] || {})) {
+                walk(meta, `${path}${grp}.${f}`);
+            }
+        }
+        return problems;
+    }
+
+    /**
+     * M6.2：按 kind 判断「这个字段算不算空」。
+     * 以前每个消费方各自写 Array.isArray / typeof 判断，同一件事写四五遍。
+     * 现在统一问这里，加新形态时只改 KIND_SPECS 一处。
+     */
+    function isEmptyByKind(meta, value) {
+        const def = meta && KIND_SPECS[meta.kind];
+        if (!def) return value == null || value === '';
+        return def.isEmpty(value);
+    }
+
+    /**
+     * M6.2：按 kind 检查取值是否合法（超出「空」的那部分）。
+     * 返回问题描述数组；空值不在这里报（空值由必需性校验负责）。
+     *
+     * 2026-11-07 危晓裁定：min/max 是建议值，不是硬性限制。
+     * 定稿里「案件 5-8 个节点」是给模型生成时看的量级，不是校验规则——
+     * 用户手写一个 3 个节点的精简案子不该被判错。
+     * 所以这里只查「取值本身合不合法」（枚举越界、整数超范围），不查列表条目数。
+     */
+    function kindValueProblems(meta, value, where) {
+        const out = [];
+        if (!meta || (!value && value !== 0)) return out;
+        const k = meta.kind;
+        if (k === 'enum') {
+            const vs = Array.isArray(meta.values) ? meta.values : [];
+            if (typeof value === 'string' && value.trim() && !vs.includes(value) && !meta.allowCustom) {
+                out.push(`${where} 的值「${value}」不在允许取值（${vs.join('、')}）里`);
+            }
+        } else if (k === 'int') {
+            const n = Number(value);
+            if (value !== '' && value != null && Number.isFinite(n)) {
+                if (meta.min != null && n < meta.min) out.push(`${where} 小于下限 ${meta.min}`);
+                if (meta.max != null && n > meta.max) out.push(`${where} 大于上限 ${meta.max}`);
+            }
+        }
+        // list 的 min/max 不查：那是建议条目数，见上面的裁定。
+        return out;
+    }
+
+    /**
+     * M6.4 / M6.5（2026-11-07）：map 的子键元数据。
+     *
+     * `keys` 过去只是一串字段名，写了没人读——和之前的 kind 一样是注释性质。
+     * 现在给 map 加一个可选 `sub`，逐个子键声明类型与是否必需，于是：
+     *   · 提示词能据此告诉模型「这一块该有哪几个子键、各是什么」
+     *   · 校验能据此查「写了这个子键但值是空的」「缺了必需的子键」
+     * 分段文档 M6.4/M6.5 要的就是这个「把形态留出来」的动作，不新增 kind。
+     *
+     * 语义约定：
+     *   sub.<名>.kind    同 KIND_SPECS 的 kind
+     *   sub.<名>.required  true 表示这个子键必须有；缺省允许省略
+     *   sub.<名>.note     写给人和模型看的一句说明
+     *   keys             保留为「子键名清单」，未写 sub 时退化为「只校验有没有多余子键」
+     */
+
+    /** M6.4：map 子键检查。返回问题描述数组。 */
+    function mapKeyProblems(meta, value, where) {
+        const out = [];
+        if (!meta || meta.kind !== 'map') return out;
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
+        const declared = Array.isArray(meta.keys) ? meta.keys : [];
+        const subs = meta.sub && typeof meta.sub === 'object' ? meta.sub : null;
+
+        if (declared.length) {
+            const extra = Object.keys(value).filter(k => !declared.includes(k));
+            if (extra.length) {
+                out.push(`${where} 里有这一块没有的子键：${extra.join('、')}`
+                    + `（该有的是 ${declared.join('、')}）`);
+            }
+        }
+        if (subs) {
+            for (const [sk, sdef] of Object.entries(subs)) {
+                const sv = value[sk];
+                const missing = sv == null || (typeof sv === 'string' && !sv.trim());
+                if (sdef && sdef.required && missing) {
+                    out.push(`${where} 缺子键 ${sk}`);
+                }
+                // 子键写了但形态不对（比如该是数组却给了字符串）
+                if (!missing && sdef && sdef.kind) {
+                    for (const p of kindValueProblems({ kind: sdef.kind, ...sdef }, sv, `${where}.${sk}`)) {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * M6.1（2026-11-06）：每类骨架的字段规格。
+     *
+     * 这张表是「规则回到规格」的落点。定稿 §9 要求外层硬校验、内层软校验，
+     * §5 只平铺了字段名，没给类型、必填性与子键——那些原先散在四处手写代码里：
+     *   buildOutlinePrompt 里手写的字段说明、
+     *   checkOutlineQualityFor 里 if (mainType === '战斗冲突') 这类分支、
+     *   renderOutlineText 与 buildEntryContent 里各写一遍的渲染清单。
+     * 同一条规则写两遍就是漂移的开始，所以收进这里，四处从同一份派生。
+     *
+     * 字段元数据的约定（M6.2：kind 的取值与允许属性统一登记在 KIND_SPECS）：
+     *   kind        text / list / map / int / int[] / enum / bool / freeform
+     *   optional    true 表示可以整块不写；缺省为必填
+     *   item        列表元素的子键（list 专用）
+     *   keys        map 的子键（map 专用）
+     *   values      封闭枚举的取值（enum 专用）
+     *   allowCustom enum 允许封闭值之外的自定义补充（开放枚举）
+     *   ref         跨字段引用，形如 'nodes.id'；校验据它查引用是否存在（M6.3）
+     *   when/not_when  什么时候该写、什么时候不该写——替代第二份长示例
+     *   seq         true 表示该字段从 1 连续编号
+     *   progress    追踪器读哪个字段（M5 已在用，这里统一进来）
+     *
+     * refable（M6.3 通则）：声明 refable:true 的列表，元素必须有 id 从 1 连续编号；
+     * 任何 ref 只能指向 refable 的列表。以后新增类型时「要不要加 id」不再逐类拍板。
+     */
+    const OUTLINE_SPEC_BY_TYPE = {
+        '案件推理': {
+            progress: { field: 'nodes', legacy: true },
+            required: {
+                core_truth: { kind: 'text', when: '本次有真相可藏时写' },
+                nodes: {
+                    kind: 'list', min: 5, max: 8, refable: true,
+                    item: {
+                        id: { kind: 'int', seq: true },
+                        type: { kind: 'enum', values: ['物证', '证言', '环境', '时间线', '关系'] },
+                        trigger: { kind: 'text' },
+                        info: { kind: 'text' },
+                        refute_by: {
+                            kind: 'int[]', optional: true, ref: 'nodes.id',
+                            when: '本条是误导项时写，列出能推翻它的节点',
+                            not_when: '本条为真、被引用节点只是证实它时不写',
+                        },
+                    },
+                },
+                min_nodes_for_deduction: { kind: 'int[]', ref: 'nodes.id' },
+                suspects: {
+                    kind: 'list',
+                    item: {
+                        name: { kind: 'text' },
+                        motive: { kind: 'text' },
+                        alibi: { kind: 'text' },
+                        lie: { kind: 'text' },
+                    },
+                },
+                characters: { kind: 'map' },
+                paths: {
+                    kind: 'list',
+                    item: { node: { kind: 'int', ref: 'nodes.id' }, desc: { kind: 'text' } },
+                },
+            },
+            rules: [
+                'nodes.id 从 1 连续编号',
+                'paths.node、min_nodes_for_deduction、refute_by 只能引用已列出的 nodes.id',
+                '嫌疑人的动机、不在场、谎言三项各自不能为空字符串',
+            ],
+        },
+
+        '战斗冲突': {
+            progress: { field: 'objectives' },
+            required: {
+                enemy_forces: {
+                    kind: 'list',
+                    item: {
+                        name: { kind: 'text' },
+                        strength: { kind: 'text' },
+                        level: { kind: 'text' },
+                        tactic: { kind: 'text' },
+                        morale: { kind: 'text' },
+                    },
+                    // 2026-11-06 真机：模型找不到第三个敌人时，会把地形塞进来凑数，
+                    // 三个文本字段填「不适用」。那些该写进 terrain。
+                    not_when: '地形、天气、陷阱不是会主动对抗的东西，不要放进来',
+                },
+                objectives: {
+                    kind: 'list',
+                    item: {
+                        name: { kind: 'text' },
+                        type: { kind: 'enum', values: ['守住', '突破', '护送', '拖延', '歼灭'] },
+                        condition: { kind: 'text' },
+                        fail: { kind: 'text', when: '必须写，模型要据此判断「已失败」而不是「未达成」' },
+                    },
+                },
+                terrain: {
+                    kind: 'map',
+                    keys: ['cover', 'elevation', 'chokepoint', 'note'],
+                },
+            },
+            optional: {
+                reinforcements: { kind: 'text' },
+                retreat: {
+                    kind: 'map',
+                    keys: ['condition', 'cost'],
+                },
+                casualty: { kind: 'map', keys: ['note'] },
+                preparation: {
+                    // M3：只有事先准备过的战斗才有。写成必填会逼模型给每场遭遇战硬凑物资清单。
+                    kind: 'map',
+                    keys: ['supplies', 'traps', 'intel', 'allies', 'depart_time'],
+                    when: '这场战斗有准备阶段时才写',
+                    not_when: '遭遇战、突袭、伏击没有准备阶段，整块不写',
+                },
+            },
+            // 类型级的规则说明（不属于某个字段的约束写在这里）。
+            // 2026-11-07 M6.2：这几条原来错写在 preparation 字段内部，
+            // validateSpecMeta 一查就报「map 不认识 rules」——规则说明不是字段属性。
+            rules: [
+                'preparation 写了就得五项齐全，要么都写要么整块不写',
+                'enemy_forces 只放会主动对抗的东西，地形与天气写进 terrain',
+            ],
+        },
+    };
+
+    /**
+     * M6.4（2026-11-07）：时间窗口的形态——用 map 子键，不新增「区间」kind。
+     *
+     * 用在：生存的 time_window、灾难的 rescue_window。
+     * start/end/duration 允许文本，不强制数值——剧情里的时间是「入夜后第一声钟」，
+     * 硬要数值就得让模型编一个，反而更假。
+     *
+     * 为什么不能复用外层 time_pressure：那是事件级的一句话（倒计时一句话、超时后果），
+     * 描述的是「整件事有多急」；这里要的是内层一个可看、可核的窗口，
+     * 两者粒度不同，合并会把外层的简洁也毁掉。
+     *
+     * 真正落地在 M10（生存）与 M18（灾难），这里只把形态定死，到时直接引用。
+     */
+    const MAP_FORM_TIME_WINDOW = {
+        kind: 'map',
+        keys: ['start', 'end', 'duration', 'note'],
+        sub: {
+            start: { kind: 'text', note: '窗口从什么时候开始（文本即可）' },
+            end: { kind: 'text', note: '窗口到什么时候结束（文本即可）' },
+            duration: { kind: 'text', note: '持续多久；与 start/end 至少给一个，可不精确' },
+            note: { kind: 'text', note: '这个窗口里会发生什么、有什么限制' },
+        },
+    };
+
+    /**
+     * M6.5（2026-11-07）：经营周期的半结构化账目。
+     *
+     * 不全自由文本（等于放弃这类型的核心机制——它的价值就在「算得清」），
+     * 也不全数值化（剧情里的收支常常是「每月三袋盐」这种量词，强迫填数字会编）。
+     * 折中：一条账 = { item, amount, unit, note }，amount 可空。
+     * 这样三笔账（产出/维护/现金流）能被程序读出来做「收入减支出是否为负」，
+     * 同时保留叙事弹性。
+     *
+     * 不新增 kind，用 map 的 item 列表表达。真正落地在 M20（经营周期）。
+     */
+    const MAP_FORM_LEDGER = {
+        kind: 'list',
+        item: {
+            item: { kind: 'text', note: '这一条是什么（材料/人手/税费/缺口）' },
+            amount: { kind: 'text', optional: true, note: '数量；说不清就留空，不要编' },
+            unit: { kind: 'text', optional: true, note: '单位（袋/人/枚/文）' },
+            note: { kind: 'text', optional: true, note: '补充说明' },
+        },
+    };
+
+    /**
+     * M6.1：「其他」兜底主类型的通用骨架（定稿 1L、1U）。
+     * 十四类都不贴的事件用它。字段按定稿 §5，变数与失败代价必填，避免写成流水账。
+     *
+     * 2026-11-06 危晓裁定：原定稿七字段里的 stages 与外层阶段数组撞了同一个概念，
+     * 「其他」不再自带阶段字段，直接复用外层的 structure.phases。
+     * 这样「其他」与其他类型共用同一套阶段机制，进度也走同一条路。
+     */
+    const OUTLINE_SPEC_OTHER = {
+        // 进度按外层阶段数组走（structure.phases，与 phases 校验同一套）
+        progress: { field: 'phases' },
+        required: {
+            goal: { kind: 'text' },
+            obstacles: { kind: 'text' },
+            resources: { kind: 'text' },
+            variables: { kind: 'text' },
+            failure_cost: { kind: 'text' },
+            stakeholders: { kind: 'list', item: { name: { kind: 'text' } } },
+        },
+        rules: [
+            'variables、failure_cost 两项必填，不允许留空',
+            '分段写在外层的 structure.phases 里，最多 3 段，超过说明事件太大，应拆成事件链',
+        ],
+    };
+
+    /**
+     * M6.2：spec 表的自检。模块加载时跑一次，把「spec 本身写错」当场现形——
+     * 未登记的 kind、不适用的属性、空的枚举、min>max 都会在这里报出来。
+     *
+     * 为什么要在加载时跑：这些错误是「写 spec 的人」犯的，不是模型犯的。
+     * 等到某个类型上线、用户生成出奇怪大纲时才发现，根本追不回来。
+     * 报法用 warn 不抛异常——spec 写错不该让整个扩展起不来，
+     * 但必须留痕，并且 check-source 里那条 kind 登记检查会直接失败拦住提交。
+     */
+    function selfCheckSpecMeta() {
+        const problems = [];
+        for (const [type, spec] of Object.entries(OUTLINE_SPEC_BY_TYPE)) {
+            for (const p of validateSpecMeta(spec, type, type + '.')) problems.push(p);
+        }
+        for (const p of validateSpecMeta(OUTLINE_SPEC_OTHER, '其他', '其他.')) problems.push(p);
+        if (problems.length) {
+            try { warn('[事件大纲] spec 表自检不通过：' + problems.join('；')); } catch (e) { /* 日志没就绪也不影响 */ }
+        }
+        return problems;
+    }
+
+    /**
+     * 0C（2026-11-07）：生成提示词的第 1–5 项按主类型给。
+     *
+     * 原先这五项是硬编码的案件流程：「核心真相」「信息节点 5-8 条」「助力者/阻碍者/知情者」
+     * 「推进路径」。选了战斗或探险，模型照样被要求写核心真相与信息节点——
+     * 真机上战斗事件被迫硬凑一个核心真相出来，就是这个原因。
+     *
+     * 现在按类型分开：有骨架的类型给专属字段说明；没骨架的七类给定稿 §3 列出的字段清单
+     * （虽然还没有专属示例，至少模型知道该写哪些键，而不是照案件的样子硬套）。
+     * 内容来源：docs-repo 的《事件骨架字段与约束规格》§3.1–§3.8 与定稿 §5。
+     *
+     * 返回 { items: [...], note: 可选补充说明 }
+     */
+    const OUTLINE_TYPE_ITEMS = {
+        '案件推理': [
+            '1. 事件类型与核心真相：判断本事件属于哪类（案件/谈判/探险/危机/社交博弈/其他），写出核心真相或隐情（仅记录，后续不得直接透露）',
+            '2. 信息节点清单：按发现顺序列 5-8 条，每条含编号（从 1 开始）、类型（物证/证言/环境/时间线/关系）、触发关键词、指向的信息或后果',
+            '   节点字段名固定用：id（编号，数字）、type（类型）、trigger（触发关键词或触发条件）、info（指向的信息或后果）、refute_by（可选，这条是误导时填可推翻它的节点编号数组）',
+            '   注意 refute_by 的用法很容易搞反：它标记的是「这条信息本身有问题，会被哪个节点拆穿」，',
+            '   不是「这条和哪个节点有关」。判断标准是：如果被引用的那个节点出现后，本条信息的结论就要被否定或大改，才写 refute_by；',
+            '   如果被引用节点只是证实、补充、或从另一角度印证本条，那就不写 refute_by，它们之间是普通的前后线索关系。',
+            '   一条正确的推理线索不写 refute_by。整份大纲可以一个 refute_by 都没有（没有误导项时不写）。',
+            '   另外单独输出「推进所需最少信息节点编号」：只列出推理必需的最少节点编号',
+            '3. 参与角色：按立场分类——',
+            '   a. 助力者：每个助力者的动机须各不相同（利益一致/情感羁绊/交易/被迫/其他），并标明是否有条件或代价。同阵营且利益一致者可以无条件；交易或被迫者须写明代价。按实际情况判断，不要为所有助力者统一附加条件',
+            '   b. 阻碍者：会阻止玩家推进，其阻碍理由须合理且可被化解',
+            '   c. 知情者/关键人物：掌握核心信息，不会无理由主动交出；其信息只能经由信息节点清单中的条目逐步获得',
+            '   d. 幕后方（如有）：标记 reveal: forbidden，暴露路径只能经由信息节点清单逐步指向',
+            '4. 推进路径：从开局到结局的分步逻辑链，注明哪些节点是必经、哪些可跳过；并按"危险程度"标注每个高风险节点的失败后果（如受伤/被俘/死亡/失去关键信息）',
+            '5. 禁止事项：不得新增清单外信息节点、不得提前揭示核心真相、不得让角色知道其不应知道的信息',
+        ],
+        '战斗冲突': [
+            '1. 敌方编制 enemy_forces：每一项写 name（名称）、strength（兵力）、level（等级）、tactic（战术）、morale（士气）。没有敌人就不叫战斗，这一项必须有',
+            '2. 战斗目标 objectives：每一项写 name（名称）、type（守住/突破/护送/拖延/歼灭）、condition（达成条件）、fail（失败后果）。',
+            '   condition 要写成可判断的客观状态（「玩家站住脚且没被撞倒」），不要写「表现良好」这种主观话；',
+            '   fail 必须写，模型要据此判断「已失败」而不是「未达成」',
+            '3. 地形 terrain：写 cover（掩体）、elevation（高低差）、chokepoint（狭窄处）、note（备注）。哪怕是一片平地也要写一句，地形影响走位与掩体',
+            '   注意：天气、地形、路况都写进 terrain，不要把它们塞进 enemy_forces——那里只放会主动对抗的东西',
+            '4. 事先准备 preparation（有准备阶段时才写）：五项 supplies（物资）、traps（陷阱）、intel（情报）、allies（盟友）、depart_time（出发时间），要么五项都写，要么整块不写',
+            '5. 可选三块：reinforcements（援军，写波次与到达时间）、retreat（撤退，写条件与代价）、casualty（伤亡与俘虏）。没有就不写，不要为凑数硬编',
+            '   禁止事项：不要让角色知道其不应知道的信息；不要让敌人做出与其战术、士气不符的行为',
+        ],
+        '谈判交涉': [
+            '1. 各方立场 parties：每一方写（诉求/底线/可让步/不可让步）四件事。至少两方，否则不叫谈判',
+            '2. 筹码 leverage：每个筹码写（筹码/来源/可信度）三件事。可信度决定对方买不买账',
+            '3. 中间人 intermediaries：写姓名、立场、能做什么。没有中间人就整块不写',
+            '4. 轮次 rounds：每一轮写（轮次/破裂点/冷却）三件事，轮次从 1 连续编号。',
+            '   破裂点是「这一轮谈崩」的条件，不是事件整体的超时后果——后者写在外层 time_pressure.timeout_result',
+            '5. 协议 agreement：写（达成条件/草签后果）两件事。至少一方要让利，全是得利的一方不叫谈判',
+            '   禁止事项：不得让某一方无条件接受全部要求；不得提前揭示对方的底线',
+        ],
+        '探险探索': [
+            '1. 地点 sites：每个地点写（地点/机关/守卫/补给）四件事，并给每处编 id（从 1 连续），后面 route 要用编号引用',
+            '2. 路线 route：写（节点编号/路线描述/是否必经/风险/失败后果）。只能引用 sites 里存在的编号',
+            '3. 危险 hazards：每种危险写（种类/触发条件/后果）三件事。危险要能在现场被发现，不能只在事后才知道',
+            '4. 发现 discoveries：每个发现写（发现物/触发条件）两件事。发现是这类型的核心回报，不能一个都没有',
+            '5. 出口 exit：写撤离条件。这是「什么算出去了」，与外层 time_pressure 的「多久内」不是一回事',
+            '   禁止事项：不得让玩家不探索就拿到发现；不得出现大纲外的新地点',
+        ],
+        '生存危机': [
+            '1. 资源 resources：写五项——water（水）、food（食）、medicine（药）、fire（火）、stamina（体力）。这五项是封闭清单，不要自加',
+            '2. 环境 environment：写 weather（天气）、terrain（地形）、visibility（能见度）三件事',
+            '3. 威胁 threats：每一波写（波次/强度/间隔）三件事。间隔可以写「每隔两小时」这种自然语言，不必是纯数字',
+            '4. 避难所 shelters：每个避难所写名称与可获得的东西。避难所要有代价（比如能挡风但会被发现）',
+            '5. 时间窗口 time_window：写 start（从什么时候开始）、end（到什么时候结束）、duration（持续多久）、note（这个窗口里会发生什么）。',
+            '   允许用自然语言（「入夜后第一声钟」），不要求填数字',
+            '   禁止事项：不得让资源凭空出现；不得让威胁在有光、有声的条件下完全不被察觉',
+        ],
+        '社交博弈': [
+            '1. 阵营 factions：每一方写（立场/诉求/把柄）三件事，并给每方编 id（从 1 连续）。把柄是这类型的核心，没有把柄就没有博弈',
+            '2. 场合 occasions：写宴会/庭审/葬礼这类具体场合。场合决定了谁能出场、能说什么话',
+            '3. 人情 favours：写谁欠谁、欠什么。人情要是能被兑现或被赖掉的，不能只是背景设定',
+            '4. 传言 rumours：每条写（源/扩散）。源如果要指向某个阵营，用 factions 里的编号',
+            '5. 声望 reputation：写观感如何变化——做什么会升、做什么会降',
+            '   禁止事项：不得让 NPC 无理由地相信玩家；不得让某个阵营同时拥有人格魅力与绝对武力',
+        ],
+        '日常杂务': [
+            '1. 步骤 task：每一步写（步骤/地点/时限）三件事。这类是低结构、低风险，步骤控制在 1-3 步，不要写成大冒险',
+            '2. 交付 deliverable：写交付物与验收标准两件事。验收要能当场判定，不能靠事后追认',
+            '3. 变数 complications：写可能出岔子的小事。变数应该有幽默感或生活气息，不是致命威胁',
+            '4. 道德岔口 moral：写有没有需要选择的地方。没有也照实写「无」，不要硬造',
+            '5. 委托关系写在外层 contract（谁委托、代价是什么），不要塞进 structure',
+            '   禁止事项：不要把这类事件升级成生死危机；不要让杂务牵扯进主线阴谋',
+        ],
+        '禁忌秘辛': [
+            '1. 禁忌 taboo：一句话说清「什么不能说、不能做」。必须是具体的，不能是「有些事不能说」这种空话',
+            '2. 知情者 knowers：每个知情者写（知情者/沉默原因）两件事。沉默原因要站得住（恐惧、利益、承诺、无知之罪），不能只是「他不肯说」',
+            '3. 代价 cost：触碰禁忌要付出什么。代价应该是即时的、可感知的，不是「以后会倒霉」',
+            '4. 掩盖 cover_up：写掩盖手段。手段要留下痕迹，玩家才有得查',
+            '5. 破禁 breaking 与后果 consequences：写破禁条件与爆发后果两件事。后果要与禁忌本身的重量相称',
+            '   禁止事项：不得提前揭示禁忌内容；不得让知情者无缘无故主动开口',
+        ],
+        'NSFW': [
+            '1. 边界 boundaries：写清本次的尺度与红线。边界必须在生成时就定下来，不能在剧情里临时放宽',
+            '2. 意愿 consent：写清各方的意愿状态。任何一方的不自愿都不能被叙述成自愿',
+            '3. 场景 scenes：写场景与推进顺序。每一场要有明确的开始与结束，不做无休止的流水账',
+            '4. 退出 exit：写任意一方中止的条件。中止必须被尊重，不能写成「欲拒还迎」',
+            '5. 禁止事项：不得越过第 1 项写下的边界；不得把不自愿描写成自愿；不得在未成年角色上使用本类型',
+        ],
+        '其他': [
+            '1. 目标 goal：这个事件最终要达成什么。一句话说清，不要写成流程说明',
+            '2. 障碍 obstacles：列出会挡路的因素。每一条都要具体到「谁、因为什么、怎么挡」',
+            '3. 资源 resources：玩家手上有什么可用的东西。包括物品、信息、人脉',
+            '4. 变数 variables：列出会让局面变化的东西（倒计时、好感、某人的状态），每条写名称、类型、影响',
+            '5. 失败代价 failure_cost 与相关方 stakeholders：失败要付出什么；牵涉到谁、各自想要什么',
+            '   禁止事项：不得照搬案件的信息节点或战斗的战斗目标；这个事件如果要分阶段，写在外层 structure.phases 里（最多 3 段）',
+        ],
+    };
+
+    /**
+     * M7（2026-11-07）：把用户自定义的类型名解析成「它该用哪个内置主类型的骨架」。
+     *
+     * 自定义类型（不在 EVENT_MAIN_TYPES 里的名字）有两种情况：
+     *   1. 在设置里配了映射 → 用映射指向的那个内置类型的骨架与 spec；
+     *   2. 没配映射 → 一律套「其他」的通用骨架（文档 M7「不变」第一条）。
+     *
+     * 内置类型永远原样返回，不查映射——哪怕用户手贱把「战斗冲突」映射成「案件推理」，
+     * 内置类型也不该被改掉。这是把映射的影响面限制在自定义类型上的关键。
+     *
+     * 映射值必须是真内置类型，指向不存在或指向用户的另一个自定义类型都按「没配」处理，
+     * 不做链式解析——链式解析会引入环，且用户看不出自己到底套上了哪套。
+     */
+    function resolveSkeletonType(mainType) {
+        const t = String(mainType || '').trim();
+        if (!t) return '';
+        // 内置类型（含「其他」）不参与映射
+        if (EVENT_MAIN_TYPES.includes(t)) return t;
+        let map = {};
+        try {
+            const s = getSettings();
+            map = (s && s.preset && s.preset.customSkeletonMap) || {};
+        } catch (e) {
+            map = {};
+        }
+        const target = String(map[t] || '').trim();
+        // 「其他」映射到「其他」等于没映射，但结果一样，直接放过
+        if (target && EVENT_MAIN_TYPES.includes(target)) return target;
+        // 没配、配错、指向另一个自定义类型：一律套「其他」
+        return '其他';
+    }
+
+    /** M7：这个类型是不是自定义的（不在内置列表里） */
+    function isCustomMainType(mainType) {
+        const t = String(mainType || '').trim();
+        return !!t && !EVENT_MAIN_TYPES.includes(t);
+    }
+
+    /** M6.1：按主类型取 spec；「其他」走通用骨架，未知类型返回 null */
+    function specOfType(mainType) {
+        const t = String(mainType || '').trim();
+        if (!t) return null;
+        // M7：自定义类型先解析成它映射到的内置类型，再取 spec。
+        // 没配映射的自定义类型会解析成「其他」，于是自动拿到通用骨架。
+        const resolved = resolveSkeletonType(t);
+        if (resolved === '其他') return OUTLINE_SPEC_OTHER;
+        return OUTLINE_SPEC_BY_TYPE[resolved] || null;
+    }
+
+    /** M6.3：收集一份 spec 里所有声明了 refable 的列表名 → 它们的 id 前缀 */
+    function refableNamesOf(spec) {
+        if (!spec) return [];
+        const out = [];
+        for (const grp of ['required', 'optional']) {
+            const fields = spec[grp] || {};
+            for (const [k, meta] of Object.entries(fields)) {
+                if (meta && meta.refable) out.push(k);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * M6.6（2026-11-06）：跨层撞键校验——structure 顶层只能放两类键：
+     *   ① 外层键本身（不该出现，structure 里再放一遍 event_name 是重复）
+     *   ② 本主类型的 spec 里声明过的内层字段
+     * 别的东西一律算越界，报出来。pack 字段必须写在 structure.packs.<pack> 下面，
+     * 阶段字段写在 structure.phases[] 里面——这两处都是 spec 之外的结构，不算顶层。
+     *
+     * 为什么要有这条：现在四个消费函数各自按需读字段，模型自造一个键也不报错，
+     * 于是「写对了但没人读」和「写错了但看着像对」分不出来。
+     * 有了这条，spec 之外的键会当场现形。
+     *
+     * 只报警告不判失败：容错读取还在（渲染层读不出就跳过），这一条是给日志和面板看的。
+     */
+    function crossLayerKeyWarnings(outline, mainType) {
+        const out = [];
+        const o = outline || {};
+        const structRaw = o.structure;
+        if (!structRaw || typeof structRaw !== 'object' || Array.isArray(structRaw)) return out;
+
+        // 「其他」用通用骨架的字段清单；没骨架的类型不查（还没定义什么算对）
+        const spec = specOfType(mainType);
+        if (!spec) return out;
+
+        const allowed = new Set();
+        for (const grp of ['required', 'optional']) {
+            for (const k of Object.keys(spec[grp] || {})) allowed.add(k);
+        }
+        // 阶段数组与 packs 是 spec 之外但合法的两块结构（定稿 1N / §2）
+        allowed.add('phases');
+        allowed.add('packs');
+
+        const strays = Object.keys(structRaw).filter(k => !allowed.has(k) && !OUTLINE_OUTER_KEYS.includes(k));
+        if (strays.length) {
+            out.push(`structure 里有本类型没有的键：${strays.map(k => labelOf(k)).join('、')}`
+                + `（主类型「${mainType}」的骨架里没有这些；pack 字段要写在 structure.packs 下面）`);
+        }
+        // 外层键重复：structure 里又出现一遍 event_name 之类
+        const dup = Object.keys(structRaw).filter(k => OUTLINE_OUTER_KEYS.includes(k) && k !== 'structure');
+        if (dup.length) {
+            out.push(`外层键 ${dup.map(k => labelOf(k)).join('、')} 重复写进了 structure 里，应只写在外层`);
+        }
+        return out;
+    }
+
+    /**
+     * M6.3（2026-11-06）：引用完整性校验。
+     * spec 里标了 ref 的字段，引用的编号必须真的存在，而且只能指向标了 refable 的列表。
+     * 以前这几条是写在注释和 rules 文本里的，程序不查，写了不存在的编号也没人知道。
+     */
+    function refIntegrityWarnings(outline, mainType) {
+        const out = [];
+        const spec = specOfType(mainType);
+        if (!spec) return out;
+        const refables = refableNamesOf(spec);
+        if (!refables.length) return out;
+
+        const o = outline || {};
+        const collect = (fieldName) => {
+            const raw = innerField(o, fieldName);
+            if (!Array.isArray(raw)) return [];
+            return raw.map(x => (x && typeof x === 'object') ? nodeId(x) : x).filter(v => v != null && v !== '');
+        };
+        const present = {};
+        for (const name of refables) present[name] = new Set(collect(name).map(String));
+
+        const known = new Set();
+        for (const name of refables) {
+            for (const v of present[name]) known.add(String(v));
+        }
+
+        const visit = (meta, fieldPath) => {
+            if (!meta || typeof meta !== 'object') return;
+            if (meta.ref) {
+                const vals = [];
+                const raw = innerField(o, fieldPath);
+                if (Array.isArray(raw)) raw.forEach(v => vals.push(v));
+                else if (raw != null && raw !== '') vals.push(raw);
+                const bad = vals
+                    .filter(v => v != null && String(v).trim() !== '')
+                    .filter(v => !known.has(String(v).trim()));
+                if (bad.length) {
+                    out.push(`${labelOf(fieldPath)} 引用了不存在的编号 ${bad.map(String).join('、')}`
+                        + `（${refables.map(r => r + '.id').join('、')} 里没有）`);
+                }
+            }
+            // 列表元素的子键：逐个元素查
+            if (meta.item) {
+                const raw = innerField(o, fieldPath);
+                if (!Array.isArray(raw)) return;
+                raw.forEach((el, i) => {
+                    if (!el || typeof el !== 'object') return;
+                    for (const [k, m] of Object.entries(meta.item)) {
+                        if (!m || typeof m !== 'object' || !m.ref) continue;
+                        if (el[k] == null || el[k] === '') continue;
+                        const vs = Array.isArray(el[k]) ? el[k] : [el[k]];
+                        const bad = vs.filter(v => v != null && String(v).trim() !== '')
+                            .filter(v => !known.has(String(v).trim()));
+                        if (bad.length) {
+                            out.push(`第 ${i + 1} 条的 ${labelOf(k)} 引用了不存在的编号 ${bad.map(String).join('、')}`);
+                        }
+                    }
+                });
+            }
+        };
+
+        for (const grp of ['required', 'optional']) {
+            for (const [k, meta] of Object.entries(spec[grp] || {})) {
+                // 自己就是 refable 的列表不用查自己引用自己
+                visit(meta, k);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * M6.1：取某个主类型的进度来源声明（M5 起使用）。
+     * 「其他」走通用骨架的 progress（按阶段推进，定稿 1U）。
+     */
+    function progressSpecOf(mainType) {
+        // M7：自定义类型先解析到它映射到的内置类型，再取进度来源。
+        // 不解析的话「盗墓」拿不到探险探索的进度字段，盘点页会是空的。
+        const t = resolveSkeletonType(String(mainType || '').trim());
+        if (t === '其他') {
+            const p = OUTLINE_SPEC_OTHER.progress;
+            return p ? { field: p.field, legacy: !!p.legacy } : null;
+        }
+        const spec = OUTLINE_INNER_KEYS_BY_TYPE[t];
+        if (!spec || !spec.progress) return null;
+        return { field: spec.progress.field, legacy: !!spec.progress.legacy };
+    }
+
+    // 2026-11-05 5.2 裁定后删除 OUTLINE_INNER_FALLBACK_TYPE。
+    // 它以前在 prompt 拼装没拿到主类型时回落成「案件推理」，现在改成直接抛错，
+    // 这个常量就没有使用点了。留着会让后来人以为还有兜底路径可走。
+    // 注意：innerKeysOf 对没有骨架的类型仍然返回 known:false（跳过内层校验），
+    // 那是「未知类型不套案件字段」的正常分支，跟这个已删的兜底常量不是一回事。
+
+    /**
+     * 取某个主类型的内层键清单。
+     * 返回 { required, optional, known}：known=false 表示这个类型还没有骨架，
+     * 调用方据此跳过内层校验（而不是回落到案件字段去套）。
+     * 「其他」有骨架（通用七字段），known 为 true。
+     */
+    function innerKeysOf(mainType) {
+        // M7：自定义类型按映射取内层键。没配映射的解析成「其他」，
+        // 于是自动拿到通用六字段——这就是「默认套其他通用骨架」在字段层面的落实。
+        const t = resolveSkeletonType(String(mainType || '').trim());
+        if (t === '其他') {
+            return {
+                required: Object.keys(OUTLINE_SPEC_OTHER.required || {}),
+                optional: Object.keys(OUTLINE_SPEC_OTHER.optional || {}),
+                known: true,
+            };
+        }
+        const spec = OUTLINE_INNER_KEYS_BY_TYPE[t];
+        if (!spec) return { required: [], optional: [], known: false };
+        return {
+            required: (spec.required || []).slice(),
+            optional: (spec.optional || []).slice(),
+            known: true,
+        };
+    }
+
+    /** 只要键名（prompt 里列清单用），把必填与可选合成一份，可选的标出「可选」 */
+    function innerKeyNamesOf(mainType) {
+        const spec = innerKeysOf(mainType);
+        if (!spec.known) return [];
+        return spec.required.concat(spec.optional.map(k => k + '（可选）'));
+    }
+
+    /**
+     * M6.4/M6.5（2026-11-07）：把 spec 里声明的子键形态翻成给模型看的一行说明。
+     * 只在字段确实是 map 且写了 sub 时才返回内容——没写 sub 的老字段一个字都不多吐，
+     * 免得提示词凭空变长。
+     */
+    function subKeyHintOf(mainType, field) {
+        const spec = specOfType(mainType);
+        if (!spec) return '';
+        for (const grp of ['required', 'optional']) {
+            const meta = (spec[grp] || {})[field];
+            if (!meta) continue;
+            if (meta.kind !== 'map' || !meta.sub) return '';
+            const parts = Object.entries(meta.sub).map(([sk, sd]) => {
+                const req = sd && sd.required ? '（必需）' : '';
+                const note = sd && sd.note ? '：' + sd.note : '';
+                return sk + req + note;
+            });
+            return field + ' 是块状结构，子键为 ' + parts.join('；') + '。';
+        }
+        return '';
+    }
+
+    /**
+     * 大纲的内层字段统一从 structure 里取（2026-11-05 M2 评审）。
+     *
+     * 为什么要有这个函数：M2 把内层挪进 structure 之后，代码里还有十几处直接
+     * `parsed.nodes`、`outline.characters` 这样读顶层，每一处都会恒为 undefined，
+     * 而且症状各不相同——节点统计恒 0、世界书条目缺角色、编辑保存被误判成空壳、
+     * 盘点页整块节点进度不渲染。这种「同一个取值规则抄在多处」正是以前清单漂移的老路，
+     * 所以收成一份，所有内层读取都走这里。
+     *
+     * 只认 structure，不回落读顶层（2026-11-05 危晓裁定）：
+     * 旧事件兼容性明确不考虑——不做迁移、不做展示兜底、不做只读降级。
+     * 因此老形状的条目在这里读不到内层字段，面板与统计会显示为空。
+     * 这不是疏漏，是既定口径；不要再加回顶层兜底。
+     *
+     * 唯一保留的底线是实现层面的：读不到就返回空值，绝不能抛异常，
+     * 免得一条读不出的旧条目把整个面板弄白。
+     */
+    function outlineInner(outline) {
+        const o = (outline && typeof outline === 'object') ? outline : {};
+        const st = o.structure;
+        return (st && typeof st === 'object' && !Array.isArray(st)) ? st : {};
+    }
+
+    /** 取内层的一个字段（只认 structure，不回落顶层） */
+    function innerField(outline, key) {
+        const inner = outlineInner(outline);
+        return inner[key];
+    }
+
+    /** 取内层的信息节点数组，读不到返回空数组 */
+    function innerNodesOf(outline) {
+        const n = innerField(outline, 'nodes');
+        return Array.isArray(n) ? n : [];
+    }
 
     // 悬浮窗尺寸（吸附竖条与展开图标）
     const FAB_TAB_VISIBLE = 20;   // 吸附时可见宽度
@@ -461,11 +1587,13 @@
         if (event.outline) event.parseQuality = checkOutlineQuality(event.outline);
         if (!event.outlineRaw) return event;
         const o = event.outline || {};
-        const looksBroken = !Array.isArray(o.nodes) || o.nodes.length === 0;
+        // 2026-11-05 M2 评审：M2 之后 nodes 在 structure 里，还按顶层读会恒判「坏了」，
+        // 于是每次加载都要白跑一遍重解析，而且重解析读的也是同一个空结果。
+        const looksBroken = innerNodesOf(o).length === 0;
         if (!looksBroken) return event;
         try {
             const re = parseOutline(event.outlineRaw).parsed;
-            const n = (re && Array.isArray(re.nodes)) ? re.nodes.length : 0;
+            const n = innerNodesOf(re).length;
             if (n > 0) {
                 event.outline = re;
                 event.parseQuality = checkOutlineQuality(re);
@@ -1819,8 +2947,12 @@
     const EVENT_TYPE_DEFAULT = '根据当前情况自行设定';
     const EVENT_MAIN_TYPES = [
         '案件推理', '谈判交涉', '探险探索', '生存危机',
-        '社交博弈', '战斗冲突', '日常委托', '禁忌秘辛',
+        '社交博弈', '战斗冲突', '日常杂务', '禁忌秘辛',
         'NSFW',
+        // M6（2026-11-06）：第十四项「其他」，兜底用。定稿 1L/1U：
+        // 不默认、不参与判定树自动匹配，只有十三个专用类型都不贴时由用户主动选。
+        // 放在列表末尾是为了让下拉框的顺序稳定，不动前面十三个的位置。
+        '其他',
     ];
     const EVENT_SUB_TYPES = [
         '悬疑', '复仇', '背叛', '失踪', '盗窃', '走私',
@@ -1861,6 +2993,106 @@
         dynamic: 'difficulty',
         desc: '这次事件整体的强度档位。选定后，凡是写着「根据难度等级自行设定」的项，都会按这个等级成套推导。',
     };
+
+    /**
+     * 主类型专属参数（2026-11-06 M4.2）。
+     *
+     * 为什么单独一张表而不是给 PREF_GROUPS 每项加一个 scope 字段：
+     *   PREF_GROUPS 的每一项在渲染、提示词、默认值、自定义值判定四处的读法完全一样，
+     *   加 scope 会让那四处各自多一个分支。这里用「键 → 归属哪些类型」另外一张表，
+     *   过滤时只查一次，原表保持干净。
+     *   scope 缺省 = 通用（所有类型都显示），不用写 'common' 占位。
+     *
+     * 战斗五项与骨架字段的对应（定稿 M4.2）：
+     *   敌方强度 ↔ enemy_forces、地形复杂度 ↔ terrain、增援概率 ↔ reinforcements、
+     *   撤退容错 ↔ retreat、是否有准备阶段 ↔ preparation。
+     * 参数定强弱与有无，骨架写具体内容。
+     */
+    const PREF_SCOPE_BY_TYPE = {
+        '案件推理': ['nodeCount', 'clueSufficiency', 'misleadingStrength', 'hiddenSegments', 'infoPresentation'],
+        '战斗冲突': ['enemyStrength', 'terrainComplexity', 'reinforcementChance', 'retreatTolerance', 'hasPreparation'],
+    };
+
+    /**
+     * 战斗专属五项（2026-11-06 M4.2）。代码里原来一项都没有，全部新定义。
+     * 档位按骨架字段取，不用抽象分级：用户看到「强/均势/弱」比看到「高/中/低」更容易对上
+     * enemy_forces 里那份编制到底该写成什么样。
+     */
+    const PREF_COMBAT_GROUPS = [
+        {
+            key: 'enemyStrength',
+            label: '敌方强度',
+            group: '战斗要素',
+            desc: '对手的整体分量，对应骨架里的敌方编制。悬殊意味着正面对抗必败，要靠地形与计谋；弱则是碾压局。',
+            options: [SUB_AUTO, '弱（乌合之众）', '均势（旗鼓相当）', '强（压制我方）', '悬殊（正面必败）'],
+        },
+        {
+            key: 'terrainComplexity',
+            label: '地形复杂度',
+            group: '战斗要素',
+            desc: '战场有多难走，对应骨架里的地形。越复杂，掩体、高差、卡口越多，越吃判断。',
+            options: [SUB_AUTO, '开阔（少掩体）', '一般（有掩体有通途）', '复杂（处处卡口）', '极复杂（几乎无路）'],
+        },
+        {
+            key: 'reinforcementChance',
+            label: '增援概率',
+            group: '战斗要素',
+            desc: '打到中途会不会来新的对手，对应骨架里的增援波次。概率越高，越要留后手、速战速决。',
+            options: [SUB_AUTO, '无增援', '低（可能来一波）', '中（多半会来）', '高（源源不断）'],
+        },
+        {
+            key: 'retreatTolerance',
+            label: '撤退容错',
+            group: '战斗要素',
+            desc: '想撤的时候撤不撤得掉，对应骨架里的撤退条件。容错低意味着一次走错就没退路。',
+            options: [SUB_AUTO, '随时可退', '需付代价才退得掉', '难以脱身', '只能死战'],
+        },
+        {
+            key: 'hasPreparation',
+            label: '是否有准备阶段',
+            group: '战斗要素',
+            desc: '开打之前有没有时间备料、布陷阱、探情报，对应骨架里的战前准备。写「有」时那五项要写全。',
+            options: [SUB_AUTO, '有（可准备）', '无（遭遇即开打）'],
+        },
+    ];
+
+    /**
+     * 按主类型取该显示的参数项（2026-11-06 M4.2）。
+     * 通用项 + 该类型专属项；没有专属参数的类型只拿到通用项。
+     * 顺序按 PREF_GROUPS 原序，战斗五项接在后面——界面上顺序稳定，重绘不会跳。
+     */
+    function prefsForType(mainType) {
+        // M7（2026-11-07）：参数组也要跟着骨架映射走。
+        // 否则「盗墓」映射到探险探索之后，生成的是探险的字段、显示的却是「其他」的那套参数，
+        // 用户会以为映射没生效。没配映射时 resolveSkeletonType 返回「其他」，
+        // 而 PREF_SCOPE_BY_TYPE 里没有「其他」的专属项，于是只出通用参数——正是 M7 要的行为。
+        const t = resolveSkeletonType(String(mainType || '').trim());
+        const mine = PREF_SCOPE_BY_TYPE[t] || [];
+        // 键 → 归属类型（反过来查，免得每次过滤都线性找）
+        const owns = {};
+        for (const [type, keys] of Object.entries(PREF_SCOPE_BY_TYPE)) {
+            for (const k of keys) owns[k] = type;
+        }
+        const out = [];
+        for (const g of PREF_GROUPS) {
+            // 不属于任何专属类型 = 通用，所有类型都显示
+            if (!owns[g.key]) out.push(g);
+        }
+        // 该类型的专属项：先在通用主表里找（案件五项就在主表里），
+        // 再找战斗那张补表。这样案件不用改结构，战斗新增的也不用硬塞进主表。
+        for (const g of PREF_GROUPS) {
+            if (owns[g.key] === t) out.push(g);
+        }
+        for (const g of PREF_COMBAT_GROUPS) {
+            if (owns[g.key] === t) out.push(g);
+        }
+        return out;
+    }
+
+    /** 按主类型取某个参数的定义（含已被滤掉的专属项），找不到返回 undefined */
+    function prefsForTypeLookup(key) {
+        return PREF_GROUPS.find(x => x.key === key) || PREF_COMBAT_GROUPS.find(x => x.key === key);
+    }
 
     const PREF_GROUPS = [
         {
@@ -1992,7 +3224,10 @@
      */
     /** 每组档位都先有这一项：全子项回到「根据当前情况自行设定」 */
     function autoPreset(groupName, prefs) {
-        const items = PREF_GROUPS.filter(x => x.group === groupName);
+        // 2026-11-06 M4.2：战斗要素五项在补表里，只查主表会把它们漏掉，
+        // 「自行设定」档位就只填通用项、战斗那五项停在原处。
+        const items = PREF_GROUPS.concat(PREF_COMBAT_GROUPS)
+            .filter(x => x.group === groupName);
         const values = {};
         // 值用当前正确的「自行设定」文案（难度等级定了就是「根据难度等级自行设定」）
         const text = autoByText(prefs);
@@ -2037,6 +3272,24 @@
                   values: { timePressure: '隐藏', timeDuration: '紧张', timeoutConsequence: '局势不可逆转', procrastinationCost: '阶段性恶化' } },
             ],
         },
+        // 2026-11-06 M4.2：战斗专属组。档位文案与上面三组一样用「大致·X」，
+        // 界面上四组长得一致，用户不用重新学一套。
+        '战斗要素': {
+            options: [
+                { key: 'easy', label: '大致·碾压', desc: '对手不成气候，地形好走，打完还能从容收场',
+                  values: { enemyStrength: '弱（乌合之众）', terrainComplexity: '开阔（少掩体）',
+                      reinforcementChance: '无增援', retreatTolerance: '随时可退', hasPreparation: '有（可准备）' } },
+                { key: 'normal', label: '大致·相当', desc: '旗鼓相当，要动脑子，备好了打得赢',
+                  values: { enemyStrength: '均势（旗鼓相当）', terrainComplexity: '一般（有掩体有通途）',
+                      reinforcementChance: '低（可能来一波）', retreatTolerance: '需付代价才退得掉', hasPreparation: '有（可准备）' } },
+                { key: 'hard', label: '大致·硬仗', desc: '对手压制我方，地形处处卡口，随时可能来援',
+                  values: { enemyStrength: '强（压制我方）', terrainComplexity: '复杂（处处卡口）',
+                      reinforcementChance: '中（多半会来）', retreatTolerance: '难以脱身', hasPreparation: '有（可准备）' } },
+                { key: 'brutal', label: '大致·死地', desc: '正面必败，无路可退，只能靠算计找出路',
+                  values: { enemyStrength: '悬殊（正面必败）', terrainComplexity: '极复杂（几乎无路）',
+                      reinforcementChance: '高（源源不断）', retreatTolerance: '只能死战', hasPreparation: '无（遭遇即开打）' } },
+            ],
+        },
     };
 
     /** 某个分组当前是否所有子项都落在同一个档位上 */
@@ -2069,7 +3322,9 @@
     function customValueOf(prefs, key) {
         const v = String((prefs || {})[key] || '').trim();
         if (!v) return '';
-        const def = PREF_GROUPS.find(x => x.key === key);
+        // 2026-11-06 M4.2：战斗五项不在主表里，只查 PREF_GROUPS 会让它们的手写值
+        // 一律被判成「不是自定义」，提示词里那句「此项由用户手写」就丢了。
+        const def = prefsForTypeLookup(key);
         const opts = (def && def.options) ? def.options : [];
         // 内置选项、占位符、各种「自行设定」文案都不算自定义
         if (opts.includes(v)) return '';
@@ -2086,9 +3341,103 @@
         return list.map(x => String(x || '').trim()).filter(Boolean);
     }
 
+    // ---------- 参数按主类型分开存（2026-11-06 M4.2）----------
+    //
+    // 口径（定稿 M4.2）：
+    //   1. 每个主类型各存一份 prefs.byType[主类型]，切回来沿用上次这一类型的值；
+    //   2. 旧扁平参数第一次读取时灌进当前选中类型，同时置 byTypeMigrated = true，
+    //      之后永不再读扁平那套——否则每次生成都把旧值灌回来，用户改了又变回去；
+    //   3. 切换主类型只重绘参数区，不动别的，也不重推难度档位。
+    //
+    // 为什么要有第 2 条那个标志：光判断「byType 里有没有这个类型」不够。
+    // 用户切到案件填了值、再切回战斗，战斗那份是空的——没有标志的话就会去读扁平旧值，
+    // 把他刚在案件里调过的值灌进战斗。这个坑不写死，实现出来就是「改了又变回去」。
+
+    /** 取整套参数存储；没有就建一个空的 */
+    function prefsStore(s) {
+        const st = s || getSettings();
+        if (!st.byType || typeof st.byType !== 'object') st.byType = {};
+        return st.byType;
+    }
+
+    /** 某主类型的参数有没有存过 */
+    function hasTypePrefs(mainType) {
+        const st = getSettings();
+        const byType = st.byType;
+        if (!byType || typeof byType !== 'object') return false;
+        const one = byType[String(mainType || '').trim()];
+        return !!(one && typeof one === 'object' && Object.keys(one).length);
+    }
+
+    /**
+     * 读出某主类型的参数，缺的补默认。
+     * 第一次调用（没有 byTypeMigrated 标志）时，把扁平那套灌进当前类型。
+     */
+    function getTypePrefs(mainType) {
+        const st = getSettings();
+        const type = String(mainType || '').trim() || EVENT_TYPE_DEFAULT;
+        const byType = prefsStore(st);
+        let one = byType[type];
+        if (!one || typeof one !== 'object') {
+            one = {};
+            byType[type] = one;
+        }
+        const merged = Object.assign(defaultPrefs(), one);
+        merged.eventMainType = type;
+        return merged;
+    }
+
+    /** 写回某主类型的参数；只留该类型真正用得上的键，别把别的类型的东西存进来 */
+    function setTypePrefs(mainType, prefs) {
+        const st = getSettings();
+        const type = String(mainType || '').trim() || EVENT_TYPE_DEFAULT;
+        const byType = prefsStore(st);
+        const keep = {};
+        const visible = prefsForType(type).map(g => g.key);
+        for (const k of visible) {
+            if (prefs && prefs[k] !== undefined) keep[k] = prefs[k];
+        }
+        // 类型本身与那几项非参数的字段也跟着存，切回来时界面要复原
+        for (const k of ['eventMainType', 'eventSubTypes', 'extra', 'goal', 'promptHint',
+            PREF_LEVEL_ITEM.key]) {
+            if (prefs && prefs[k] !== undefined) keep[k] = prefs[k];
+        }
+        byType[type] = keep;
+        return keep;
+    }
+
+    /**
+     * 一次性迁移（定稿 M4.2 第 2 条）。返回迁移了几项。
+     * 只在 byTypeMigrated 还没置位时动，置位后直接返回 0——这条是防「改了又变回去」的关键。
+     */
+    function migratePrefsToByType(flatPrefs, mainType) {
+        const st = getSettings();
+        if (st.byTypeMigrated) return 0;
+        const type = String(mainType || '').trim()
+            || String((flatPrefs && flatPrefs.eventMainType) || '').trim()
+            || EVENT_TYPE_DEFAULT;
+        const byType = prefsStore(st);
+        if (!byType[type] || typeof byType[type] !== 'object') byType[type] = {};
+        const target = byType[type];
+        let n = 0;
+        const src = flatPrefs || {};
+        for (const [k, v] of Object.entries(src)) {
+            if (v === undefined) continue;
+            // 已有值不覆盖：迁移只补空位
+            if (target[k] === undefined) { target[k] = v; n++; }
+        }
+        st.byTypeMigrated = true;
+        saveSettings();
+        if (n) log(`参数按类型分开存：把 ${n} 项旧参数迁到「${type}」名下（只做一次）`);
+        return n;
+    }
+
     function defaultPrefs() {
         const p = {};
         for (const g of PREF_GROUPS) p[g.key] = PREF_AUTO_NEW;
+        // 2026-11-06 M4.2：战斗五项不在主表里，默认值也要给，
+        // 否则切到战斗时界面上读不到、提示词里也没有这一行。
+        for (const g of PREF_COMBAT_GROUPS) p[g.key] = PREF_AUTO_NEW;
         // 难度等级已经从 PREF_GROUPS 摘出去了，默认值仍要给，否则界面上读不到
         p[PREF_LEVEL_ITEM.key] = PREF_AUTO_NEW;
         p.eventMainType = EVENT_TYPE_DEFAULT;
@@ -2134,6 +3483,15 @@
 
     function persistGenForm() {
         const s = getSettings();
+        // 2026-11-06 M4.2：当前这套值同时写回它自己的类型名下。
+        // 这样用户切换类型、刷新页面、甚至关掉面板再回来，填过的那份都还在。
+        if (S.draftPrefs && !s.byTypeMigrated) {
+            // 还没迁过就顺手完成迁移，免得用户在迁移之前改的值被后续迁移当成旧的
+            migratePrefsToByType(S.draftPrefs, S.draftPrefs.eventMainType);
+        }
+        if (S.draftPrefs && S.draftPrefs.eventMainType) {
+            setTypePrefs(S.draftPrefs.eventMainType, S.draftPrefs);
+        }
         s.genForm = {
             name: S.draftName || '',
             goal: (S.draftPrefs && S.draftPrefs.goal) || '',
@@ -2156,6 +3514,21 @@
         if (!S.draftPrefs) {
             const saved = loadGenForm();
             S.draftPrefs = saved.prefs || defaultPrefs();
+            // 2026-11-06 M4.2：旧扁平参数第一次被读到时就迁进 byType，同时置标志。
+            // 放在这里而不是别处：这是「用户参数第一次被读」的那个点，
+            // 定稿 M4.2 第二条说的就是这个时候。标志一旦置位，以后再也不读扁平那套。
+            const st = getSettings();
+            if (!st.byTypeMigrated) {
+                const type = String(S.draftPrefs.eventMainType || '').trim();
+                migratePrefsToByType(S.draftPrefs, type);
+            } else {
+                // 已经迁过：当前类型名下存过就以存的那份为准，
+                // 否则沿用扁平这份（用户可能刚切到没填过的类型）
+                const type = String(S.draftPrefs.eventMainType || '').trim();
+                if (type && hasTypePrefs(type)) {
+                    Object.assign(S.draftPrefs, getTypePrefs(type));
+                }
+            }
             if (!S.draftName && saved.name) S.draftName = saved.name;
         }
         return S.draftPrefs;
@@ -2219,7 +3592,10 @@
                 : `- 难度等级：${lvVal}`);
         }
         let curGroup = null;
-        for (const g of PREF_GROUPS) {
+        // 2026-11-06 M4.2：只把本次主类型用得上的参数写进提示词。
+        // 以前这里遍历整张 PREF_GROUPS，选战斗时照样把「线索充足度/误导强度/隐藏环节/信息呈现」
+        // 四条推理参数塞给模型——战斗事件被逼着去凑「误导强度」，这正是要治的病。
+        for (const g of prefsForType(prefs && prefs.eventMainType)) {
             if (g.group && g.group !== curGroup) {
                 curGroup = g.group;
                 lines.push(`- ${g.group}：`);
@@ -2284,8 +3660,18 @@
             lines.push('');
             lines.push('【事件目的（用户亲手填写，必须围绕它设计）】');
             lines.push(goal);
-            lines.push('说明：这是用户希望这个事件最终达成的目标。核心真相、信息节点与推进路径都要服务于它，');
-            lines.push('但不要把它直白写进大纲让玩家一眼看穿，仍要经由信息节点逐步展开。');
+            // 2026-11-07 0C：这句话原先只对案件成立（「核心真相、信息节点与推进路径」）。
+            // 战斗事件没有核心真相也没有信息节点，模型读到这句只会困惑该往哪落。
+            // 改成按类型说「服务于 what」，无骨架类型退回通用说法。
+            lines.push('说明：这是用户希望这个事件最终达成的目标。'
+                + (function () {
+                    const t = String(prefs.eventMainType || '').trim();
+                    if (t === '案件推理') return '核心真相、信息节点与推进路径都要服务于它，';
+                    if (t === '战斗冲突') return '战斗目标、地形与事先准备都要服务于它，';
+                    if (t === '其他') return '目标、障碍与失败代价都要服务于它，';
+                    return '大纲的各个字段都要服务于它，';
+                })());
+            lines.push('但不要把它直白写进大纲让玩家一眼看穿，仍要经由具体情节逐步展开。');
         }
         const hint = String(prefs.promptHint || '').trim();
         if (hint) {
@@ -2293,7 +3679,7 @@
             lines.push('【事件框架提示（用户亲手填写的想法，尽量采纳）】');
             lines.push(hint);
             lines.push('说明：这是用户自己构思的大致框架或想要的桥段。能融进结构就融进去；');
-            lines.push('与公平性、信息节点可获得性冲突时，优先保证结构完整，再尽量保留用户的意图。');
+            lines.push('与公平性、结构完整性冲突时，优先保证结构完整，再尽量保留用户的意图。');
         }
         return lines.join('\n');
     }
@@ -2308,31 +3694,49 @@
 
     function buildOutlinePrompt(eventName, prefs, worldBook, contextText) {
         const named = String(eventName || '').trim();
+        // 主类型（2026-11-05 M1；5.2 于当日裁定改为抛错）：
+        // 没选主类型就不生成。以前这里回落到「案件推理」兜底，等于把「没类型就当案件」
+        // 这个老病留在兜底路径里——生成页强制选了走不到，但续写、自动盘点这类调用
+        // 会静默产出一份案件结构，事后没人知道它是怎么来的。
+        // 危晓 2026-11-05 定：必须有类型，没有就报错，不要替用户挑。
+        const mainTypeLabel = String((prefs && prefs.eventMainType) || '').trim();
+        if (!mainTypeLabel) {
+            throw new Error('没有选择事件主类型，无法生成大纲。请先在生成页选择主类型再生成。');
+        }
+        // 2026-11-05 M3：按类型挑示例，没有骨架的类型返回 null
+        const skel = skeletonForType(mainTypeLabel);
         const head = named
             ? `OOC: 暂停扮演。为即将开始的【${named}】生成完整结构大纲，用 YAML 输出，包含：`
             : 'OOC: 暂停扮演。为即将开始的事件生成完整结构大纲，用 YAML 输出，包含：';
         const nameLine = named
             ? '   a. 事件名直接用上面给定的名字'
             : '   a. 事件名：你没有收到指定的名字，请根据当前剧情、角色处境和即将发生的事，起一个简洁的中文事件名（4-12 字，如「开膛手杰克案」「石桥镇失踪案」），写进 event_name 键';
+        // 2026-11-07 0C：第 1–5 项按主类型给。
+        // 原先这五项写死在案件流程里，选战斗、探险、谈判的模型照样被要求
+        // 「写出核心真相」「列 5-8 条信息节点」——真机上战斗事件被迫硬凑核心真相就是这个原因。
+        // 现在从 OUTLINE_TYPE_ITEMS 取；表里没有的（将来新加的类型）退回通用说法，
+        // 但不再套用案件措辞。
+        const typeItems = OUTLINE_TYPE_ITEMS[mainTypeLabel] || [
+            '1. 事件类型：写明本事件属于哪一类',
+            '2. 结构：按这个类型自己的机制列字段，内层一律放在 structure 下',
+            '3. 角色：列出参与各方及其诉求',
+            '4. 推进：写清从开局到结束的分步过程',
+            '5. 禁止事项：不得让角色知道其不应知道的信息',
+        ];
         return [
             head,
             '0. 事件名（event_name）与事件简介（event_brief，一句话说清这事件要解决什么）',
             nameLine,
-            '1. 事件类型与核心真相：判断本事件属于哪类（案件/谈判/探险/危机/社交博弈/其他），写出核心真相或隐情（仅记录，后续不得直接透露）',
-            '2. 信息节点清单：按发现顺序列 5-8 条，每条含编号（从 1 开始）、类型（物证/证言/环境/时间线/关系）、触发关键词、指向的信息或后果',
-            '   节点字段名固定用：id（编号，数字）、type（类型）、trigger（触发关键词或触发条件）、info（指向的信息或后果）、refute_by（可选，这条是误导时填可推翻它的节点编号数组）',
-            '   另外单独输出「推进所需最少信息节点编号」：只列出推理必需的最少节点编号',
-            '3. 参与角色：按立场分类——',
-            '   a. 助力者：每个助力者的动机须各不相同（利益一致/情感羁绊/交易/被迫/其他），并标明是否有条件或代价。同阵营且利益一致者可以无条件；交易或被迫者须写明代价。按实际情况判断，不要为所有助力者统一附加条件',
-            '   b. 阻碍者：会阻止玩家推进，其阻碍理由须合理且可被化解',
-            '   c. 知情者/关键人物：掌握核心信息，不会无理由主动交出；其信息只能经由信息节点清单中的条目逐步获得',
-            '   d. 幕后方（如有）：标记 reveal: forbidden，暴露路径只能经由信息节点清单逐步指向',
-            '4. 推进路径：从开局到结局的分步逻辑链，注明哪些节点是必经、哪些可跳过；并按"危险程度"标注每个高风险节点的失败后果（如受伤/被俘/死亡/失去关键信息）',
-            '5. 禁止事项：不得新增清单外信息节点、不得提前揭示核心真相、不得让角色知道其不应知道的信息',
+            ...typeItems,
             '',
             buildPrefsBlock(prefs),
             '',
             '【硬性要求（不得违反）】',
+            // 2026-11-06 真机：模型把【推进路径】【参与角色】写到了 ```yaml 块外面，
+            // 解析器只取块内，那两段（占全文 18%）整个丢掉。
+            // 块外那段救不回来就白写，所以这里明说一句。
+            '- 以上 0-5 项全部写在同一个 ```yaml 块里面，每一项都是块里的一个键；'
+            + '块外不许再写任何内容，写在块外的解析不到',
             '- 公平性：所有指向核心真相的信息必须在事件中可获得；核心真相不得依赖大纲外的新信息',
             '- 误导：允许 1-2 个误导性信息，但每个误导信息必须有一条可推翻它的反向证据，且该证据必须是信息节点清单中的条目，须注明 refute_by 节点编号',
             '- 允许根据当前情况设计大纲之外的合理路径，但每条必须标注「【大纲外】」并说明为什么现在会出现这条路径',
@@ -2349,38 +3753,198 @@
             contextText || '（无）',
             '',
             '---',
-            // 顶层键清单由骨架派生（2026-11-04 A1）：以前这里手写九个键，骨架里其实有十一个，
-            // 模型信了这句更短的硬约束，time_pressure 与 danger 就省了，校验也查不出来
-            '输出格式：只输出一个 YAML 代码块，顶层键为 ' + OUTLINE_TOP_KEYS.join(' / ') + '。',
+            // 顶层键清单（2026-11-04 A1 起由骨架派生；2026-11-05 M1 起拆成外层 + 内层）。
+            // 以前这里手写九个键，骨架里其实有十一个，模型信了这句更短的硬约束，
+            // time_pressure 与 danger 就省了，校验也查不出来。
+            //
+            // M1 之后要分两段说：外层是所有类型共用的，内层随主类型变。
+            // 不分段的话，模型会把案件专属的 core_truth / nodes 也当成必填，
+            // 战斗事件就被逼着硬凑一个「核心真相」出来——这正是这次改造要治的病。
+            '输出格式：只输出一个 YAML 代码块。所有类型都要有的外层键为 '
+                + OUTLINE_OUTER_KEYS.join(' / ') + '（其中 contract 可选，其余必填）。',
+            innerKeyNamesOf(mainTypeLabel).length
+                ? '外层键之后是 structure（内层），本次主类型「' + mainTypeLabel + '」的内层键为 '
+                    + innerKeyNamesOf(mainTypeLabel).join(' / ') + '。'
+                : '外层键之后是 structure（内层），本次主类型「' + mainTypeLabel + '」的内层骨架还没做，'
+                    + '请按这个类型自己的结构写：需要哪些字段就列哪些，但内层一律放在 structure 下面。',
+            // M6.4/M6.5（2026-11-07）：块状字段的子键说明。
+            // spec 里写了 sub 的字段（时间窗口、账目这类）在这里逐条告诉模型该有哪些子键；
+            // 没写 sub 的字段不会多出一个字。
+            ...innerKeyNamesOf(mainTypeLabel)
+                .map(k => k.replace('（可选）', ''))
+                .map(k => subKeyHintOf(mainTypeLabel, k))
+                .filter(Boolean),
+            // M6（2026-11-06）：「其他」是兜底类型，说明它和具体类型的两点不同，
+            // 否则模型会照案件或战斗的样子硬凑，或者把自己另起的阶段塞进 structure。
+            // 用条件展开而不是空字符串，免得 lines.join 出一个空行。
+            ...(mainTypeLabel === '其他'
+                ? ['「其他」是兜底类型：按上面六个字段写，不要照搬案件或战斗的专属字段（没有核心真相、没有信息节点）。'
+                    + '这个事件如果要分阶段，写在外层的 structure.phases 里（最多 3 段），不要在 structure 下另起一个同名字段。']
+                : []),
+            '结构一律写在外层键之下、内层键放在 structure 里面，不要再平铺回顶层。',
             '',
-            '【字段名必须逐字照用】下面是一条填好的完整示例，结构照抄，内容全部按本次事件重写。',
-            '键名一律用英文小写加下划线，不许改写成中文、不许自造同义词、不许增减层级。',
+            // 外层与内层的分工说清楚，免得模型把内层字段平铺到顶层，或者把外层塞进 structure
+            '【外层与内层】外层描述「这是什么事件、多急多险、不许说什么」，所有类型一样；',
+            'structure 里放该类型特有的结构。顶层不许出现内层键，structure 里不许出现外层键。',
+            // 2026-11-06 真机：选禁忌秘辛时模型把 forbidden 写进了 structure，
+            // 外层那句「不许出现外层键」淹没在几百行里没管用。
+            // 这几个键最容易放错——它们都是「内容约束」，跟 structure 里的东西长得像，
+            // 所以单独点名，并说明放错的后果（读不到等于没写）。
+            '特别注意：forbidden、time_pressure、danger、contract 这几个一律写在外层，',
+            '不许写进 structure。它们不是这个类型特有的结构，是所有类型共用的，放进去就读不到了。',
+            '',
+            // 2026-11-06 M4.1：「下面有一条完整示例，结构照抄」这句原来放在这里，
+            // 对没有骨架的类型来说，prompt 下面又写着「本次没有现成骨架示例」，
+            // 同一份 prompt 里自相矛盾，模型只能瞎猜。现在这句收进「有骨架」分支。
+            '【字段名必须逐字照用】键名一律用英文小写加下划线，不许改写成中文、不许自造同义词、不许增减层级。',
             '示例里的值（事件名、人名、文本）都是上一件事留下来的，没有一个字能用，全部换成本次的内容。',
             '',
             // 骨架从这里引用单一真源（2026-11-04 A1）。以前这 53 行原样抄在本函数里，
-            // 与顶层键清单、checkOutlineQuality 的必查集合各自独立，三处会慢慢漂移
-            '```yaml',
-            OUTLINE_SKELETON,
-            '```',
-            '',
-            '【误导项怎么写】上面第一条示例里所有节点都是真实线索。如果本次设计了误导性信息，',
-            '那么被误导的那个节点要多一个 refute_by，列出能推翻它的节点编号，写法照下例：',
-            '',
-            '```yaml',
-            OUTLINE_SKELETON_MISLEAD,
-            '```',
-            '',
-            '两条示例只差一处：第一条没有任何节点带 refute_by，第二条的第一个节点带 refute_by。',
-            '没有误导项就照第一条写，有误导项就照第二条写，不要两种混着来。',
+            // 与顶层键清单、checkOutlineQuality 的必查集合各自独立，三处会慢慢漂移。
+            //
+            // 2026-11-05 M3：示例按主类型挑（案件 / 战斗，一期就这两套）。
+            // 以前这里写死「示例的主类型是案件推理」，选了战斗的模型只能看着案件示例
+            // 去猜战斗该长什么样——这正是「所有事件都生成成案件」那个病的残留。
+            // 没有骨架的类型（谈判、生存等，二期才做）不给示例，只给字段清单，
+            // 不拿案件或战斗的示例去硬套。
+            ...(skel
+                ? [
+                    '【结构照抄】下面是一条填好的完整示例，结构照抄，内容全部按本次事件重写。',
+                    '示例的主类型是「' + skel.mainLabel + '」，就是本次的类型，结构照它写。',
+                    '',
+                    '```yaml',
+                    skel.main,
+                    '```',
+                    '',
+                    skel.altTitle,
+                    skel.altTitle2,
+                    '',
+                    '```yaml',
+                    skel.alt,
+                    '```',
+                    '',
+                    skel.altDiff,
+                    skel.altHow,
+                    skel.altNote,
+                ]
+                : [
+                    '本次主类型「' + mainTypeLabel + '」还没有现成骨架示例（一期只做了案件推理与战斗冲突两套）。',
+                    '本次没有示例可照抄，按该类型自己的结构写：需要哪些字段就列哪些，',
+                    '内层字段用英文小写下划线，全部放在 structure 下面，不要照搬案件或战斗的字段。',
+                ]),
             '【大纲外路径】的写法：与普通路径同结构，但 step 填 "【大纲外】"，并多加一个 why: 为什么现在会出现这条路径。',
+            // 阶段数组（2026-11-05 M4，定稿 1N）。
+            // 口径（危晓定）：主类型那套完整字段仍在 structure 顶层，phases 只描述
+            // 「这个多段事件由哪几段组成」，每段精简字段，不把每段做成完整骨架。
+            // phases 可选：单段事件不写。要写清「什么算多段」，否则模型会把普通事件也硬拆三段。
+            // 2026-11-06 M6.8：外层键从 stages 改名为 phases（危晓批准，定稿 1N 同步）。
+            // 理由：stages 与「其他」骨架里的阶段字段、以及若干类型的内部阶段说法撞名，
+            // 一律叫 phases 之后，跨层撞键校验（M6.6）才有唯一答案。
+            '',
+            '【阶段数组】只有「一场戏演不完、明显分成几个阶段」的事件才写 structure.phases，最多 3 段；',
+            '单段事件（一次对峙、一次搜查、一场遭遇战）不要写，写了反而把简单的事说复杂。',
+            '每段五个键：type（这一段算什么类型）、goal（这一段要达成什么）、',
+            'entry（从什么状况开始这一段）、exit（达成什么才算这一段结束）、optional（这一段能不能跳过）。',
+            'optional 写 true 时，必须同时写 avoid_condition：什么情况下这一段会被跳过。',
+            '可选再加一个 fields，放这一段特有的少量字段（3-5 项），不要重复整套骨架。',
+            '主类型那套完整字段仍然写在 structure 顶层，不要搬进 phases——',
+            'phases 只是把这一个事件切成几段看，不是几个事件拼在一起。',
+            '如果一件事超过 3 段还说不完，说明它该拆成多个事件，不要硬塞进一个事件的阶段里。',
             // 【一致性】必须跟着骨架走（2026-11-04 A2）：它是骨架的后半截约束，
-            // 留在前面会被世界观与剧情劈开，等于同一组要求分成两半说
-            '【一致性】nodes 的 id 必须从 1 连续编号；paths 里的 node 只能引用已列出的节点编号；',
-            'min_nodes_for_deduction、refute_by 里的编号同样只能引用已列出的节点。',
+            // 留在前面会被世界观与剧情劈开，等于同一组要求分成两半说。
+            // M2：这些编号规则讲的是 structure 里面的字段，所以要把「内层」说出来，
+            // 否则模型可能以为顶层也要有 nodes 才叫一致。
+            // M3：只剩案件那几条，战斗没有节点编号这回事，所以整段按类型给出。
+            ...(mainTypeLabel === '案件推理'
+                ? [
+                    '【一致性】structure 里 nodes 的 id 必须从 1 连续编号；paths 里的 node 只能引用已列出的节点编号；',
+                    'min_nodes_for_deduction、refute_by 里的编号同样只能引用已列出的节点。',
+                    'suspects 是嫌疑人口径，与 characters 分工：suspects 写「谁可能干了、他为什么干、他拿什么当挡箭牌」，',
+                    '每人三件事都要写全——motive（动机）、alibi（不在场证明）、lie（他说了什么谎）。',
+                    'characters 写的是帮手、阻碍者、知情人、幕后方，不要和 suspects 混着写同一个人。',
+                ]
+                : []),
+            ...(mainTypeLabel === '战斗冲突'
+                ? [
+                    '【一致性】structure 里 enemy_forces 的每一项都要写清 strength（多少）、level（精锐/常备/乌合）、',
+                    'tactic（怎么打）、morale（还愿不愿意打）；objectives 的每一项都要有 name、type、condition、fail，',
+                    'condition 写成「打成什么样算完成」，不要写成「努力击退敌人」这种没有验收标准的句子。',
+                    // 2026-11-06 真机：模型在 enemy_forces 里塞了一条「夜里的岔道与浅沟」，
+                    // level 和 morale 都填「不适用」——地形不是敌人，是为凑够字段硬填的。
+                    // 根因是这四项被说成「每一项都要写清」，模型找不到第三个敌人就拿地形顶。
+                    'enemy_forces 只放会主动对抗的东西（人、兽、有意志的势力）。地形、天气、路况写进 terrain，不要写进 enemy_forces；',
+                    '没有敌人就别硬凑——只有一种敌人就写一种，两三种是常态，凑数与填「不适用」都算错。',
+                    'preparation 的五个子项（supplies/traps/intel/allies/depart_time）要么都写、要么整个不写，',
+                    '不要只写一半——只写物资不写出发时间，等于没写准备。',
+                ]
+                : []),
+            '以上规则只对本次主类型适用；其他类型的内层字段按各自字段的语义写即可。',
         ].join('\n');
     }
 
-    /** 生成大纲时的剧情上下文：纪要（概览或正文）+ 最近楼层 */
+    /**
+     * 从一份大纲里读主类型。优先 event_type.primary，读不到返回空串，不回落到案件。
+     * 2026-11-06 M4.1：待选卡片要判断「这份结构是临时的还是有骨架的」，需要这一步。
+     */
+    function mainTypeOfOutline(o) {
+        const n = (o && typeof o === 'object') ? o.event_type : null;
+        return (n && typeof n === 'object') ? String(n.primary || '').trim() : '';
+    }
+
+    /**
+     * 按主类型挑示例（2026-11-05 M3）。
+     * 返回 { main, alt, mainLabel }：main 是常态示例，alt 是示范可选字段的第二条。
+     *
+     * 一期只有案件与战斗两套骨架（定稿 1C）。没有骨架的类型返回 null，
+     * 由调用方改成「没有示例，按字段清单写」——不能拿案件的示例硬套，
+     * 那正是「所有事件都生成成案件」这个病的来源。
+     */
+    function skeletonForType(mainType) {
+        // M7（2026-11-07）：自定义类型先解析成它映射到的内置类型，再取骨架。
+        // 注意：只有目标类型本身有骨架（案件、战斗）时，映射才真正拿到示例；
+        // 映射到其余七个类型仍返回 null，调用方给出「没有现成示例，按字段清单写」。
+        // 没配映射的自定义类型解析成「其他」，同样返回 null——「其他」走的是字段清单那条路。
+        // 配了映射、且目标类型有骨架（案件/战斗）时，会拿到对应骨架，
+        // 但 mainLabel 仍是原类型名，模型写进 event_type 的也是用户起的名字。
+        const origType = String(mainType || '').trim();
+        const t = resolveSkeletonType(origType);
+        const skel = (() => {
+            if (t === '案件推理') {
+                return {
+                    main: OUTLINE_SKELETON, alt: OUTLINE_SKELETON_MISLEAD, mainLabel: '案件推理',
+                    // 案件第二条的差别是 refute_by（误导项），战斗是 preparation（事先准备）。
+                    // 两句说明按类型换，否则选了战斗的模型会看到「误导项怎么写」这段无关的话。
+                    altTitle: '【误导项怎么写】上面第一条示例里所有节点都是真实线索。如果本次设计了误导性信息，',
+                    altTitle2: '那么被误导的那个节点要多一个 refute_by，列出能推翻它的节点编号，写法照下例：',
+                    altDiff: '两条示例只差一处：第一条没有任何节点带 refute_by，第二条的第一个节点带 refute_by。',
+                    altHow: '没有误导项就照第一条写，有误导项就照第二条写，不要两种混着来。',
+                    altNote: '（这两条只适用于案件推理：refute_by 与节点编号是案件的内层字段，别的类型不必硬凑。）',
+                };
+            }
+            if (t === '战斗冲突') {
+                return {
+                    main: OUTLINE_SKELETON_COMBAT, alt: OUTLINE_SKELETON_COMBAT_PREP, mainLabel: '战斗冲突',
+                    altTitle: '【事先准备怎么写】上面第一条是遭遇战，没有准备阶段。如果这场战斗之前玩家有时间布置，',
+                    altTitle2: '那么在 structure 里多写一个 preparation，五个子项写法照下例：',
+                    altDiff: '两条示例的差别：第一条只有三个必填内层键，第二条多了 preparation、reinforcements、retreat、casualty。',
+                    altHow: '没有准备阶段（遭遇、伏击）就照第一条写；有布置时间就照第二条写，五个子项都要填。',
+                    altNote: '（这两条只适用于战斗冲突：preparation 是战斗的内层字段，别的类型不必硬凑。）',
+                };
+            }
+            return null;
+        })();
+        if (!skel) return null;
+        // 自定义类型套用别人的骨架时，把 mainLabel 改回用户自己起的名字，
+        // 否则模型会被告知「照疾病推理的示例写」，写进 event_type 的也成了内置类型名。
+        if (origType && origType !== t) {
+            return Object.assign({}, skel, {
+                mainLabel: origType,
+                mappedFrom: t,
+            });
+        }
+        return skel;
+    }
+
     function buildOutlineContextText(ctxParts) {
         const parts = [];
         if (ctxParts.jiyaoList) {
@@ -2406,27 +3970,71 @@
         ].join('\n');
     }
 
-    function buildInventoryPrompt(ctxParts) {
+    function buildInventoryPrompt(ctxParts, eventArg) {
         const parts = [];
+        // 2026-11-06：盘点提示词原先通篇按案件写（处处是「信息节点」「推动」「误导」），
+        // 战斗事件交给模型的是一份它根本答不了的问题——战斗没有节点编号。
+        // 现在按大纲实际有什么来问：有节点问节点，没有节点就问战斗目标，再没有就问阶段。
+        const ev = eventArg || getCurrentEvent();
+        const prog = progressItemsOf(ev && ev.outline);
         parts.push('OOC: 暂停扮演，做一次状态盘点。基于本事件开场大纲和到目前为止的对话，输出：');
         parts.push('A. 已确认信息（只列对话中已实际出现的，注明大致的楼层或纪要编号）');
-        parts.push('B. 尚未触发的信息节点（对照大纲，列出还没出现的节点编号及各自触发词）');
+        if (prog.kind === 'node') {
+            parts.push('B. 尚未触发的信息节点（对照大纲，列出还没出现的节点编号及各自触发词）');
+        } else if (prog.kind === 'objective') {
+            parts.push('B. 各战斗目标的达成情况（对照大纲里的目标清单，逐个说明：已达成 / 未达成 / 已失败，'
+                + '并给出判断依据在哪些楼层）');
+        } else if (prog.kind === 'stage') {
+            parts.push('B. 各阶段的进展（对照大纲里的阶段清单，逐个说明：还没开始 / 进行中 / 已走完，'
+                + '并注明目前卡在哪一段的入场或退场条件上）');
+        } else {
+            parts.push('B. 尚未触及的大纲要点（对照大纲，列出还没出现的内容）');
+        }
         parts.push('C. 按事件参数核对当前状态：');
-        parts.push('   - 线索充足度：当前信息是否足以支撑下一步推进？如不足，说明缺什么、可经由哪条未触发节点补上');
-        parts.push('   - 误导状态：已出现的误导是否已被反向证据推翻？如未推翻，提醒其存在');
-        parts.push('   - 隐藏环节：当前是否卡在需推理补全的环节？如是，指出已有哪些信息可作为推理依据');
-        parts.push('   - 危险状态：当前威胁来源是什么？最近一个高风险节点是什么、失败后果是什么？容错已消耗多少？');
+        if (prog.kind === 'objective') {
+            // 战斗事件（2026-11-06）：原来这里照抄案件的四问（线索充足度、误导、隐藏环节、高风险节点），
+            // 战斗没有节点、没有误导，问这些等于让模型编。改成按战斗自己的指标问。
+            parts.push('   - 敌我态势：敌方还剩多少战力？当前地形与出入口对谁有利？');
+            parts.push('   - 目标进展：上面每个战斗目标现在到哪一步？哪个已经满足达成条件、哪个面临失败后果');
+            parts.push('   - 危险状态：当前最可能造成伤亡的因素是什么？撤退条件是否已经触发？');
+            parts.push('   - 资源消耗：物资、陷阱、情报是否已经用掉？剩下的还够不够支撑到目标完成');
+        } else if (prog.kind === 'stage') {
+            parts.push('   - 当前所处的段：现在演到第几段？这一段的目标达成没有？');
+            parts.push('   - 入场与退场：这一段的退场条件满足了没有？有没有已经换成下一段的迹象');
+            parts.push('   - 危险状态：当前威胁来源是什么？失败后果是什么？容错已消耗多少？');
+        } else {
+            parts.push('   - 线索充足度：当前信息是否足以支撑下一步推进？如不足，说明缺什么、可经由哪条未触发节点补上');
+            parts.push('   - 误导状态：已出现的误导是否已被反向证据推翻？如未推翻，提醒其存在');
+            parts.push('   - 隐藏环节：当前是否卡在需推理补全的环节？如是，指出已有哪些信息可作为推理依据');
+            parts.push('   - 危险状态：当前威胁来源是什么？最近一个高风险节点是什么、失败后果是什么？容错已消耗多少？');
+        }
         parts.push('D. 当前可走的路：2-4 条具体行动分支，每条注明大致耗时（剧情内时间）、主要风险、可能获得的信息。允许新开路径，但须标注「【大纲外】」并说明原因');
         parts.push('E. 矛盾检查：是否有前后不一致的信息或角色行为？如有，指出并建议以哪条为准。');
         parts.push('不要推进剧情，只做整理。');
         parts.push('');
+        if (prog.kind === 'objective' || prog.kind === 'stage') {
+            parts.push('本事件按' + (prog.kind === 'objective' ? '目标' : '阶段') + '记进度，可用条目如下：');
+            for (const it of prog.items) parts.push('  ' + it.key + ' → ' + it.label);
+            parts.push('');
+        }
         parts.push('除上述文字报告外，最后再输出一个 JSON 代码块，用于程序更新进度：');
         parts.push('```json');
         parts.push('{');
-        parts.push('  "triggeredNodes": [已触发的节点编号, 数字数组],');
+        if (prog.kind === 'node') {
+            parts.push('  "triggeredNodes": [已触发的节点编号, 数字数组],');
+        } else if (prog.kind === 'objective' || prog.kind === 'stage') {
+            // 战斗目标与阶段用字符串 key，与盘点页的条目标识一一对应。
+            // 注意：这里是 JSON，不能写注释——模型会照抄成非法 JSON，盘点直接解析失败。
+            // 可用 key 只能写在 JSON 块之外的正文里。
+            parts.push('  "triggeredProgress": [本次确认达成的条目 key, 字符串数组],');
+        } else {
+            parts.push('  "triggeredNodes": [已触发的节点编号, 数字数组],');
+        }
         parts.push('  "refutedMisleads": [已被推翻的误导标识, 字符串数组],');
         parts.push('  "offPathBranches": [{"desc": "大纲外新路径简述", "reason": "为什么现在出现"}],');
-        parts.push('  "nodeVetoed": [本次明确判定不可能再触发的节点编号],');
+        if (prog.kind === 'node') {
+            parts.push('  "nodeVetoed": [本次明确判定不可能再触发的节点编号],');
+        }
         parts.push('  "summary": "一句话概括当前进度"');
         parts.push('}');
         parts.push('```');
@@ -2551,10 +4159,39 @@
         if (!event) return '';
         const lines = [];
         lines.push(`事件：${event.name}（${event.status === 'active' ? '进行中' : event.status}）`);
-        if (event.outline && event.outline.core_truth) {
-            lines.push(`核心真相：〔禁止透露〕${event.outline.core_truth}`);
+
+        // 内层取值（2026-11-05 M1；M2 评审后收成公共函数）：
+        // 内层字段只从 structure 下面取，不回落顶层。老事件的扁平形状读不出来，这是既定口径。
+        const outlineOf = event.outline || {};
+        const inner = k => innerField(outlineOf, k);
+
+        // 主类型：新事件写在 event_type.primary，老事件可能没有
+        const typeNode = outlineOf.event_type;
+        const mainType = (typeNode && typeof typeNode === 'object')
+            ? String(typeNode.primary || '').trim() : '';
+        if (mainType) {
+            const subs = (typeNode && Array.isArray(typeNode.secondary)) ? typeNode.secondary : [];
+            lines.push(`类型：${mainType}${subs.length ? '（次类型：' + subs.join('、') + '）' : ''}`);
         }
-        const nodes = (event.outline && event.outline.nodes) || [];
+
+        // 委托关系（2026-11-05 M1 新增，定稿 §4 contract）：可选，有才写
+        const contract = outlineOf.contract;
+        if (contract && typeof contract === 'object') {
+            const parts = [];
+            if (contract.client) parts.push(`委托人：${contract.client}`);
+            if (contract.request) parts.push(`诉求：${contract.request}`);
+            if (contract.reward) parts.push(`报酬：${contract.reward}`);
+            if (contract.acceptance) parts.push(`验收：${contract.acceptance}`);
+            if (contract.breach) parts.push(`违约：${contract.breach}`);
+            if (contract.subcontract) parts.push(`转包：${contract.subcontract}`);
+            if (parts.length) lines.push(`委托：${parts.join('；')}`);
+        }
+
+        const coreTruth = inner('core_truth');
+        if (coreTruth) {
+            lines.push(`核心真相：〔禁止透露〕${coreTruth}`);
+        }
+        const nodes = Array.isArray(inner('nodes')) ? inner('nodes') : [];
         if (nodes.length) {
             const triggered = new Set(event.tracker && event.tracker.triggeredNodes || []);
             lines.push('节点清单：');
@@ -2565,8 +4202,42 @@
                     + (nodeTrigger(n) ? `（触发词：${nodeTrigger(n)}）` : ''));
             }
         }
-        if (event.outline && event.outline.min_nodes_for_deduction) {
-            lines.push(`推理所需最少节点：${JSON.stringify(event.outline.min_nodes_for_deduction)}`);
+        if (inner('min_nodes_for_deduction')) {
+            lines.push(`推理所需最少节点：${JSON.stringify(inner('min_nodes_for_deduction'))}`);
+        }
+        // 战斗目标与阶段（2026-11-06 M4 待补项）
+        // 原来状态卡只写节点清单，战斗事件里模型拿不到「打到第几个目标了」，
+        // 多段事件也拿不到「演到第几段」。这两个都是盘点时最该知道的东西。
+        const doneProg = new Set((event.tracker && event.tracker.progress) || []);
+        const objs = inner('objectives');
+        if (Array.isArray(objs) && objs.length) {
+            lines.push('战斗目标：');
+            objs.forEach((x, i) => {
+                const name = (x && typeof x === 'object')
+                    ? String(x.name || x['名称'] || '').trim() || `目标 ${i + 1}`
+                    : String(x || '').trim() || `目标 ${i + 1}`;
+                const cond = (x && typeof x === 'object') ? String(x.condition || '').trim() : '';
+                // 失败后果也要给模型看（2026-11-06 真机）：只有达成条件时，
+                // 模型分不清「还没做到」和「已经失败」，盘点会把失败报成进度为零。
+                const fail = (x && typeof x === 'object') ? String(x.fail || '').trim() : '';
+                const mark = doneProg.has('obj:' + i) ? '已达成' : '未达成';
+                const tail = [cond ? `达成条件：${cond}` : '', fail ? `失败后果：${fail}` : '']
+                    .filter(Boolean).join('；');
+                lines.push(` ${i + 1}. ${name} —— ${mark}${tail ? `（${tail}）` : ''}`);
+            });
+        }
+        const stagesCard = inner('phases');
+        if (Array.isArray(stagesCard) && stagesCard.length) {
+            const curIdx = stagesCard.findIndex((_, i) => !doneProg.has('stage:' + i));
+            lines.push(`阶段（共 ${stagesCard.length} 段，当前演到第 ${curIdx < 0 ? stagesCard.length : curIdx + 1} 段）：`);
+            stagesCard.forEach((st, i) => {
+                const goal = (st && typeof st === 'object')
+                    ? String(st.goal || st['目标'] || '').trim() || `第 ${i + 1} 段`
+                    : String(st || '').trim() || `第 ${i + 1} 段`;
+                const exit = (st && typeof st === 'object') ? String(st.exit || '').trim() : '';
+                const mark = doneProg.has('stage:' + i) ? '已走完' : '未走完';
+                lines.push(` ${i + 1}. ${goal} —— ${mark}${exit ? `（退场条件：${exit}）` : ''}`);
+            });
         }
         const refuted = (event.tracker && event.tracker.refutedMisleads) || [];
         if (refuted.length) lines.push(`已推翻误导：${refuted.join('、')}`);
@@ -3094,6 +4765,27 @@
         事件名: 'event_name', 事件简介: 'event_brief', 事件类型: 'event_type',
         核心真相: 'core_truth', 信息节点: 'nodes', 推理必需节点: 'min_nodes_for_deduction',
         参与角色: 'characters', 推进路径: 'paths', 禁止事项: 'forbidden',
+        // 2026-11-05 M2 评审 5.4：内层整体收进 structure，模型若把这一层写成中文，
+        // 不认的话内层会全部落空——让它落到 structure 上，后面照常校验。
+        结构: 'structure', 事件结构: 'structure', 大纲结构: 'structure',
+        嫌疑人: 'suspects', 不在场: 'alibi', 不在场证明: 'alibi', 谎言: 'lie', 他的谎言: 'lie',
+        // 2026-11-05 M3：战斗内层键与子项的中文写法。
+        // 同 结构→structure 那条：模型偶尔整套用中文键，只认英文会把这份输出判成空壳。
+        敌方编制: 'enemy_forces', 敌人编制: 'enemy_forces', 敌方部队: 'enemy_forces',
+        战斗目标: 'objectives', 目标: 'objectives',
+        地形: 'terrain', 援军: 'reinforcements', 增援: 'reinforcements',
+        撤退: 'retreat', 撤退条件: 'retreat', 伤亡: 'casualty', 伤亡与俘虏: 'casualty',
+        事先准备: 'preparation', 战前准备: 'preparation', 准备: 'preparation',
+        物资: 'supplies', 陷阱: 'traps', 情报: 'intel', 盟友: 'allies', 出发时间: 'depart_time',
+        兵力: 'strength', 等级: 'level', 战术: 'tactic', 士气: 'morale',
+        掩体: 'cover', 高低差: 'elevation', 狭窄处: 'chokepoint',
+        波次: 'wave', 到达时间: 'arrive', 规模: 'size',
+        // 2026-11-05 M4：阶段数组的中文写法
+        阶段: 'phases', 阶段数组: 'phases',
+        // 注意：不要写「目标: 'goal'」——「目标」已经映射到 objectives（战斗目标），
+        // 这条若是再加一次，后写的会覆盖前面的，战斗的目标就被改名成 phases 里的 goal。
+        阶段目标: 'goal', 入场: 'entry', 退场: 'exit', 可跳过: 'optional',
+        避开条件: 'avoid_condition', 阶段性字段: 'fields',
         助力者: 'helpers', 阻碍者: 'obstructers', 知情者: 'informants', 幕后方: 'behind_scenes',
         名称: 'name', 名字: 'name', 角色名: 'name', 姓名: 'name',
         身份: 'identity', 职衔: 'identity', 动机: 'motive', 动机类型: 'motive_type',
@@ -3159,7 +4851,12 @@
 
         for (const [rawKey, val] of Object.entries(obj)) {
             let key = rawKey;
-            if (!/^[A-Za-z_]/.test(rawKey)) {
+            // 2026-11-06 真机：phases[].fields[] 里的键是模型自己起的名字，不是固定字段名。
+            // 真案例里同一段的三个键是「可用手段 / 时机窗口 / 代价」，
+            // 前两个原样留着，只有「代价」撞上 CN_TO_EN_KEY 被改成了 cost——
+            // 于是面板上同组三个键两个中文一个英文，看着就像内容对不上。
+            // 自由格式的层一律不翻译：改它没有任何好处，只会让原文与展示不一致。
+            if (ctx !== 'freeform' && !/^[A-Za-z_]/.test(rawKey)) {
                 // 中文键：先看是不是 paths 里那个「节点: 必经」的特殊情况
                 if (ctx === 'path' && (rawKey === '节点' || rawKey === '必经')) {
                     const sv = String(val == null ? '' : val).trim();
@@ -3184,7 +4881,10 @@
             // 这些层级里的中文键会被漏掉（2026-11-01 实测踩到）。
             const SIDE_KEYS = ['helpers', 'obstructers', 'informants', 'behind_scenes',
                 'blockers', '助力者', '阻碍者', '知情者', '幕后方'];
-            const childCtx = key === 'paths' ? 'path'
+            // 注意 freeform 不需要在这里再传：fields 的值是数组，
+            // 数组分支会沿用上层上下文，元素自己就带着 freeform 往下走了。
+            const childCtx = key === 'fields' ? 'freeform'
+                : key === 'paths' ? 'path'
                 : key === 'nodes' ? 'node'
                 : SIDE_KEYS.includes(key) ? 'character'
                 : (ctx === 'path' || ctx === 'node') ? ctx
@@ -3217,16 +4917,215 @@
             debug(`大纲键名规范化：改掉中文键 ${r.renamed} 个`
                 + (r.lost.length ? `，同名冲突合并 ${r.lost.length} 个（${r.lost.join('、')}）` : ''));
         }
-        return r.obj;
+        return hoistOuterFromStructure(r.obj);
+    }
+
+    /**
+     * 把误写进 structure 的外层键搬回外层（2026-11-06 真机）。
+     *
+     * 为什么要有这一步：选禁忌秘辛时模型把 forbidden 整块写进了 structure，
+     * 外层就此缺一个必填键、判 ok=false，而且那六条禁止事项从状态卡和盘点提示词
+     * 里都读不到（那两个地方只读外层），等于白写。prompt 里其实写着
+     * 「structure 里不许出现外层键」，但几百行提示词里这一句约束不住。
+     *
+     * 只搬这一种情况，不做别的修复：
+     *   - 外层已经有同名键时不覆盖，原样保留，structure 里那份留着不动（可能是内层真需要的）
+     *   - contract 是可选外层键，一并搬
+     *   - 事件名/简介/类型不碰：它们不太可能被写进 structure，真写了多半是模型认错了整体结构，
+     *     那种情况该让它照实报错，而不是替它猜
+     */
+    function hoistOuterFromStructure(outline) {
+        const o = (outline && typeof outline === 'object') ? outline : null;
+        if (!o) return outline;
+        const st = o.structure;
+        if (!st || typeof st !== 'object' || Array.isArray(st)) return outline;
+        // 只搬这几个：语义上明确属于外层、又最容易跟内层混淆的
+        const MOVABLE = ['forbidden', 'time_pressure', 'danger', 'contract'];
+        const moved = [];
+        for (const k of MOVABLE) {
+            if (o[k] !== undefined && o[k] !== null && o[k] !== '') continue;   // 外层已有，不动
+            if (st[k] === undefined) continue;                                   // structure 里也没有
+            o[k] = st[k];
+            delete st[k];
+            moved.push(k);
+        }
+        if (moved.length) {
+            warn(`大纲外层键被写进了 structure，已搬回外层：${moved.join('、')}。`
+                + 'prompt 里明确要求过「structure 里不许出现外层键」，模型没照做，这次替它归位。');
+        }
+        return o;
+    }
+
+    /**
+     * 把 YAML 块外面的【中文段落】补回大纲（2026-11-06 真机）。
+     *
+     * 真实案例：战斗「独猎赤鬃」的模型输出，fence 内是完整 YAML，
+     * fence 外又用中文写了三段——【推进路径】【推进所需最少信息节点编号】【参与角色】。
+     * 那段占全文 18%（672 字），内容全是有用的，parseOutline 只取 fence 内，
+     * 于是面板上「展示的大纲比原文少了一大截」，用户看着就是内容丢了。
+     *
+     * 为什么不干脆改 prompt 让它别写到外面：prompt 里本来就要求「用 YAML 输出，包含」这五项，
+     * 模型仍然这么写过。几百行提示词里的一句约束不住，所以这里做兜底。
+     *
+     * 只补这三个键，且只在外层/内层都还没有这个键时补——模型自己写在 YAML 里的那份优先，
+     * 不拿外面的文本去覆盖结构化数据。
+     */
+    function patchFromOutsideFence(outline, tailText) {
+        const o = (outline && typeof outline === 'object') ? outline : null;
+        const text = String(tailText || '');
+        if (!o || !text.trim()) return outline;
+        if (!o.structure || typeof o.structure !== 'object') return outline;
+
+        // 按【标题】切段。注意两种写法都要吃：
+        //   「【推进路径】\n- 必经：…」  标题独占一行
+        //   「【推进所需最少信息节点编号】：1, 2, 5」  标题后面同一行就跟内容
+        const segs = {};
+        const lines2 = text.split('\n');
+        let curKey = null;
+        let buf = [];
+        const flush = () => {
+            if (curKey) segs[curKey] = (segs[curKey] || '') + buf.join('\n');
+            buf = [];
+        };
+        for (const line of lines2) {
+            const hm = line.match(/^\s*【([^】]{1,30})】\s*(.*)$/);
+            if (hm) {
+                flush();
+                curKey = hm[1].trim();
+                // 标题后面同一行还有内容时，当成这一段的第一行
+                if (hm[2] && hm[2].replace(/[:：\s]/g, '')) buf.push(hm[2]);
+            } else if (curKey) {
+                buf.push(line);
+            }
+        }
+        flush();
+
+        const bullets = (s) => String(s || '').split('\n')
+            .map(l => l.replace(/^\s*-\s*/, '').trim())
+            .filter(l => l && !/^[（(]/.test(l));
+
+        // 1. 推进所需最少信息节点编号 → structure.min_nodes_for_deduction
+        const minKey = Object.keys(segs).find(k => k.includes('最少') && k.includes('节点'));
+        if (minKey && !o.structure.min_nodes_for_deduction) {
+            const nums = (segs[minKey].match(/\d+/g) || []).map(Number);
+            if (nums.length) {
+                o.structure.min_nodes_for_deduction = nums;
+                debug(`fence 外补回最少信息节点：${nums.join('、')}`);
+            }
+        }
+
+        // 2. 参与角色 → structure.characters
+        const charKey = Object.keys(segs).find(k => k.includes('参与角色') || k.includes('角色'));
+        if (charKey && !o.structure.characters) {
+            const chars = {};
+            let cur = null;
+            for (const line of String(segs[charKey]).split('\n')) {
+                const indent = (line.match(/^\s*/) || [''])[0].length;
+                const t = line.replace(/^\s*-\s*/, '').trim();
+                if (!t) continue;
+                // 顶格（缩进少）是立场名，如「助力者：」「阻碍者：」
+                if (indent <= 2 && /[:：]\s*$/.test(t) && !t.match(/^[（(]/)) {
+                    const grp = t.replace(/[:：]\s*$/, '').trim();
+                    // 2026-11-06 真机：模型输出里「助力者」的「助」字坏了（U+FFFD），
+                    // 变成「��力者」。所以「助」写成可选：去掉这个字也认。
+                    const clean = grp.replace(/\uFFFD/g, '');
+                    cur = /力者|帮助|协助/.test(clean) && !/阻碍|阻挠/.test(clean) ? 'helpers'
+                        : /阻碍|阻挠/.test(clean) ? 'obstructers'
+                            : /知情|关键/.test(clean) ? 'informants'
+                                : /幕后/.test(clean) ? 'behind_scenes' : null;
+                    if (cur) chars[cur] = chars[cur] || [];
+                    continue;
+                }
+                if (!cur) continue;
+                // 「姓名（说明）」拆成 name 与说明。说明里可能还有括号，
+                // 所以先找第一个左括号，再配到最后一个右括号，而不是非贪婪匹配到第一个右括号。
+                const l = t.indexOf('（') >= 0 ? t.indexOf('（') : t.indexOf('(');
+                let item;
+                if (l > 0) {
+                    const closeCh = t[l] === '（' ? '）' : ')';
+                    const r2 = t.lastIndexOf(closeCh);
+                    item = r2 > l
+                        ? { name: t.slice(0, l).trim(), note: t.slice(l + 1, r2).trim() }
+                        : { name: t };
+                } else {
+                    item = { name: t };
+                }
+                if (item.name) chars[cur].push(item);
+            }
+            if (Object.keys(chars).length) {
+                o.structure.characters = chars;
+                const n = Object.values(chars).reduce((a, b) => a + b.length, 0);
+                debug(`fence 外补回参与角色：${n} 人，分组 ${Object.keys(chars).join('、')}`);
+            }
+        }
+
+        // 3. 推进路径 → structure.paths（只在完全没解析出 paths 时补）
+        const pathKey = Object.keys(segs).find(k => k.includes('推进路径') || k.includes('路径'));
+        if (pathKey && !(o.structure.paths && o.structure.paths.length)) {
+            const lines = bullets(segs[pathKey]);
+            const must = [];
+            const skip = [];
+            const risk = [];
+            for (const l of lines) {
+                const nums = (l.match(/\d+/g) || []).map(Number);
+                if (!nums.length) { risk.push(l); continue; }
+                if (/必经/.test(l)) must.push(...nums);
+                else if (/可跳过|跳过/.test(l)) skip.push(...nums);
+                else risk.push(l);
+            }
+            // 补成 paths 数组而不是另开一个键：面板、世界书、盘点提示词读的都是 paths，
+            // 另开的键没人渲染，补回来也看不见。
+            // 每号节点一步，must 与 risk 的文字并进 route/fail——这几行本来就是
+            // 「哪些必经、哪些可跳过、失败什么后果」，与 paths 的字段语义对得上。
+            //
+            // 失败后果那几行是整场的描述，不属于某一个节点。原样抄给每一步，
+            // 面板上就是同一段长文字重复 8 遍，比丢掉还难看。所以只挂在最后一步上，
+            // 并写明这是整体说明。
+            const riskText = risk.length
+                ? risk.join('；').replace(/；+$/, '')
+                : '';
+            const numsAll = [];
+            for (const n of must.concat(skip)) if (!numsAll.includes(n)) numsAll.push(n);
+            numsAll.sort((a, b) => a - b);
+            if (numsAll.length) {
+                o.structure.paths = numsAll.map((n, i) => ({
+                    step: i + 1,
+                    node: n,
+                    route: must.includes(n) ? '必经' : '可跳过',
+                    // 整体失败说明只在最后一步给一次
+                    ...(riskText && i === numsAll.length - 1
+                        ? { fail: `（整体失败后果）${riskText}` } : {}),
+                    source: '大纲块外补充',
+                }));
+                debug(`fence 外补回推进路径：${numsAll.length} 步，`
+                    + `必经 ${must.length} 个、可跳过 ${skip.length} 个`);
+            } else if (risk.length) {
+                // 一个节点号都没有时没法结成步进，退回到一段原文备注
+                o.structure.paths = [{ step: 1, route: riskText, source: '大纲块外补充' }];
+                debug('fence 外补回推进路径：无节点号，按整段备注保留');
+            }
+        }
+        return o;
     }
 
     function parseOutline(raw) {
         const block = extractCodeBlock(raw, 'yaml') || extractCodeBlock(raw) || raw;
+        // 2026-11-06 真机：模型有时把「推进路径/最少信息节点/参与角色」写在 YAML 块外面。
+        // 那部分占全文近两成，只取 fence 内等于把它们全丢了。这里留一份尾巴给补丁解析。
+        const tailText = (() => {
+            const s = String(raw || '');
+            const a = s.indexOf('```');
+            if (a < 0) return '';
+            const b = s.indexOf('```', a + 3);
+            return b < 0 ? '' : s.slice(b + 3);
+        })();
         // 模型时不时把个别键写成中文（step 是英文、内容/风险 是中文），
         // 这里统一规范化成英文，后面所有代码只面对一套键名，不用到处写 p['内容'] 兼容
-        const parsed = normalizeOutline(parseSimpleYaml(block));
+        const parsed = patchFromOutsideFence(normalizeOutline(parseSimpleYaml(block)), tailText);
         const hasYaml = !!extractCodeBlock(raw, 'yaml');
-        const nodeCount = (parsed && Array.isArray(parsed.nodes)) ? parsed.nodes.length : 0;
+        // 2026-11-05 M2 评审：nodes 在 structure 里，按顶层读会恒为 0，
+        // 下面那句 error「没有解析出任何信息节点」每次生成都会误报。
+        const nodeCount = innerNodesOf(parsed).length;
         const keys = Object.keys(parsed || {});
         const quality = checkOutlineQuality(parsed);
 
@@ -3255,49 +5154,286 @@
     }
 
     /**
-     * 检查大纲结构是否完整。返回 {ok, missing[], summary}。
+     * 检查大纲结构是否完整。返回 {ok, missing[], warnings[], summary, drift, mainType}。
      * 这里只判断，不修复——解析器出错时要让用户立刻看见，而不是静默降级。
+     *
+     * 2026-11-05 一期 M1：按定稿 §9 拆成两层。
+     *   外层（missing）：event_name / event_brief / event_type / time_pressure / danger /
+     *                     forbidden / structure，缺了就算失败、要重试。所有类型一样。
+     *   内层（warnings）：按主类型取该类型的内层键，缺了只警告，不判失败。
+     *                     战斗事件没有 core_truth 是正常的，不能拿案件的尺子去量。
+     *
+     * 拆之前的老版本把 core_truth / nodes / min_nodes_for_deduction / characters
+     * 当无条件必查，等于逼着每一种事件都长成案件——这正是这次改造要治的病。
+     * 现在这些留在内层，只有主类型是案件推理时才当作该看的字段。
      */
     function checkOutlineQuality(parsed) {
+        return checkOutlineQualityFor(parsed, null);
+    }
+
+    /** 同上，但显式指定主类型（生成时拿得到用户选的那个，解析后从 event_type.primary 也能读） */
+    // ---------- 阶段数组（2026-11-05 M4，定稿 1N）----------
+    // structure.phases 描述「这个多段事件由哪几段组成」，最多 3 段。
+    // 口径（2026-11-05 危晓定）：主类型那套完整字段仍在 structure 顶层，
+    // phases 里每段只写精简字段——不把每段都做成完整骨架，否则 prompt 会膨胀数倍。
+    // phases 本身可选：单段事件不写，多段事件才写。
+    const OUTLINE_MAX_STAGES = 3;
+    const OUTLINE_STAGE_KEYS = ['type', 'goal', 'entry', 'exit', 'optional', 'avoid_condition', 'fields'];
+
+    /**
+     * 校验阶段数组。返回 { warnings, count }。
+     *
+     * 为什么单独成函数而不是塞进 checkOutlineQualityFor：
+     * 阶段数组是跨类型的东西（案件、战斗都能是多段的），与主类型无关，
+     * 塞进去会让那个函数再长一截，也不好在渲染层复用同一个口径。
+     *
+     * 只进 warnings 不进 missing：与内层的口径一致（硬外层、软内层），
+     * 阶段写得不好不该让整份大纲作废，但要让用户看见。
+     */
+    function checkOutlineStages(outline) {
+        const warnings = [];
+        const raw = innerField(outline, 'phases');
+        if (raw === undefined || raw === null) return { warnings, count: 0 };
+        if (!Array.isArray(raw)) {
+            warnings.push('阶段数组（phases）不是列表');
+            return { warnings, count: 0 };
+        }
+        const count = raw.length;
+        if (!count) return { warnings, count: 0 };
+
+        // 超过 3 段说明这个事件太大：定稿要求拆成事件链，不该硬塞进一个事件
+        if (count > OUTLINE_MAX_STAGES) {
+            warnings.push(`阶段数组有 ${count} 段，超过上限 ${OUTLINE_MAX_STAGES} 段`
+                + '（事件太大，应当拆成事件链，而不是塞进一个事件的阶段）');
+        }
+
+        raw.forEach((st, i) => {
+            const n = i + 1;
+            if (!st || typeof st !== 'object') {
+                warnings.push(`第 ${n} 段不是对象`);
+                return;
+            }
+            // entry / exit 是定稿里的硬要求：一段没有入口和出口，就说不清这一段从哪开始到哪结束
+            if (!String(st.entry == null ? '' : st.entry).trim()) {
+                warnings.push(`第 ${n} 段没写入场（entry）`);
+            }
+            if (!String(st.exit == null ? '' : st.exit).trim()) {
+                warnings.push(`第 ${n} 段没写退场（exit）`);
+            }
+            // optional 为 true 表示这一段可以跳过，那就要说清「什么情况下才跳过」
+            const isOptional = st.optional === true || String(st.optional).toLowerCase() === 'true'
+                || st.optional === '是' || st.optional === '可跳过';
+            if (isOptional && !String(st.avoid_condition == null ? '' : st.avoid_condition).trim()) {
+                warnings.push(`第 ${n} 段标为可跳过，但没写避开条件（avoid_condition）`);
+            }
+        });
+
+        return { warnings, count };
+    }
+
+    function checkOutlineQualityFor(parsed, mainTypeHint) {
         const o = parsed || {};
-        const missing = [];
-        const nodes = Array.isArray(o.nodes) ? o.nodes : null;
-        if (!nodes) missing.push('信息节点（nodes）缺失或不是列表');
-        else if (!nodes.length) missing.push('信息节点（nodes）是空列表');
-        else {
-            const badId = nodes.filter(n => nodeId(n) == null);
-            if (badId.length) missing.push(`${badId.length} 个节点没有编号`);
-            const noInfo = nodes.filter(n => !nodeText(n));
-            if (noInfo.length) missing.push(`${noInfo.length} 个节点没有内容`);
-        }
-        const minNodes = o.min_nodes_for_deduction;
-        if (!minNodes) missing.push('推理必需节点（min_nodes_for_deduction）缺失');
-        const chars = o.characters;
-        if (!chars) missing.push('参与角色（characters）缺失');
-        else if (typeof chars === 'object' && !Object.keys(chars).length) missing.push('参与角色是空对象');
-        if (!o.event_brief) missing.push('事件简介（event_brief）缺失');
-        if (!o.core_truth) missing.push('核心真相（core_truth）缺失');
+        const missing = [];    // 外层：硬校验，缺了就失败
+        const warnings = [];   // 内层：软校验，缺了只提示
 
-        // 骨架里列出、这里却没单独查的键，统一按「缺失或空」补一遍（2026-11-04 A1）。
-        // 以前必查集合是第三份手抄，只盯着 nodes / min_nodes_for_deduction / characters /
-        // event_brief / core_truth 五项，骨架里的 event_type、paths、forbidden、time_pressure、
-        // danger 丢了不吭声。现在从骨架派生，以后改骨架自动跟着查，不必记着来改这一处。
-        const checked = ['nodes', 'min_nodes_for_deduction', 'characters', 'event_brief', 'core_truth'];
-        for (const k of OUTLINE_TOP_KEYS) {
-            if (checked.indexOf(k) >= 0) continue;
-            const v = o[k];
-            const empty = v == null || v === ''
-                || (Array.isArray(v) && !v.length)
-                || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length);
-            if (empty) missing.push(`顶层键 ${k} 缺失或为空`);
+        // 主类型：优先用调用方给的（用户选的那个），其次读输出里的 event_type.primary。
+        // 两边都拿不到时不回落到案件——那会让「模型没写类型」看起来像「模型漏了案件字段」，
+        // 报出一堆 core_truth / nodes 的提示，把人往错的方向指。这种情况只留空，
+        // 由外层那条「event_type.primary 是空的」去报，内层就不查了。
+        const typeNode = o.event_type;
+        const typeFromOutput = (typeNode && typeof typeNode === 'object')
+            ? String(typeNode.primary || '').trim() : '';
+        const mainType = String(mainTypeHint || '').trim() || typeFromOutput || '';
+
+        // ---------- 外层：硬校验 ----------
+        const isEmpty = v => v == null || v === ''
+            || (Array.isArray(v) && !v.length)
+            || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length);
+
+        // 内层取值先定义，外层检查 structure 时要用它：
+        // 内层字段只从 structure 里取，不回落顶层——老事件（扁平形状）的内层读不出来，
+        // 这是 2026-11-05 定死的口径：不做兼容、不做兜底、不做只读降级。
+        const structRaw = o.structure;
+        const struct = (structRaw && typeof structRaw === 'object' && !Array.isArray(structRaw))
+            ? structRaw : {};
+
+        for (const k of OUTLINE_OUTER_REQUIRED) {
+            if (isEmpty(o[k])) missing.push(`外层键 ${k} 缺失或为空`);
+        }
+        // 2026-11-05 危晓裁定：旧事件兼容性不考虑，这里原来有一段「顶层出现了内层键就
+        // 当作 structure 已经在（只是扁的）」的豁免，已删除。老形状现在如实判缺 structure。
+        // 事件类型还要求 primary 具体写了东西，光有一个空对象不算
+        if (o.event_type && typeof o.event_type === 'object' && !String(typeNode.primary || '').trim()) {
+            missing.push('事件类型（event_type.primary）是空的');
         }
 
+        // ---------- 内层：按主类型的软校验 ----------
+        // 2026-11-05 M2 评审：这里原来自己写了一份「structure 优先、顶层兜底」，
+        // 与 buildStateCard 那份各写一遍。收成 innerField/innerNodesOf 一份，免得日后两边漂移。
+        const innerVal = k => innerField(o, k);
+        const nodesRaw = innerVal('nodes');
+        const nodes = Array.isArray(nodesRaw) ? nodesRaw : null;
+
+        const innerSpec = innerKeysOf(mainType);
+        if (!mainType) {
+            // 类型压根没写出来。外层那条「event_type.primary 是空的」已经报了，
+            // 这里不再追着内层说「骨架没做」，否则同一件事报两遍、还指向错的方向。
+        } else if (!innerSpec.known) {
+            // 这个类型还没有内层骨架（一期只有案件推理有）。此时不查内层，
+            // 也不套用案件的字段——套了就是逼战斗事件写 core_truth，正是要治的病。
+            warnings.push(`主类型「${mainType}」的内层骨架还没做，本次不校验内层结构`);
+        } else {
+            for (const k of innerSpec.required) {
+                if (isEmpty(innerVal(k))) {
+                    warnings.push(`内层字段 ${k} 缺失或为空（主类型「${mainType}」该有）`);
+                }
+            }
+
+            // M6.2（2026-11-07）：必需性之外，再按 spec 声明的 kind 查取值。
+            // 以前这类检查散在各处手写（比如战斗的 objectives 有没有 fail），
+            // 现在统一问 kindValueProblems：枚举取值不合法、整数超范围、列表条目数不够，都由它报。
+            // 空值不在这里管——上面那条必需性检查已经报过了，不重复。
+            const spec = specOfType(mainType);
+            if (spec) {
+                for (const grp of ['required', 'optional']) {
+                    for (const [k, meta] of Object.entries(spec[grp] || {})) {
+                        const v = innerVal(k);
+                        if (isEmpty(v)) continue;
+                        for (const p of kindValueProblems(meta, v, `内层字段 ${k}`)) warnings.push(p);
+                        // M6.4（2026-11-07）：map 的子键检查——多余子键、缺必需子键、子键形态不对。
+                        // 以前 keys 只是一串名字，写了没人读，于是「该有哪几个子键」全靠提示词，
+                        // 模型漏了也没人发现。
+                        for (const p of mapKeyProblems(meta, v, `内层字段 ${k}`)) warnings.push(p);
+                        // 列表元素里的子键也按各自 kind 查（如 nodes[].type 的枚举）
+                        if (meta && meta.item && Array.isArray(v)) {
+                            v.forEach((el, i) => {
+                                if (!el || typeof el !== 'object') return;
+                                for (const [ik, im] of Object.entries(meta.item)) {
+                                    if (el[ik] == null || el[ik] === '') continue;
+                                    for (const p of kindValueProblems(im, el[ik], `第 ${i + 1} 条的 ${ik}`)) {
+                                        warnings.push(p);
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // 战斗的战前准备（2026-11-06 M3 补）：文档要求「要么五项都写，要么整块不写」。
+        // 之前这句话只写在 prompt 里，模型只写两项也不会报任何问题——
+        // 只写物资不写出发时间，等于没写准备，但界面上看起来是齐的。
+        // 现在补上校验：写了 preparation 就得五项齐全，整个不写则不算错
+        // （遭遇战、伏击没有准备阶段，那是正常的）。
+        if (mainType === '战斗冲突') {
+            const prep = innerVal('preparation');
+            if (prep && typeof prep === 'object' && !Array.isArray(prep) && Object.keys(prep).length) {
+                const prepKeys = ['supplies', 'traps', 'intel', 'allies', 'depart_time'];
+                const lack = prepKeys.filter(k => {
+                    const v = prep[k];
+                    return v == null || (typeof v === 'string' && !v.trim());
+                });
+                if (lack.length && lack.length < prepKeys.length) {
+                    // 一项都没有 = 整块没写，不算错；写了一部分才是问题
+                    warnings.push(`战前准备写了 ${prepKeys.length - lack.length} 项，`
+                        + `缺 ${lack.map(k => labelOf(k)).join('、')}；五项要么都写、要么整块不写`);
+                }
+            }
+
+            // enemy_forces 里混进非敌人（2026-11-06 真机）。
+            // 模型找不到第三个敌人时，会把「夜里的岔道与浅沟」这种地形塞进来，
+            // level 和 morale 填「不适用」凑够四项——界面上一眼看上去是三条敌人编制，
+            // 实际有一条不是敌人，算「敌我态势」时会把它当战斗力算进去。
+            // 只警告不判失败：判断「这算不算敌人」有模糊地带（比如陷阱阵、有主的地雷区），
+            // 让用户自己看一眼比让程序硬判更靠谱。
+            const efRaw = innerVal('enemy_forces');
+            const efList = Array.isArray(efRaw) ? efRaw
+                : (efRaw && typeof efRaw === 'object' ? Object.values(efRaw) : []);
+            const suspect = [];
+            for (const e of efList) {
+                if (!e || typeof e !== 'object') continue;
+                const na = ['strength', 'level', 'tactic', 'morale'].some(k => {
+                    const v = e[k];
+                    if (typeof v !== 'string') return false;
+                    // 「不适用」「无」「-」「—」这类都算没填实话
+                    return /^(不适用|无|没有|-|—)$/.test(v.trim());
+                });
+                if (na) suspect.push(String(e.name || '(未命名)'));
+            }
+            if (suspect.length) {
+                warnings.push(`敌方编制里「${suspect.join('、')}」的字段填了「不适用」之类，`
+                    + '多半是地形/天气被当成敌人写进来了——那些该写进 terrain，enemy_forces 只放会主动对抗的东西');
+            }
+        }
+
+        // 案件特有的几条细查，只在主类型是案件时做
+        if (mainType === '案件推理') {
+            if (!nodes) warnings.push('信息节点（nodes）缺失或不是列表');
+            else if (!nodes.length) warnings.push('信息节点（nodes）是空列表');
+            else {
+                const badId = nodes.filter(n => nodeId(n) == null);
+                if (badId.length) warnings.push(`${badId.length} 个节点没有编号`);
+                const noInfo = nodes.filter(n => !nodeText(n));
+                if (noInfo.length) warnings.push(`${noInfo.length} 个节点没有内容`);
+            }
+
+            // suspects（2026-11-05 M2）：定稿 §5 要求每个嫌疑人有动机/不在场/谎言三件事。
+            // 缺了照样只警告不判失败——案件也可能一个嫌疑人都不列，那是设计选择不是错误。
+            const suspects = innerVal('suspects');
+            if (suspects && typeof suspects === 'object') {
+                const list = Array.isArray(suspects) ? suspects : Object.values(suspects).flat();
+                const people = list.filter(x => x && typeof x === 'object');
+                for (const p of people) {
+                    const who = String(p.name || '（未命名）');
+                    if (!p.motive) warnings.push(`嫌疑人「${who}」没写动机（motive）`);
+                    if (!p.alibi) warnings.push(`嫌疑人「${who}」没写不在场（alibi）`);
+                    if (!p.lie) warnings.push(`嫌疑人「${who}」没写谎言（lie）`);
+                }
+            }
+        }
+
+        // 2026-11-05 M4：阶段数组的校验并进来。
+        // 放在最后，前面的内层警告顺序不变（已有一批断言按顺序取第一条）。
+        const stageCheck = checkOutlineStages(o);
+        // M6.6 / M6.3（2026-11-06）：跨层撞键与引用完整性。
+        // 放在阶段检查之后，保持既有警告的顺序不变（一批断言按顺序取第一条）。
+        if (mainType) {
+            for (const w of crossLayerKeyWarnings(o, mainType)) warnings.push(w);
+            for (const w of refIntegrityWarnings(o, mainType)) warnings.push(w);
+        }
+        for (const w of stageCheck.warnings) warnings.push(w);
+
+        const minNodes = innerVal('min_nodes_for_deduction');
+        const chars = innerVal('characters');
         const nodeN = nodes ? nodes.length : 0;
         const charN = (chars && typeof chars === 'object')
             ? Object.values(chars).reduce((a, v) => a + (Array.isArray(v) ? v.length : 0), 0) : 0;
-        const summary = `节点 ${nodeN} 个、角色 ${charN} 人、`
-            + `推理必需节点 ${Array.isArray(minNodes) ? minNodes.length : 0} 个、`
-            + `顶层键 ${Object.keys(o).length} 个`;
+        // 「内层待补」只数内层的，不把阶段数组的问题算进去——那是另一回事，
+        // 混在一起会让「内层待补 3 项」看不出到底是骨架缺字段还是阶段写错了。
+        const innerWarnN = warnings.length - stageCheck.warnings.length;
+        // 摘要按类型说（2026-11-06）：原来一律写「节点 N 个、角色 N 人、推理必需节点 N 个」，
+        // 战斗事件没这三样，打出来就是「节点 0 个、角色 0 人、推理必需节点 0 个」三条噪声，
+        // 看着像大纲缺东西，实际是这句话问错了类型。战斗改说目标与准备状况。
+        const outerN = OUTLINE_OUTER_KEYS.filter(k => o[k] !== undefined).length;
+        const topN = Object.keys(o).length;
+        let mid = `节点 ${nodeN} 个、角色 ${charN} 人、`
+            + `推理必需节点 ${Array.isArray(minNodes) ? minNodes.length : 0} 个`;
+        if (mainType === '战斗冲突') {
+            const objsN = (() => { const v = innerField(o, 'objectives'); return Array.isArray(v) ? v.length : 0; })();
+            const prep = innerField(o, 'preparation');
+            const prepN = (prep && typeof prep === 'object' && !Array.isArray(prep))
+                ? Object.keys(prep).length : 0;
+            mid = `战斗目标 ${objsN} 个` + (prepN ? `、战前准备 ${prepN} 项` : '、无战前准备');
+        } else if (!nodeN && !charN && !(Array.isArray(minNodes) && minNodes.length)) {
+            // 既无节点也无角色：不是案件，就别报案件的三项计数
+            mid = '';
+        }
+        const summary = `主类型「${mainType || '未写'}」、外层键 ${outerN} 个、`
+            + (mid ? mid + '、' : '')
+            + `顶层键 ${topN} 个`
+            + (stageCheck.count ? `、阶段 ${stageCheck.count} 段` : '')
+            + (innerWarnN ? `、内层待补 ${innerWarnN} 项` : '');
 
         // 字段名漂移检查：prompt 里给了固定骨架，模型偶尔仍会自造键。
         // 这里不算失败（渲染层有容错，还能显示），但要在日志里点出来，
@@ -3316,12 +5452,12 @@
         }
         const sampleNode = nodes && nodes.length ? nodes[0] : null;
         if (sampleNode && !pick(sampleNode, ['info'])) drift.push('节点内容没用 info');
-        const pathsArr = Array.isArray(o.paths) ? o.paths : [];
+        const pathsArr = Array.isArray(innerVal('paths')) ? innerVal('paths') : [];
         const samplePath = pathsArr.find(p => p && typeof p === 'object') || null;
         if (samplePath && !pick(samplePath, ['route'])) drift.push('路径正文没用 route');
         if (samplePath && !pick(samplePath, ['must'])) drift.push('必经标记没用 must');
 
-        return { ok: missing.length === 0, missing, summary, drift };
+        return { ok: missing.length === 0, missing, warnings, summary, drift, mainType };
     }
 
     function parseInventory(raw) {
@@ -3418,6 +5554,44 @@
         obstructers: '阻碍者',
         informants: '知情者',
         behind_scenes: '幕后方',
+        // 2026-11-05 M3：战斗内层的七个键与它们的子项。
+        // 不补的话世界书条目与面板上会直接露英文键名（enemy_forces、depart_time 这些），
+        // 与「键名一律翻中文」的既定做法不符。
+        enemy_forces: '敌方编制',
+        objectives: '战斗目标',
+        terrain: '地形',
+        reinforcements: '援军',
+        retreat: '撤退',
+        casualty: '伤亡与俘虏',
+        preparation: '事先准备',
+        // preparation 的五个子项（定稿 §5：物资/陷阱/情报/盟友/出发时间）
+        supplies: '物资',
+        traps: '陷阱',
+        intel: '情报',
+        allies: '盟友',
+        depart_time: '出发时间',
+        // enemy_forces 每一项的四件事（定稿 §5：编制/等级/战术/士气）
+        strength: '兵力',
+        level: '等级',
+        tactic: '战术',
+        morale: '士气',
+        // terrain 的三件事（定稿 §5：掩体/高低差/狭窄处）
+        cover: '掩体',
+        elevation: '高低差',
+        chokepoint: '狭窄处',
+        // reinforcements 的波次项
+        wave: '波次',
+        arrive: '到达时间',
+        size: '规模',
+        // 2026-11-05 M4：阶段数组
+        phases: '阶段',
+        goal: '目标',
+        entry: '入场',
+        exit: '退场',
+        optional: '可跳过',
+        avoid_condition: '避开条件',
+        fields: '阶段字段',
+        // objectives 的 condition / fail 在下面已有定义（案件路径也用），不在这里重复
         name: '名字',
         // 身份/动机/代价在提示词骨架里用短键（identity/motive/cost），
         // 早期模型输出用的是长键（role/motive_type/conditions），两套都认
@@ -3441,6 +5615,11 @@
         info: '信息内容',
         consequence: '后果',
         refute_by: '可被节点推翻',
+        // 2026-11-05 M2：内层整体收进 structure，加上案件新补的 suspects
+        structure: '事件结构',
+        suspects: '嫌疑人',
+        alibi: '不在场证明',
+        lie: '他的谎言',
         keyword: '触发词',
         keywords: '触发词',
         desc: '描述',
@@ -3516,7 +5695,11 @@
         探险探索: '探险探索', adventure: '探险探索',
         生存危机: '生存危机', survival: '生存危机',
         战斗冲突: '战斗冲突', combat: '战斗冲突', battle: '战斗冲突',
-        日常委托: '日常委托', daily: '日常委托', commission: '日常委托',
+        // M6（2026-11-06）：日常委托 → 日常杂务（定稿 1J）。
+        // 旧名「日常委托」保留为别名，存量事件的 event_type.primary 里可能还是旧写法，
+        // 认不出来会让它显示成未知类型。这只是读取时的名字归一，不是兼容性兜底。
+        日常杂务: '日常杂务', daily: '日常杂务', commission: '日常杂务',
+        日常委托: '日常杂务',
         禁忌秘辛: '禁忌秘辛', forbidden: '禁忌秘辛', secret: '禁忌秘辛',
         悬疑: '悬疑', suspense: '悬疑',
         恐怖: '恐怖', horror: '恐怖',
@@ -3536,6 +5719,9 @@
     function renderOutlineText(outline) {
         if (!outline || typeof outline !== 'object') return null;
         const lines = [];
+        // 2026-11-05 M2 复核：核心真相、节点、角色、路径都在 structure 里。
+        // 这里以前直接读 outline.xxx，新事件会整块渲染成空壳——用户在面板上看不到自己的大纲。
+        const inner = k => innerField(outline, k);
 
         if (outline.event_brief) lines.push(`一句话简介：${outline.event_brief}`);
         const et = outline.event_type;
@@ -3551,13 +5737,49 @@
                 lines.push(`事件类型：${mainText}${subs.length ? '（兼 ' + subs.map(x => EVENT_TYPE_LABEL[x] || keyText(x)).join('、') + '）' : ''}`);
             }
         }
-        if (outline.core_truth) {
+        const coreTruth = inner('core_truth');
+        if (coreTruth) {
             lines.push('');
             lines.push('核心真相（仅你知道，不会被透露给角色）：');
-            lines.push(String(outline.core_truth).trim());
+            lines.push(String(coreTruth).trim());
         }
 
-        const nodes = Array.isArray(outline.nodes) ? outline.nodes : [];
+        // 阶段数组（2026-11-05 M4）：按段的顺序展示。
+        // 放在最前面（在节点与角色之前），因为它是「这一整场戏怎么分段」的骨架，
+        // 读者要先知道分几段，再看每段里的细节。
+        const stagesRaw = inner('phases');
+        const stages = Array.isArray(stagesRaw) ? stagesRaw : [];
+        if (stages.length) {
+            lines.push('');
+            lines.push(`阶段（共 ${stages.length} 段）：`);
+            stages.forEach((st, i) => {
+                if (!st || typeof st !== 'object') {
+                    lines.push(`  ${i + 1}. ${String(st)}`);
+                    return;
+                }
+                const stType = st.type ? `〔${st.type}〕` : '';
+                const stGoal = st.goal ? String(st.goal).trim() : `第 ${i + 1} 段`;
+                const opt = (st.optional === true || String(st.optional).toLowerCase() === 'true'
+                    || st.optional === '是' || st.optional === '可跳过');
+                lines.push(`  ${i + 1}. ${stType}${stGoal}${opt ? '（可跳过）' : ''}`);
+                if (st.entry) lines.push(`     从：${String(st.entry).trim()}`);
+                if (st.exit) lines.push(`     到：${String(st.exit).trim()}`);
+                // 可跳过的段要说清什么情况下跳过，否则「可跳过」等于没说
+                if (opt && st.avoid_condition) lines.push(`     跳过条件：${String(st.avoid_condition).trim()}`);
+                if (st.fields && typeof st.fields === 'object') {
+                    const sub = [];
+                    for (const [k, v] of Object.entries(st.fields)) {
+                        if (v == null || v === '') continue;
+                        const s = (typeof v === 'object') ? JSON.stringify(v) : String(v).trim();
+                        sub.push(`${labelOf(k)} ${s.length > 40 ? s.slice(0, 38) + '…' : s}`);
+                    }
+                    if (sub.length) lines.push(`     这一段：${sub.join('；')}`);
+                }
+            });
+        }
+
+        const nodesRaw = inner('nodes');
+        const nodes = Array.isArray(nodesRaw) ? nodesRaw : [];
         if (nodes.length) {
             lines.push('');
             lines.push(`信息节点（共 ${nodes.length} 条，按发现顺序）：`);
@@ -3569,18 +5791,25 @@
                     lines.push(`   触发：${nodeTrigger(n)}`);
                 }
                 if (n.consequence) lines.push(`   后果：${n.consequence}`);
-                if (n.refute_by != null) lines.push(`   可推翻误导：指向节点 ${Array.isArray(n.refute_by) ? n.refute_by.join('、') : n.refute_by}`);
+                // 2026-11-06：原来只写「可推翻误导：指向节点 X」。模型把这个字段用错时
+                // （把普通佐证关系挂上来），面板上就变成一句读不通的话——
+                // 节点本身说的是实情，却标着「可推翻」。现在把话说全：这是误导项才有的东西，
+                // 且写明是被谁拆穿，读者一看就知道该不该有。
+                if (n.refute_by != null) {
+                    const rb = Array.isArray(n.refute_by) ? n.refute_by.join('、') : n.refute_by;
+                    lines.push(`   若按此条误判，到节点 ${rb} 会被拆穿`);
+                }
             }
         }
 
-        const minNodes = outline.min_nodes_for_deduction;
+        const minNodes = inner('min_nodes_for_deduction');
         if (minNodes) {
             const arr = Array.isArray(minNodes) ? minNodes : [minNodes];
             lines.push('');
             lines.push(`推理必需节点：${arr.join('、')}（集齐这些就足以推出核心真相）`);
         }
 
-        const chars = outline.characters;
+        const chars = inner('characters');
         if (chars && typeof chars === 'object') {
             lines.push('');
             lines.push('参与角色：');
@@ -3612,7 +5841,8 @@
             }
         }
 
-        const paths = Array.isArray(outline.paths) ? outline.paths : [];
+        const pathsRaw = inner('paths');
+        const paths = Array.isArray(pathsRaw) ? pathsRaw : [];
         if (paths.length) {
             lines.push('');
             lines.push(`推进路径（共 ${paths.length} 步）：`);
@@ -3649,6 +5879,106 @@
                 const fail = p.fail || p.failure || p.consequence || p['失败后果'];
                 if (fail) lines.push(`     失败后果：${fail}`);
             });
+        }
+
+        // ---- 战斗八块（2026-11-07 0B）----
+        // 原先这里只渲染案件那一套（核心真相/节点/角色/路径），选了战斗冲突的事件
+        // 在面板「大纲文本」里只剩一句话简介、类型、时间压力、危险程度——
+        // 模型把敌方编制、地形、准备、撤退条件都生成对了，用户却看不见。
+        // 世界书条目那边走的是 innerSummaryText 通用摘要，不受影响，所以这个缺口只在面板上。
+        const combatBlocks = [
+            { key: 'enemy_forces', title: '敌方编制', kind: 'list',
+              fields: [['name', '名称'], ['strength', '兵力'], ['level', '等级'], ['tactic', '战术'], ['morale', '士气']] },
+            { key: 'objectives', title: '战斗目标', kind: 'objectives' },
+            { key: 'terrain', title: '地形', kind: 'map' },
+            { key: 'preparation', title: '事先准备', kind: 'map' },
+            { key: 'reinforcements', title: '援军', kind: 'any',
+              fields: [['wave', '批次'], ['arrive', '到达'], ['size', '规模']] },
+            { key: 'retreat', title: '撤退', kind: 'map' },
+            { key: 'casualty', title: '伤亡与俘虏', kind: 'map' },
+        ];
+        // enemy_forces 的兼容文本：模型有时写成一句话（「独角野猪」），有时写成数组
+        const dumpCombat = (spec) => {
+            const v = inner(spec.key);
+            if (v == null || v === '') return;
+            lines.push('');
+            lines.push(spec.title + '：');
+            if (typeof v === 'string') { lines.push('  ' + v.trim()); return; }
+
+            if (spec.kind === 'objectives' && Array.isArray(v)) {
+                v.forEach((o, i) => {
+                    if (!o || typeof o !== 'object') { lines.push(`  ${i + 1}. ${String(o)}`); return; }
+                    const nm = o.name || o['名称'] || `目标 ${i + 1}`;
+                    const tp = o.type ? `〔${keyText(o.type)}〕` : '';
+                    lines.push(`  ${i + 1}. ${tp}${nm}`);
+                    const cond = o.condition || o['达成条件'];
+                    const fail = o.fail || o['失败后果'];
+                    if (cond) lines.push(`     达成条件：${cond}`);
+                    if (fail) lines.push(`     失败后果：${fail}`);
+                });
+                return;
+            }
+            if (spec.kind === 'list' && Array.isArray(v)) {
+                v.forEach((e, i) => {
+                    if (!e || typeof e !== 'object') { lines.push(`  ${i + 1}. ${String(e)}`); return; }
+                    const head = e.name || e['名称'] || `第 ${i + 1} 支`;
+                    lines.push(`  ${i + 1}. ${head}`);
+                    for (const [k, lab] of spec.fields) {
+                        if (k === 'name') continue;
+                        const val = e[k] != null ? e[k] : e[lab];
+                        if (val == null || val === '') continue;
+                        lines.push(`     ${lab}：${Array.isArray(val) ? val.join('、') : String(val).trim()}`);
+                    }
+                });
+                return;
+            }
+            if ((spec.kind === 'map' || spec.kind === 'any') && typeof v === 'object' && !Array.isArray(v)) {
+                for (const [k, val] of Object.entries(v)) {
+                    if (val == null || val === '') continue;
+                    const text = Array.isArray(val) ? val.join('、')
+                        : (typeof val === 'object' ? JSON.stringify(val) : String(val).trim());
+                    lines.push(`  ${labelOf(k)}：${text}`);
+                }
+                return;
+            }
+            if (Array.isArray(v)) {
+                // 数组元素是对象时不能直接 join——那会得到一串 [object Object]。
+                // 援军就是这种形状：骨架示例写成 `- wave / arrive / size` 的列表，
+                // 模型照抄出来就是对象数组。2026-11-09 评审 P1-1 实测过。
+                if (v.some(x => x && typeof x === 'object' && !Array.isArray(x))) {
+                    v.forEach((e, i) => {
+                        if (!e || typeof e !== 'object') { lines.push(`  ${i + 1}. ${String(e)}`); return; }
+                        const own = (spec.fields || []).filter(([k]) => e[k] != null && e[k] !== '');
+                        if (!own.length) { lines.push(`  ${i + 1}. ${JSON.stringify(e)}`); return; }
+                        const headKey = own[0][0];
+                        const headVal = Array.isArray(e[headKey]) ? e[headKey].join('、') : String(e[headKey]).trim();
+                        lines.push(`  ${i + 1}. ${headVal}`);
+                        for (const [k, lab] of own.slice(1)) {
+                            const val = Array.isArray(e[k]) ? e[k].join('、') : String(e[k]).trim();
+                            lines.push(`     ${lab}：${val}`);
+                        }
+                    });
+                    return;
+                }
+                lines.push('  ' + v.join('、'));
+                return;
+            }
+            lines.push('  ' + String(v).trim());
+        };
+        for (const blk of combatBlocks) dumpCombat(blk);
+
+        // contract（外层可选）：事先约定的条件，不分类型，有就渲染
+        if (outline.contract) {
+            lines.push('');
+            lines.push('约定条件：');
+            const c = outline.contract;
+            if (typeof c === 'string') lines.push('  ' + c.trim());
+            else if (typeof c === 'object') {
+                for (const [k, v] of Object.entries(c)) {
+                    if (v == null || v === '') continue;
+                    lines.push(`  ${labelOf(k)}：${Array.isArray(v) ? v.join('、') : String(v).trim()}`);
+                }
+            }
         }
 
         // 时间压力与危险程度：这两块以前只写不显示，用户看不到模型对难度的判断
@@ -3852,14 +6182,104 @@
         lines.push(buildStateCard(event));
         if (round) lines.push(`盘点轮次：${round}`);
         const o = event.outline || {};
+        // forbidden 在外层，直接读；characters 属于内层（2026-11-05 M2 评审 4.3）：
+        // M2 之后它在 structure.characters，按顶层读恒为 undefined，世界书条目会缺一整块。
         if (o.forbidden) lines.push(`禁止事项：${typeof o.forbidden === 'string' ? o.forbidden : JSON.stringify(o.forbidden)}`);
-        if (o.characters) {
-            const chars = o.characters;
-            if (typeof chars === 'string') lines.push(`角色：${chars}`);
+        const chars = innerField(o, 'characters');
+        if (chars) {
+            // 老形状可能是字符串，新形状是 {helpers/obstructers/informants/behind_scenes} 分组对象。
+            // 只处理字符串的话，新事件永远写不进去角色——收成一段可读文本，两种都能落到底。
+            if (typeof chars === 'string') {
+                lines.push(`角色：${chars}`);
+            } else if (typeof chars === 'object') {
+                const groups = [];
+                for (const [group, list] of Object.entries(chars)) {
+                    const names = (Array.isArray(list) ? list : [list])
+                        .map(x => (x && typeof x === 'object') ? String(x.name || '').trim() : String(x || '').trim())
+                        .filter(Boolean);
+                    if (names.length) groups.push(`${labelOf(group)}：${names.join('、')}`);
+                }
+                if (groups.length) lines.push(`角色：${groups.join('；')}`);
+            }
+        }
+        // 2026-11-05 M3：其余内层字段兜一段摘要。
+        // 案件靠 nodes/characters 已经够了，跳过它们免得重复；战斗的敌方编制、目标、
+        // 地形、准备全靠这段落地——不写的话战斗事件在世界书里是个空条目。
+        // core_truth 是剧透，绝不进世界书（模型知道真相就会在正文里说漏）。
+        // phases 单独写一段处理，这里跳过免得被压成一行数组。
+        const summary = innerSummaryText(o, ['nodes', 'characters', 'core_truth', 'paths',
+            'min_nodes_for_deduction', 'phases'], 600);
+        if (summary) lines.push(summary);
+
+        // 2026-11-05 M4：阶段数组进展世界书。
+        // 为什么必须进：多段事件的「现在演到第几段」是模型每楼都要判断的事，
+        // 不写进去它就只能从最近的对话里猜，很容易还在上一段里打转。
+        const stagesRaw = innerField(o, 'phases');
+        const stages = Array.isArray(stagesRaw) ? stagesRaw : [];
+        if (stages.length) {
+            const segs = stages.map((st, i) => {
+                if (!st || typeof st !== 'object') return `${i + 1}.${String(st)}`;
+                const g = String(st.goal || st.name || `第 ${i + 1} 段`).trim();
+                return `${i + 1}.${g}`;
+            }).filter(Boolean);
+            if (segs.length) lines.push(`阶段：${segs.join(' → ')}`);
         }
         let text = lines.filter(Boolean).join('\n');
         if (text.length > 1500) text = text.slice(0, 1490) + '…';
         return text;
+    }
+
+    /**
+     * 内层字段摘要：把 structure 里那些「模型下一楼必须记住」的字段压成可读文本。
+     *
+     * 为什么需要它（2026-11-05 M3）：buildEntryContent 原来只写 forbidden 与 characters，
+     * 那是案件的口径。战斗事件的世界书条目因此只剩一行标题与禁止事项——
+     * 对面有多少人、要守住哪里、地形什么样，下一楼全丢了，模型会当场忘掉战场。
+     *
+     * 为什么不做成「战斗专用」：骨架一共十三类，一类型写一套渲染等于抄十三份，
+     * 这正是 M2 那轮治过的病。这里按字段的形态通用处理（数组→列名字、对象→列子项、
+     * 标量→原样），键名走 labelOf 翻中文，任何类型的骨架都能落下来。
+     *
+     * 跳过已经单独写过的字段：characters（上面有分组的可读写法）、nodes（状态卡里有清单）、
+     * 以及剧情真相类不该进世界书的（core_truth 剧透）。
+     *
+     * @param {object} outline 大纲
+     * @param {string[]} skip 已单独处理的键
+     * @param {number} budget 字符预算
+     */
+    function innerSummaryText(outline, skip, budget) {
+        const inner = outlineInner(outline);
+        const parts = [];
+        for (const [k, v] of Object.entries(inner)) {
+            if (skip.indexOf(k) >= 0) continue;
+            if (v == null || v === '') continue;
+            const label = labelOf(k);
+            if (Array.isArray(v)) {
+                // 数组：每一项取名字，取不到就用第一行文本
+                const items = v.map(x => {
+                    if (x && typeof x === 'object') {
+                        return String(x.name || x['名称'] || x.title || x.what || '').trim();
+                    }
+                    return String(x || '').trim();
+                }).filter(Boolean);
+                if (items.length) parts.push(`${label}：${items.join('、')}`);
+            } else if (typeof v === 'object') {
+                // 对象：列子项，键名同样翻中文；太长的值截断
+                const subs = [];
+                for (const [sk, sv] of Object.entries(v)) {
+                    if (sv == null || sv === '') continue;
+                    const s = (typeof sv === 'object') ? JSON.stringify(sv) : String(sv).trim();
+                    if (!s) continue;
+                    subs.push(`${labelOf(sk)} ${s.length > 40 ? s.slice(0, 38) + '…' : s}`);
+                }
+                if (subs.length) parts.push(`${label}：${subs.join('；')}`);
+            } else {
+                parts.push(`${label}：${String(v).trim()}`);
+            }
+            // 到预算就停，别把 1500 字上限吃光，后面还有别的段要写
+            if (parts.join('\n').length >= (budget || 600)) break;
+        }
+        return parts.join('\n');
     }
 
     async function createEvent(eventName, prefs) {
@@ -3885,7 +6305,8 @@
             if (quality && quality.drift && quality.drift.length) {
                 warn(`字段名没有按骨架输出：${quality.drift.join('；')}（渲染层有容错，仍可正常显示）`);
             }
-            const nodeCount = (parsed && Array.isArray(parsed.nodes)) ? parsed.nodes.length : 0;
+            // 2026-11-05 M2 评审 4.2：同样改读 structure，否则进度条永远显示 0 个节点
+            const nodeCount = innerNodesOf(parsed).length;
             step(`解析完成：${nodeCount} 个信息节点`
                 + (nodeCount ? '' : '（未识别到节点，原始输出可在日志页查看）'));
             // 结构残缺时，「解析完成」后面要跟一条醒目的步骤，让用户当场看见
@@ -3934,6 +6355,8 @@
                 tracker: {
                     triggeredNodes: [],
                     pendingNodes: [],
+                    // 2026-11-06：战斗目标与阶段用这套字符串 key（node 类型仍走 triggeredNodes）
+                    progress: [],
                     refutedMisleads: [],
                     offPathBranches: [],
                     nodeVetoed: [],
@@ -4069,7 +6492,9 @@
         // 缩进被改乱时解析器很宽容：字段还在，但节点认不出来，存下去就是个空壳。
         // 大纲没有信息节点等于废了，这一条按硬错处理。
         if (!fatal.length) {
-            const n = Array.isArray(r.parsed.nodes) ? r.parsed.nodes.length : 0;
+            // 2026-11-05 M2 评审：按顶层读会让新形状草稿改完保存时被判「一个节点都没有」而拒存。
+            // 这是用户直接撞得上的功能中断，比日志误报严重。
+            const n = innerNodesOf(r.parsed).length;
             if (!n) {
                 fatal.push('一个信息节点都没有解析出来，多半是 nodes 下面的缩进或破折号被改坏了');
             }
@@ -4104,14 +6529,22 @@
         return { event, quality: event.parseQuality, issues };
     }
 
-    /** 结构自检：与 parseOutline 的 quality 保持同一套口径，供表单保存后使用 */
+    /**
+     * 结构自检：与 parseOutline 的 quality 保持同一套口径，供表单保存后使用
+     * （2026-11-06 修为真按类型判，见下方说明）
+     */
     function checkOutlineShape(outline) {
-        const missing = [];
         const o = outline || {};
-        if (!o.event_name) missing.push('事件名');
-        if (!o.nodes || !o.nodes.length) missing.push('信息节点');
-        if (!o.core_truth) missing.push('核心真相');
-        return { ok: missing.length === 0, missing, summary: missing.length ? '' : '结构完整', drift: [] };
+        // 2026-11-06：这里原来是一份独立实现的案件专用检查——
+        // 只要没有 nodes 或 core_truth 就判 ok=false。可这两个都是案件的内层字段，
+        // 战斗事件天生没有核心真相，于是任何战斗事件在编辑页存过一次原文，
+        // 面板顶上就挂一条红警告「结构不完整：信息节点；核心真相」。
+        // 注释写着「与 parseOutline 保持同一套口径」，实际是两份各写各的，
+        // 口径已经分叉。现在直接复用 checkOutlineQualityFor，类型从大纲自己读
+        // （编辑后的 textarea 里就有 event_type.primary，模型改类型也能跟上）。
+        // 拿不到主类型时它不查内层、只报外层——这正是要的行为，不会误判战斗。
+        const hinted = String((o.event_type && o.event_type.primary) || '').trim();
+        return checkOutlineQualityFor(o, hinted);
     }
 
     /**
@@ -4121,7 +6554,10 @@
     function checkOutlineRefs(outline) {
         if (!outline || typeof outline !== 'object') return [];
         const issues = [];
-        const nodes = Array.isArray(outline.nodes) ? outline.nodes : [];
+        // 2026-11-05 M2 复核：nodes 与 paths 都在 structure 里。
+        // 按顶层读会同时造成两件事：常驻假警告「没有识别到任何信息节点」，
+        // 以及 idSet 为空导致路径引用检查全部跳过——等于这项检查对新事件失效。
+        const nodes = innerNodesOf(outline);
         const ids = nodes.map(n => Number(nodeId(n))).filter(n => Number.isFinite(n));
         for (let i = 1; i <= ids.length; i++) {
             if (!ids.includes(i)) { issues.push(`节点编号从 1 到 ${ids.length} 之间缺 ${i}`); break; }
@@ -4131,7 +6567,8 @@
         if (!nodes.length) issues.push('没有识别到任何信息节点');
 
         const idSet = new Set(ids);
-        (Array.isArray(outline.paths) ? outline.paths : []).forEach((s, i) => {
+        const pathsRaw = innerField(outline, 'paths');
+        (Array.isArray(pathsRaw) ? pathsRaw : []).forEach((s, i) => {
             if (!s || typeof s !== 'object') return;
             const ref = s.node;
             if (ref == null) return;
@@ -4273,7 +6710,7 @@
             step('准备提示词');
             const parts = await gatherContext(event);
             const systemPrompt = buildInventorySystemPrompt();
-            const prompt = buildInventoryPrompt(parts);
+            const prompt = buildInventoryPrompt(parts, event);
             const raw = await callModel(systemPrompt, prompt);
             step('解析盘点结果');
             const { structured, raw: rawText } = parseInventory(raw);
@@ -4319,6 +6756,32 @@
                 }
                 if (mode === 'auto') {
                     t.triggeredNodes = Array.from(triggered).sort((a, b) => a - b);
+                }
+                // 战斗目标 / 阶段：模型回 triggeredProgress（字符串 key），
+                // 只认盘点页真实存在的 key，防止模型编一个不存在的条目进来把进度弄脏
+                if (Array.isArray(structured.triggeredProgress) && structured.triggeredProgress.length) {
+                    const valid = new Set(progressItemsOf(event.outline).items.map(it => it.key));
+                    if (mode !== 'manual') {
+                        const done = new Set(t.progress || []);
+                        for (const k of structured.triggeredProgress) {
+                            const key = String(k || '').trim();
+                            if (!valid.has(key)) continue;
+                            if (mode === 'semi') {
+                                // 半自动下不直接改，留到确认——这里先记进本轮建议
+                                if (!record.suggestedProgress) record.suggestedProgress = [];
+                                if (!done.has(key)) record.suggestedProgress.push(key);
+                                continue;
+                            }
+                            if (!done.has(key)) {
+                                done.add(key);
+                                t.autoCommitted.push({ progress: key, at: record.at, round });
+                            }
+                        }
+                        if (mode === 'auto') t.progress = Array.from(done).sort();
+                        if (mode === 'semi') {
+                            log(`半自动：模型建议打勾 ${record.suggestedProgress.length} 个进度条目，等待确认`);
+                        }
+                    }
                 }
                 if (Array.isArray(structured.refutedMisleads) && mode === 'auto') {
                     const set = new Set(t.refutedMisleads || []);
@@ -4409,6 +6872,196 @@
         const dropAb = ab.slice(limitAb);
         for (const e of dropAb) delete meta.events[e.id];
         if (dropAb.length) log(`历史保留：废弃事件超上限 ${limitAb}，清理了 ${dropAb.length} 条最旧的：${dropAb.map(e => e.name).join('、')}`);
+    }
+
+    /**
+     * 进度条目：把一个大纲里「能打勾的东西」统一成一张清单。
+     *
+     * 为什么需要（2026-11-06）：文档要求盘点页按类型渲染进度条目。
+     * 原来只有案件能追踪——渲染入口是 innerNodesOf + if(nodes.length)，
+     * 战斗没有节点、多段事件也没有节点，这两个类型从采用那一刻起就勾不了。
+     *
+     * 设计口径（危晓 2026-11-06 定）：新增一套平行字段 tracker.progress，
+     * key 用字符串，不去动旧的 triggeredNodes 数字数组。
+     * 旧案件事件完全不受影响，回滚只需停用这批 key。
+     *
+     * 返回 [{key, label, detail}]：
+     * - 案件：节点，key 沿用 node:<编号>，实际仍读写 triggeredNodes（为了不迁移旧数据）
+     * - 战斗：目标，key 为 obj:<序号>，读写 tracker.progress
+     * - 多段：阶段，key 为 stage:<序号>，读写 tracker.progress
+     *
+     * M5（2026-11-06）：取哪一套由骨架的 progress 声明决定，不再靠现场探测。
+     * 有声明就只认那一个字段——战斗没写目标就是没有进度，不退回读它的节点，
+     * 否则会把「大纲缺目标」这个缺陷掩盖成「进度正常但为空」。
+     * 没声明（无骨架的类型、或 event_type 读不出主类型）保留原来的顺序探测，
+     * 因为那部分类型还没有骨架，探测是当前唯一能给出进度的办法。
+     */
+    function progressItemsOf(outline) {
+        const o = outline || {};
+
+        // M5（2026-11-06）：先看骨架有没有声明进度来源。
+        // 声明了就以声明为准——这是 spec 化的第一步，以后加类型只往表里填一行，不改这个函数。
+        const decl = progressSpecOf(mainTypeOfOutline(o));
+
+        // 有声明：只认声明的那一个字段，读不出来就是没有进度，不往别的字段退。
+        // 往别处退会让「战斗没写目标」变成「去读它并不存在的节点」，等于掩盖大纲缺陷。
+        if (decl) {
+            if (decl.field === 'nodes') {
+                const nodes = innerNodesOf(o);
+                if (!Array.isArray(nodes) || !nodes.length) return { kind: 'node', title: '节点进度', items: [] };
+                return {
+                    kind: 'node',
+                    title: '节点进度',
+                    legacy: decl.legacy,
+                    items: nodes.map(n => {
+                        const id = nodeId(n);
+                        return {
+                            key: 'node:' + id,
+                            id,
+                            label: `${id}. ${n.type || ''} ${nodeText(n)}`.trim(),
+                            trigger: nodeTrigger(n),
+                        };
+                    }),
+                };
+            }
+            if (decl.field === 'objectives') {
+                const objs = innerField(o, 'objectives');
+                if (!Array.isArray(objs) || !objs.length) return { kind: 'objective', title: '目标进度', items: [] };
+                return {
+                    kind: 'objective',
+                    title: '目标进度',
+                    legacy: decl.legacy,
+                    items: objs.map((x, i) => {
+                        const name = (x && typeof x === 'object')
+                            ? String(x.name || x['名称'] || '').trim() || `目标 ${i + 1}`
+                            : String(x || '').trim() || `目标 ${i + 1}`;
+                        const cond = (x && typeof x === 'object') ? String(x.condition || '').trim() : '';
+                        const fail = (x && typeof x === 'object') ? String(x.fail || '').trim() : '';
+                        return {
+                            key: 'obj:' + i,
+                            id: i,
+                            label: `${i + 1}. ${name}`,
+                            // 达成条件是判断「算不算完成」的依据，打勾时要看得见
+                            detail: cond ? `达成：${cond}` + (fail ? `｜失败：${fail}` : '') : (fail ? `失败：${fail}` : ''),
+                        };
+                    }),
+                };
+            }
+            // M6（2026-11-06 真机）：声明 field:'phases' 的类型（「其他」）按阶段推进。
+            // 之前这里只实现了 nodes 与 objectives，phases 一路掉到下面的 none，
+            // 结果「其他」事件生成得完全正确，盘点页却一个字都不显示——声明了却没人实现，
+            // 比没声明更糟，因为校验层认它有骨架、界面却是空的。
+            if (decl.field === 'phases') {
+                const phs = innerField(o, 'phases');
+                if (!Array.isArray(phs) || !phs.length) return { kind: 'stage', title: '阶段进度', items: [] };
+                return {
+                    kind: 'stage',
+                    title: '阶段进度',
+                    legacy: decl.legacy,
+                    items: phs.map((st, i) => {
+                        const goal = (st && typeof st === 'object')
+                            ? String(st.goal || st['目标'] || '').trim() || `第 ${i + 1} 段`
+                            : String(st || '').trim() || `第 ${i + 1} 段`;
+                        const entry = (st && typeof st === 'object') ? String(st.entry || '').trim() : '';
+                        const exit = (st && typeof st === 'object') ? String(st.exit || '').trim() : '';
+                        // 段的 type 是模型自己起的分类（社交博弈/探险/危机），
+                        // 和主类型列表同一套词，写在标题里会被误读成「这个事件是社交博弈」。
+                        // 2026-11-06 危晓定：只在标题里写目标，不显示 type。
+                        return {
+                            key: 'stage:' + i,
+                            id: i,
+                            label: `${i + 1}. ${goal}`,
+                            detail: (entry ? `从：${entry}` : '') + (exit ? `${entry ? '｜' : ''}到：${exit}` : ''),
+                        };
+                    }),
+                };
+            }
+            // 声明了别的字段：本期还没有对应实现（M6 随类型补齐），按无进度处理。
+            return { kind: 'none', title: '', items: [] };
+        }
+
+        // 没有声明（无骨架的类型，或 event_type 读不出主类型）：保持原来的顺序探测，
+        // 一个字段都不认得就返回 none，交给调用方走「尚未触及的大纲要点」那条兜底文案。
+        const nodes = innerNodesOf(o);
+        if (Array.isArray(nodes) && nodes.length) {
+            return {
+                kind: 'node',
+                title: '节点进度',
+                legacy: true,
+                items: nodes.map(n => {
+                    const id = nodeId(n);
+                    return {
+                        key: 'node:' + id,
+                        id,
+                        label: `${id}. ${n.type || ''} ${nodeText(n)}`.trim(),
+                        trigger: nodeTrigger(n),
+                    };
+                }),
+            };
+        }
+        const objs = innerField(o, 'objectives');
+        if (Array.isArray(objs) && objs.length) {
+            return {
+                kind: 'objective',
+                title: '目标进度',
+                items: objs.map((x, i) => {
+                    const name = (x && typeof x === 'object')
+                        ? String(x.name || x['名称'] || '').trim() || `目标 ${i + 1}`
+                        : String(x || '').trim() || `目标 ${i + 1}`;
+                    const cond = (x && typeof x === 'object') ? String(x.condition || '').trim() : '';
+                    const fail = (x && typeof x === 'object') ? String(x.fail || '').trim() : '';
+                    return {
+                        key: 'obj:' + i,
+                        id: i,
+                        label: `${i + 1}. ${name}`,
+                        detail: cond ? `达成：${cond}` + (fail ? `｜失败：${fail}` : '') : (fail ? `失败：${fail}` : ''),
+                    };
+                }),
+            };
+        }
+        const stages = innerField(o, 'phases');
+        if (Array.isArray(stages) && stages.length) {
+            return {
+                kind: 'stage',
+                title: '阶段进度',
+                items: stages.map((st, i) => {
+                    const goal = (st && typeof st === 'object')
+                        ? String(st.goal || st['目标'] || '').trim() || `第 ${i + 1} 段`
+                        : String(st || '').trim() || `第 ${i + 1} 段`;
+                    const entry = (st && typeof st === 'object') ? String(st.entry || '').trim() : '';
+                    const exit = (st && typeof st === 'object') ? String(st.exit || '').trim() : '';
+                    return {
+                        key: 'stage:' + i,
+                        id: i,
+                        label: `${i + 1}. ${goal}`,
+                        detail: (entry ? `从：${entry}` : '') + (exit ? `${entry ? '｜' : ''}到：${exit}` : ''),
+                    };
+                }),
+            };
+        }
+        return { kind: 'none', title: '', items: [] };
+    }
+
+    /** 读一组已完成进度 key（2026-11-06 M5 前置：战斗目标 / 阶段用这套） */
+    function getProgressSet(event) {
+        return new Set((event && event.tracker && event.tracker.progress) || []);
+    }
+
+    /**
+     * 切换一个进度条目的完成状态。
+     * 案件的节点仍走 toggleNode（它还要维护 vetoed / pending 两套旧字段），
+     * 战斗目标与阶段没有那套机制，只记一个 key 的有无。
+     */
+    function toggleProgress(key) {
+        const event = getCurrentEvent();
+        if (!event) return;
+        if (!event.tracker) event.tracker = {};
+        const done = getProgressSet(event);
+        if (done.has(key)) done.delete(key);
+        else done.add(key);
+        event.tracker.progress = Array.from(done).sort();
+        log(`手动${done.has(key) ? '打勾' : '撤销'}进度 ${key}（当前已完成 ${event.tracker.progress.length} 项）`);
+        saveMeta();
     }
 
     function toggleNode(nodeId) {
@@ -4626,6 +7279,11 @@
   background:var(--eo-bg-soft);margin-bottom:9px;white-space:pre-wrap;word-break:break-word;
   max-height:none;overflow:visible;line-height:1.55;}
 .eo-hint{color:var(--eo-text-3);font-size:12px;line-height:1.5;}
+/* 骨架映射表（M7 2026-11-07）：一行一条「自定义名 → 内置名」，右侧带删除 */
+.eo-map-list{margin:4px 0 6px;}
+.eo-map-from{font-weight:600;}
+.eo-map-to{color:var(--eo-text-2);}
+.eo-err{color:#c62828;font-size:12px;line-height:1.5;}
 /* 行内提醒（2026-11-04）：跟着输入框走，不带边框和背景，只把字染色，免得撑开行高 */
 .eo-hint-note{color:#a35c00;font-weight:600;}
 /* 大纲正文：保留换行与缩进，不加高度上限（大纲本来就有几百行，截断反而看不到全貌） */
@@ -5571,7 +8229,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             return { ok: false, fatal: ['解析不出任何字段，这份内容不是合法的 YAML'], issues: [] };
         }
         // 与 saveDraftEdit 同一口径：没有信息节点也算硬错，否则存下去是空壳
-        const n = Array.isArray(parsed.nodes) ? parsed.nodes.length : 0;
+        // （2026-11-05 M2 评审：nodes 在 structure 里，按顶层读会把每份新草稿都判成空壳）
+        const n = innerNodesOf(parsed).length;
         if (!n) {
             return { ok: false, fatal: ['一个信息节点都没有解析出来，多半是 nodes 下面的缩进或破折号被改坏了'], issues: [] };
         }
@@ -5790,13 +8449,30 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 const item = el('div', 'eo-draft');
                 const head = el('div', 'eo-draft-head');
                 head.appendChild(el('span', 'eo-draft-name', d.name));
-                const n = (d.outline && d.outline.nodes || []).length;
-                const c = Object.keys((d.outline && d.outline.characters) || {}).length;
+                // 2026-11-05 M2 复核：nodes 与 characters 都在 structure 里，按顶层读恒为 0，
+                // 待选卡片会一直显示「0 个节点」。
+                // characters 是 {helpers:[…], obstructers:[…]} 这种分组对象，
+                // 原来数 Object.keys 得到的是「几组」而不是「几个人」，一并改成数人头。
+                const n = innerNodesOf(d.outline).length;
+                const charsOf = innerField(d.outline, 'characters');
+                const c = (charsOf && typeof charsOf === 'object')
+                    ? Object.values(charsOf).reduce((a, v) => a + (Array.isArray(v) ? v.length : (v ? 1 : 0)), 0)
+                    : 0;
                 const meta = [];
                 meta.push(`${n} 个节点`);
                 if (c) meta.push(`${c} 类角色`);
                 if (d.autoNamed) meta.push('自动命名');
                 head.appendChild(el('span', 'eo-draft-meta', meta.join('　')));
+                // 2026-11-06 M4.1：没有骨架的类型，字段结构是模型自己发挥的，
+                // 与案件/战斗那两套固定骨架对不上。标记出来，采用前提醒一次。
+                const draftMain = mainTypeOfOutline(d.outline);
+                const isTempStruct = !!(draftMain && !skeletonForType(draftMain));
+                if (isTempStruct) {
+                    const tag = el('span', 'eo-draft-meta', '（临时结构）');
+                    tag.style.color = 'var(--eo-warn, #b8860b)';
+                    tag.title = '该类型暂无专用骨架，字段是模型按通用结构自己组织的';
+                    head.appendChild(tag);
+                }
                 item.appendChild(head);
 
                 if (d.brief) item.appendChild(el('div', 'eo-draft-brief', d.brief));
@@ -5810,7 +8486,20 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 acts.appendChild(useActs);
                 const btnUse = el('button', 'eo-btn eo-primary eo-press', '采用');
                 btnUse.type = 'button';
+                // 临时结构第一次点「采用」变成「确认采用」，再点一次才真采用。
+                // 项目里没有弹窗组件，都用就地二次确认，跟盘点页「确认/忽略」一个路子。
+                let useArmed = false;
+                if (isTempStruct) {
+                    btnUse.textContent = '采用（临时结构）';
+                    btnUse.title = '该类型暂无专用骨架，内层字段是模型按通用结构自己组织的';
+                }
                 btnUse.addEventListener('click', async () => {
+                    if (isTempStruct && !useArmed) {
+                        useArmed = true;
+                        btnUse.textContent = '确认采用？';
+                        btnUse.title = '采用后盘点页可能列不出进度条目：该类型的字段没有固定骨架，按骨架算的进度项对不上。';
+                        return;
+                    }
                     btnUse.disabled = true;
                     btnUse.textContent = '正在采用…';
                     try {
@@ -6150,8 +8839,28 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         mainRow.appendChild(el('label', null, '主类型'));
         const mainSel = el('select', 'eo-sel');
         mainSel.style.flex = '1';
-        for (const t of [EVENT_TYPE_DEFAULT].concat(getMainTypes())) {
-            const o = el('option', null, t);
+        // 2026-11-05 M1：主类型改成必选（定稿 1B）。
+        // 原来第一项是「根据当前情况自行设定」，等于让模型猜——猜错整个事件就白生成了，
+        // 而且八套骨架之后必须知道是哪一类才能挑内层字段，猜不得。
+        // 现在第一项是空占位「请选择主类型」，选中它时「开始生成大纲」禁用并提示。
+        const MAIN_UNSET = '';
+        {
+            const o = el('option', null, '请选择主类型');
+            o.value = MAIN_UNSET;
+            mainSel.appendChild(o);
+        }
+        for (const t of getMainTypes()) {
+            // 2026-11-06 M4.1：没有骨架的类型在后面标出来。
+            // 九个主类型里只有案件和战斗有骨架，剩下七个选下去界面毫无反应，
+            // 用户要等到拿到生成结果才发现「只有字段清单、没有示例」。
+            //
+            // M6（2026-11-06）：「其他」是个特例——它有骨架（通用六字段），
+            // 但没有专属示例（示例是给具体类型看的）。所以它不该被标成「骨架未完成」，
+            // 而该说明「兜底用，只有字段清单」。
+            let label = t;
+            if (t === '其他') label = '其他（兜底，十三个专用类型都不贴时才选）';
+            else if (!skeletonForType(t)) label = t + '（骨架未完成）';
+            const o = el('option', null, label);
             o.value = t;
             mainSel.appendChild(o);
         }
@@ -6160,7 +8869,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         mainCustomOpt.value = MAIN_CUSTOM;
         mainSel.appendChild(mainCustomOpt);
         // 手打过的类型名也记在草稿里，重绘后仍能选中
-        const curMain = prefs.eventMainType || EVENT_TYPE_DEFAULT;
+        // 2026-11-05 M1：旧草稿里可能还存着 EVENT_TYPE_DEFAULT（「根据当前情况自行设定」），
+        // 那个值现在不再是合法主类型了，读到时按「未选」处理，逼用户重新选一次。
+        const rawMain = String(prefs.eventMainType || '').trim();
+        const curMain = (rawMain && rawMain !== EVENT_TYPE_DEFAULT) ? rawMain : MAIN_UNSET;
         if (!Array.from(mainSel.options).some(o => o.value === curMain) && curMain !== MAIN_CUSTOM) {
             const o = el('option', null, curMain);
             o.value = curMain;
@@ -6175,8 +8887,23 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 if (!added) repaintPage();
                 return;
             }
+            const prevType = prefs.eventMainType;
             prefs.eventMainType = mainSel.value;
+            // 2026-11-06 M4.2：切换前先把当前这套值存回它自己的类型名下，
+            // 再从新类型名下取。不这么做，切走就丢、切回来是空的。
+            // 顺序要紧：先存旧类型，再取新类型，否则刚存的值会被立刻覆盖。
+            if (prevType && prevType !== prefs.eventMainType) {
+                setTypePrefs(prevType, prefs);
+                const restored = getTypePrefs(prefs.eventMainType);
+                Object.assign(prefs, restored);
+            }
             persistGenForm();
+            // 2026-11-06 真机反馈：切主类型后下面的设置项没变化。
+            // 原因有两层，这里修的是第一层——change 里只存了草稿、没重绘，
+            // 页面还是上一次画的那张，用户改完看不出任何反应。
+            // 第二层（下面那批设置项本身与主类型无关）是另一件事，见 renderGenForm 里的说明。
+            // 2026-11-06 M4.2：第二层已修，参数区现在按 prefsForType 出，重绘就能跟着变。
+            repaintPage();
         });
         mainRow.appendChild(mainSel);
         page.appendChild(mainRow);
@@ -6197,7 +8924,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                         const stored = (s.preset && Array.isArray(s.preset.mainTypes) && s.preset.mainTypes.length)
                             ? s.preset.mainTypes.slice() : EVENT_MAIN_TYPES.slice();
                         s.preset.mainTypes = stored.filter(x => x !== name);
-                        if (prefs.eventMainType === name) prefs.eventMainType = EVENT_TYPE_DEFAULT;
+                        if (prefs.eventMainType === name) prefs.eventMainType = MAIN_UNSET;
                         saveSettings();
                         persistGenForm();
                         log(`已移除主类型「${name}」`);
@@ -6437,7 +9164,11 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             body.textContent = '';
             const mode = groupMode[groupName];
             const def = PREF_PRESETS[groupName];
-            const items = PREF_GROUPS.filter(x => x.group === groupName);
+            // 2026-11-06 M4.2 真机：这里原来只查 PREF_GROUPS，
+            // 而战斗五项在 PREF_COMBAT_GROUPS 里，于是「战斗要素（0 项）」、
+            // 切「逐项调」一片空白。改成按当前主类型取，两张表都覆盖到。
+            const items = prefsForType(prefs && prefs.eventMainType)
+                .filter(x => x.group === groupName);
 
             if (hintSpan) {
                 hintSpan.textContent = mode === 'rough'
@@ -6485,7 +9216,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 try { groupPainters[name](); } catch (e) { warn('重绘偏好分组失败：' + name, e); }
             }
         }
-        for (const g of PREF_GROUPS) {
+        // 2026-11-06 M4.2：参数区按主类型出。通用 11 项 + 本类型专属项；
+        // 战斗五项从 PREF_COMBAT_GROUPS 来，与主表原序拼在一起。
+        const shownPrefs = prefsForType(prefs && prefs.eventMainType);
+        for (const g of shownPrefs) {
             const isGrouped = !!g.group && !!PREF_PRESETS[g.group];
 
             if (!isGrouped) {
@@ -6509,7 +9243,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     if (box.open) openPrefGroups.add(g.group); else openPrefGroups.delete(g.group);
                 });
                 const sum = el('summary', 'eo-prefgroup-sum');
-                const count = PREF_GROUPS.filter(x => x.group === g.group).length;
+                // 2026-11-06 M4.2 真机：这里原来只数 PREF_GROUPS，战斗要素显示成「0 项」。
+                // 用同一个 shownPrefs 数，标题与内容不会对不上。
+                const count = shownPrefs.filter(x => x.group === g.group).length;
                 sum.textContent = `${g.group}（${count} 项）`;
                 box.appendChild(sum);
 
@@ -6590,8 +9326,47 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             btnGo.disabled = true;
             btnGo.textContent = '正在生成…';
         }
+        // 主类型必选（2026-11-05 M1，定稿 1B）：没选就禁用生成并提示，不默认任何类型。
+        // 提示文案放在按钮下面那行 opOut 里，切换下拉时同步刷新，用户一眼能看见缺什么。
+        const refreshGoGate = () => {
+            if (S.busy) return;
+            const chosen = String(mainSel.value || '').trim();
+            const unset = !chosen || chosen === MAIN_UNSET;
+            btnGo.disabled = unset;
+            btnGo.title = unset ? '请先选择主类型再生成' : '';
+            if (unset) {
+                opOut.className = 'eo-bad';
+                opOut.textContent = '请先选择主类型：不同类型的事件有不同结构，不选无法生成。';
+            } else if (!skeletonForType(chosen)) {
+                // 2026-11-06 M4.1：没有骨架的类型要提前说清楚。
+                // 这类类型不是不能生成，是 prompt 里没有示例可照抄，
+                // 模型自己发挥出来的字段名可能跟别的事件对不上，生成前先提醒一句。
+                opOut.className = 'eo-hint';
+                opOut.textContent = '该类型暂无专用骨架，将按通用结构生成，字段可能不完整。';
+            } else if (opOut.className === 'eo-bad'
+                && opOut.textContent.indexOf('请先选择主类型') === 0) {
+                // 之前是「请选类型」的提示，选上了就清掉，别把旧提示留在那儿
+                opOut.className = 'eo-hint';
+                opOut.textContent = '';
+            } else if (opOut.textContent.indexOf('暂无专用骨架') >= 0) {
+                // 从无骨架类型切到有骨架类型，把上面那句提示清掉
+                opOut.className = 'eo-hint';
+                opOut.textContent = '';
+            }
+        };
+        mainSel.addEventListener('change', refreshGoGate);
+        refreshGoGate();
         btnGo.addEventListener('click', async () => {
             if (S.busy) return;
+            // 主类型必选（2026-11-05 M1）：按钮虽然禁用了，这里再挡一道，
+            // 免得别的路径（回车、脚本触发）绕过界面把没有类型的事件生成出去
+            const chosenMain = String(mainSel.value || '').trim();
+            if (!chosenMain || chosenMain === MAIN_UNSET) {
+                opOut.className = 'eo-bad';
+                opOut.textContent = '请先选择主类型：不同类型的事件有不同结构，不选无法生成。';
+                return;
+            }
+            prefs.eventMainType = chosenMain;
             const name = String(nameInput.value || '').trim();
             // 事件名可以留空：留空就由模型根据当前剧情自己起名
             prefs.extra = String(extraInput.value || '无').trim() || '无';
@@ -6605,7 +9380,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             opOut.textContent = '正在生成大纲，请稍候…';
             try {
                 const event = await createEvent(name, prefs);
-                const nodeN = (event.outline && event.outline.nodes || []).length;
+                // 2026-11-05 M2 复核：节点在 structure 里，按顶层读会显示「（0 个节点）」
+                const nodeN = innerNodesOf(event.outline).length;
                 log(`生成大纲成功：${event.name}，节点 ${nodeN} 个，已放入待选，未写世界书`);
                 // 刻意不重置偏好：生成出待选之后，下面那套选项要停在刚才用的那份，
                 // 方便在此基础上微调后再生成一个来比较。想回默认就点「重置为默认」
@@ -6694,15 +9470,26 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         page.appendChild(invPh);
         if (S.progress.steps.length) renderProgress();
 
-        // 节点进度
-        const nodes = (ev.outline && ev.outline.nodes) || [];
-        if (Array.isArray(nodes) && nodes.length) {
+        // 进度条目（2026-11-06）
+        // 原来这里是 innerNodesOf + if(nodes.length)：战斗没有节点、多段事件没有节点，
+        // 这两个类型从采用那一刻起就勾不了，整块进度区不渲染。
+        // 现在统一走 progressItemsOf：案件仍按节点（读写 triggeredNodes，旧数据不动），
+        // 战斗按目标、多段按阶段（读写 tracker.progress）。
+        const prog = progressItemsOf(ev.outline);
+        const nodes = innerNodesOf(ev.outline);
+        if (prog.items.length) {
+            const isNode = prog.kind === 'node';
             const triggered = new Set(ev.tracker.triggeredNodes || []);
             const pending = new Set(ev.tracker.pendingNodes || []);
+            const doneSet = getProgressSet(ev);
+            const doneCount = isNode
+                ? prog.items.filter(it => triggered.has(it.id)).length
+                : prog.items.filter(it => doneSet.has(it.key)).length;
             const mode = getSettings().tracker.mode;
 
-            // 半自动：待确认建议单独列一块，放在节点清单上面
-            if (mode === 'semi' && pending.size) {
+            // 半自动：待确认建议单独列一块，放在进度清单上面。
+            // 待确认只对节点有效——战斗目标与阶段没有模型自动判断这条路。
+            if (isNode && mode === 'semi' && pending.size) {
                 page.appendChild(el('div', 'eo-sec', `待确认的建议（${pending.size} 条，模型认为已达成）`));
                 page.appendChild(el('div', 'eo-hint',
                     '这些是模型在这一轮剧情里认为碰到的节点。点「确认」才算真正打勾，点「忽略」就不算；不处理的话，下次盘点会被新建议覆盖。'));
@@ -6747,9 +9534,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             }
 
             const nodeSec = el('div', 'eo-sec eo-sec-inline');
-            nodeSec.appendChild(el('span', null, `节点进度（${triggered.size}/${nodes.length}，点击切换）`));
+            nodeSec.appendChild(el('span', null,
+                `${prog.title}（${doneCount}/${prog.items.length}，点击切换）`));
             const vetoedNow = (ev.tracker && ev.tracker.nodeVetoed) || [];
-            if (vetoedNow.length) {
+            if (isNode && vetoedNow.length) {
                 const btnUndo = el('button', 'eo-btn', `恢复自动勾选（${vetoedNow.length}）`);
                 btnUndo.type = 'button';
                 attachHelp(btnUndo, '你手动撤销过的节点会被自动盘点跳过。点这里把它们全部放回去，'
@@ -6762,28 +9550,35 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             }
             page.appendChild(nodeSec);
             const nb = el('div', 'eo-box');
-            for (const n of nodes) {
-                const id = nodeId(n);
-                const on = triggered.has(id);
-                const isPending = pending.has(id);
+            for (const it of prog.items) {
+                const on = isNode ? triggered.has(it.id) : doneSet.has(it.key);
+                const isPending = isNode && pending.has(it.id);
                 const line = el('div', 'eo-node' + (on ? ' eo-node-on' : '') + (isPending ? ' eo-node-suggest' : ''));
-                line.textContent = `${on ? '☑' : (isPending ? '◐' : '☐')} ${id}. ${n.type || ''} ${nodeText(n)}`
-                    + (nodeTrigger(n) ? `（${nodeTrigger(n)}）` : '')
+                line.textContent = `${on ? '☑' : (isPending ? '◐' : '☐')} ${it.label}`
+                    + (it.trigger ? `（${it.trigger}）` : '')
                     + (isPending ? '　← 模型建议，待确认' : '');
                 makeActivatable(line, 'checkbox');
                 line.setAttribute('aria-checked', on ? 'true' : 'false');
                 line.addEventListener('click', () => {
-                    toggleNode(id);
+                    if (isNode) toggleNode(it.id);
+                    else toggleProgress(it.key);
                     // 只改这一页的勾选状态，没理由把整个面板重建一遍
                     repaintPage();
                 });
                 nb.appendChild(line);
+                // 战斗目标与阶段带上达成/出入场条件：打勾时得知道「算不算完成」的依据
+                if (it.detail) {
+                    const d = el('div', 'eo-hint', it.detail);
+                    d.style.marginLeft = '1.4em';
+                    nb.appendChild(d);
+                }
             }
             page.appendChild(nb);
 
             // 核心真相摊在页面上等于自己把案子剧透了（2026-11-02）。
             // 默认收着，想看的人自己点开；标题里把「剧透」写明白，别让人手滑点开
-            const core = (ev.outline && ev.outline.core_truth) || '';
+            // 2026-11-05 M2 复核：core_truth 属内层，按顶层读新事件永远没有这个折叠块
+            const core = innerField(ev.outline, 'core_truth') || '';
             if (core) {
                 const cd = el('details', 'eo-details');
                 cd.appendChild(el('summary', null, '核心真相（剧透，点开前想清楚）'));
@@ -6791,7 +9586,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 page.appendChild(cd);
             }
         } else {
-            page.appendChild(el('div', 'eo-hint', '大纲解析出的节点清单为空，请到「日志」页查看原始输出。'));
+            page.appendChild(el('div', 'eo-hint',
+                '这份大纲里没有可以逐项打勾的进度条目（既没有信息节点，也没有战斗目标或阶段），'
+                + '请到「日志」页查看模型原始输出。'));
         }
 
         // 盘点记录
@@ -7015,6 +9812,10 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         lines.push(`事件：${ev.name}（${ev.status}）`);
         lines.push(`创建：${String(ev.createdAt || '').slice(0, 19)}`);
         lines.push(`已触发节点：${(t.triggeredNodes || []).join('、') || '无'}`);
+        // 战斗目标与阶段的完成情况（2026-11-06）：这两类没有节点，不写出来就显示成「无」，看着像没进度
+        if (Array.isArray(t.progress) && t.progress.length) {
+            lines.push(`已完成进度条目：${t.progress.join('、')}`);
+        }
         lines.push(`已推翻误导：${(t.refutedMisleads || []).join('、') || '无'}`);
         lines.push(`人工否决：${(t.nodeVetoed || []).join('、') || '无'}`);
         const pend = t.pendingNodes || [];
@@ -7990,6 +10791,93 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         makeBox('主类型', 'mainTypes', EVENT_MAIN_TYPES);
         makeBox('次类型', 'subTypes', EVENT_SUB_TYPES);
+
+        // ---- M7（2026-11-07）：自定义类型用哪套骨架 ----
+        // 在主类型列表里手打过名字的用户，这里能把那个名字挂到某个内置类型的骨架上。
+        // 不挂就一律套「其他」通用骨架（复用「其他」的六个字段：目标/障碍/资源/变数/失败代价/相关方）。
+        box.appendChild(el('div', 'eo-sub-title', '└ 自定义类型用哪套骨架'));
+        box.appendChild(el('div', 'eo-hint',
+            '你自己起的类型名（不在上面那批内置类型里的），默认按「其他」的通用骨架生成——'
+            + '六个字段：目标、障碍、资源、变数、失败代价、相关方。'
+            + '如果你希望它按某个内置类型的方式来生成（比如「盗墓」按探险探索的字段来），就在下面配一条。'
+            + '没配的不影响，仍然走通用骨架。'));
+        const mapBox = el('div', 'eo-map-list');
+        const renderMapRows = () => {
+            mapBox.innerHTML = '';
+            const st = getSettings();
+            const map = (st.preset && st.preset.customSkeletonMap) || {};
+            const entries = Object.entries(map);
+            if (!entries.length) {
+                mapBox.appendChild(el('div', 'eo-hint', '（还没有配置任何映射）'));
+            }
+            for (const [from, to] of entries) {
+                const row = el('div', 'eo-row');
+                row.appendChild(el('span', 'eo-map-from', from));
+                row.appendChild(el('span', 'eo-hint', ' → '));
+                row.appendChild(el('span', 'eo-map-to', to || '（未配，走通用骨架）'));
+                const btnDel = el('button', 'eo-btn', '删除');
+                btnDel.type = 'button';
+                btnDel.addEventListener('click', () => {
+                    const s2 = getSettings();
+                    if (s2.preset && s2.preset.customSkeletonMap) {
+                        delete s2.preset.customSkeletonMap[from];
+                        saveSettings();
+                        log('已删除骨架映射：' + from);
+                        renderMapRows();
+                    }
+                });
+                row.appendChild(btnDel);
+                mapBox.appendChild(row);
+            }
+        };
+        renderMapRows();
+        box.appendChild(mapBox);
+
+        // 新增一行：输入自定义类型名 + 选一个内置骨架
+        const addRow = el('div', 'eo-row');
+        const inName = el('input', 'eo-input');
+        inName.type = 'text';
+        inName.placeholder = '自定义类型名，如 盗墓';
+        addRow.appendChild(inName);
+        const selSkel = el('select', 'eo-input');
+        for (const t of EVENT_MAIN_TYPES) {
+            const o = el('option', null, t);
+            o.value = t;
+            selSkel.appendChild(o);
+        }
+        // 默认选中「其他」——它就是「不配置」时的行为，放第一个不会让人误以为必须选
+        selSkel.value = '其他';
+        addRow.appendChild(selSkel);
+        const btnAdd = el('button', 'eo-btn eo-primary', '添加映射');
+        btnAdd.type = 'button';
+        const addOut = el('div', 'eo-hint');
+        btnAdd.addEventListener('click', () => {
+            const from = String(inName.value || '').trim();
+            const to = String(selSkel.value || '').trim();
+            if (!from) {
+                addOut.className = 'eo-err';
+                addOut.textContent = '请先填自定义类型名。';
+                return;
+            }
+            if (EVENT_MAIN_TYPES.includes(from)) {
+                addOut.className = 'eo-err';
+                addOut.textContent = `「${from}」是内置类型，不需要配映射——内置类型永远用它自己的骨架。`;
+                return;
+            }
+            const st = getSettings();
+            if (!st.preset) st.preset = {};
+            if (!st.preset.customSkeletonMap) st.preset.customSkeletonMap = {};
+            st.preset.customSkeletonMap[from] = to;
+            saveSettings();
+            inName.value = '';
+            addOut.className = 'eo-ok';
+            addOut.textContent = `已保存：「${from}」→ ${to}`;
+            log(`骨架映射已保存：${from} → ${to}`);
+            renderMapRows();
+        });
+        addRow.appendChild(btnAdd);
+        box.appendChild(addRow);
+        box.appendChild(addOut);
     }
 
     /**
@@ -8014,7 +10902,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         // 只列事件参数里的项。难度等级不在这里：它是独立的「难度等级」节，
         // 档位本身就在那一节编，不该在事件参数里再出现一次（2026-11-04 危晓指出重复）
-        for (const g of PREF_GROUPS) {
+        // 2026-11-06 M4.2：补上战斗五项，否则它们的预设手写值在这里编不了。
+        for (const g of PREF_GROUPS.concat(PREF_COMBAT_GROUPS)) {
             const sub = el('div', 'eo-row eo-prefopt-row');
             const lab = el('label', null, g.group ? `${g.group}·${g.label}` : g.label);
             lab.style.minWidth = '130px';
@@ -8359,6 +11248,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             warn('未取到上下文，扩展未初始化');
             return;
         }
+        // M6.2：先把 spec 表自检跑一遍。写错 spec 不该让扩展起不来，
+        // 但必须在日志里留痕，免得等到某个类型生成出怪大纲才回头找。
+        selfCheckSpecMeta();
         getSettings();
         injectStyle();
 
