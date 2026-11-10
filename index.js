@@ -3762,10 +3762,18 @@
         }
 
         // 3. 只有 chatId 命中（事件可能改过名）
-        if (chatId) {
-            const byChat = mine.filter(m => m.comment.includes(`chatId=${chatId}`));
-            if (byChat.length === 1) return byChat[0].uid;
-        }
+        //
+        // 2026-11-10 删掉了一条猜测规则：原来是「当前对话下只有一条事件条目就认它」。
+        // 它让整条链采用时后一个节点顶掉前一个——第一个节点新增条目拿到 uid，
+        // 第二个节点名字对不上，却因为「当前对话只有这一条」被认成自己，写进去把第一个覆盖了。
+        // 实机现场：三节点链采用完，三个事件的 entryUid 全是 607，书里只剩最后一个节点。
+        //
+        // 可以安全去掉的理由：
+        //   - 改名只发生在编辑待选事件时（保存大纲那一步），那时还是待选状态，
+        //     世界里根本没有它的条目，不存在「条目在、名字变了」需要靠猜来认领的情形；
+        //   - 真有 uid 记录时由上面第 1 条规则处理，它会校验名字与 chatId；
+        //   - 实在认不出来就按新增处理。多出一条条目看得见、删得掉；
+        //     顶掉别的条目是静默丢内容。两者代价不对称，宁可新增。
 
         // 4. 退回名字匹配，仅当恰好一条且它没带别的 chatId（极老的条目可能没写 chatId）
         if (name) {
@@ -5093,13 +5101,13 @@
         '时间压力': {
             options: [
                 { key: 'easy', label: '大致·宽松', desc: '没有硬倒计时，拖一拖也无妨',
-                  values: { timePressure: '无', timeDuration: '宽松', timeoutConsequence: '无', procrastinationCost: '无' } },
+                  values: { timePressure: '没有硬期限', timeDuration: '宽松', timeoutConsequence: '无', procrastinationCost: '无' } },
                 { key: 'normal', label: '大致·常规', desc: '有倒计时但看得见，时间够规划，拖延有持续损耗',
-                  values: { timePressure: '可见', timeDuration: '适中', timeoutConsequence: '损失机会或信息', procrastinationCost: '持续损耗' } },
+                  values: { timePressure: '有期限且明确知道', timeDuration: '适中', timeoutConsequence: '损失机会或信息', procrastinationCost: '持续损耗' } },
                 { key: 'hard', label: '大致·紧迫', desc: '倒计时隐藏，时间紧张，超时事件走向坏结局',
-                  values: { timePressure: '隐藏', timeDuration: '紧张', timeoutConsequence: '事件走向坏结局', procrastinationCost: '阶段性恶化' } },
+                  values: { timePressure: '有期限但不知道', timeDuration: '紧张', timeoutConsequence: '事件走向坏结局', procrastinationCost: '阶段性恶化' } },
                 { key: 'brutal', label: '大致·绝命', desc: '隐藏倒计时叠加极度紧张，错过就无法逆转',
-                  values: { timePressure: '隐藏', timeDuration: '紧张', timeoutConsequence: '局势不可逆转', procrastinationCost: '阶段性恶化' } },
+                  values: { timePressure: '有期限但不知道', timeDuration: '紧张', timeoutConsequence: '局势不可逆转', procrastinationCost: '阶段性恶化' } },
             ],
         },
         // 2026-11-06 M4.2：战斗专属组。档位文案与上面三组一样用「大致·X」，
@@ -5485,7 +5493,18 @@
         } else {
             lines.push('- 次类型：未指定，请按主类型与当前剧情自行搭配 1-3 个次要性质');
         }
-        lines.push(`- 额外要求：${prefs.extra || '无'}`);
+        // 2026-11-10：额外要求是用户写这一环具体剧情的地方，属于硬约束。
+        // 原来这里只是平铺一行「- 额外要求：xxx」，语气和别的档位参数没区别，
+        // 而链节点那侧另有一句「必须照办，不要改写成别的意思」——两边重复且轻重不一。
+        // 现在合成一处：措辞留在这，链节点不再单独重复这项。
+        {
+            const extraTxt = String(prefs.extra == null ? '' : prefs.extra).trim();
+            if (extraTxt && extraTxt !== '无') {
+                lines.push(`- 额外要求（必须照办，不要改写成别的意思）：${extraTxt}`);
+            } else {
+                lines.push('- 额外要求：无');
+            }
+        }
         // 用户手填的两项：目的（想达成什么）与提示词（大致框架）。填了就当硬约束
         const goal = String(prefs.goal || '').trim();
         if (goal) {
@@ -5788,15 +5807,11 @@
                 ? prefs.__chainNodePrefs[pos - 1] : null;
             const np = mine && mine.prefs;
             if (np && typeof np === 'object') {
-                // 额外要求写的是这一环的具体剧情，优先级最高，单独拎出来放前面
-                const extra = String(np.extra || '').trim();
-                if (extra && extra !== '无') {
-                    lines.push(`用户对这一环的具体要求（必须照办，不要改写成别的意思）：${extra}`);
-                }
-                const goalTxt = String(np.goal || '').trim();
-                if (goalTxt) lines.push(`这一环要达到的目的：${goalTxt}`);
-                const hintTxt = String(np.promptHint || '').trim();
-                if (hintTxt) lines.push(`用户给的框架提示：${hintTxt}`);
+                // 2026-11-10 修（评审 P1-13，我 11-10 上午自己引入的）：
+                // 这里原来先把 extra / goal / promptHint 单独 push 一遍，再调 buildPrefsBlock(np)，
+                // 而后者内部又把这三项各输出一次。用户填的三项在提示词里出现两遍，
+                // 语气还互相打架——这边写「必须照办」，那边写「尽量采纳」，模型收到两套说法。
+                // 现在只留 buildPrefsBlock 一份，它是单事件也在用的同一套渲染，不另起炉灶。
                 let block = '';
                 try { block = buildPrefsBlock(np); } catch (e) { block = ''; }
                 if (block) {
@@ -6781,25 +6796,44 @@
      * 两条出路都必须让调用方的 finally 跑起来，否则 busy 不解除，界面一直转圈只能刷新页面。
      * 走酒馆 generateRaw 的那两种模式没法中断，只能等它自己回，所以放弃等待对它们只是先把界面放开。
      */
-    function callModel(systemPrompt, prompt, prefill) {
-        let giveUp = () => {};
+    function callModel(systemPrompt, prompt, prefill, overrideProfile) {
+        // 2026-11-10 修（评审 P1-5 / P1-6）：
+        //
+        // 1) 登记必须在发起请求之前完成。原来它在下面几行之后才赋值，而 doCallModel 是同步进入的，
+        //    它读 S.pendingRequest 去挂 controller 时拿到的还是上一轮的旧对象，
+        //    「放弃等待」abort 的是已经结束的那次请求，正在跑的这次根本停不下来。
+        //
+        // 2) 超时原来只清定时器和置空，既不 reject 也不 abort，outer 永远悬着、调用方 await 卡死；
+        //    界面上看着放开了，那个 Promise 却永远不会结束，进度条目也一直停在进行中。
+        //    现在超时走 abortPendingRequest()：它 abort 直连请求，再调 giveUp() 让这里 reject。
+        //    走酒馆 generateRaw 的两种模式没有取消接口，abort 是空操作，
+        //    但 giveUp 照样让外层结束——调用方拿到「已放弃等待」，总比永远等着强，且说的实话。
+        //
+        // 写法：先把源头攥在一个对象里，giveUp 改写它的字段，S.pendingRequest 指向的就是它。
+        // 这样无论谁先谁后，外面拿到的都是同一个引用，不会指向旧壳子。
+        let settleReject = null;
+        const pending = {
+            controller: null,
+            giveUp: () => { if (settleReject) settleReject(new Error('已放弃等待模型返回')); },
+        };
+        S.pendingRequest = pending;
+
         const outer = new Promise((resolve, reject) => {
-            giveUp = () => reject(new Error('已放弃等待模型返回'));
-            doCallModel(systemPrompt, prompt, undefined, prefill).then(resolve, reject);
+            settleReject = reject;
+            doCallModel(systemPrompt, prompt, overrideProfile, prefill).then(resolve, reject);
         });
-        // 超时兜底：直连自己还会按配置 abort；走酒馆的没有取消接口，这里只放界面
+
         const limit = directTimeoutMs() + 60000;
         const timer = setTimeout(() => {
-            if (S.pendingRequest) {
-                log(`模型请求超过 ${Math.round(limit / 1000)} 秒仍未收口，界面先放开，底层请求可能还在跑`);
-                settle();
+            if (S.pendingRequest === pending) {
+                log(`模型请求超过 ${Math.round(limit / 1000)} 秒仍未收口，按放弃等待处理`);
+                abortPendingRequest();
             }
         }, limit);
         function settle() {
             clearTimeout(timer);
-            if (S.pendingRequest) S.pendingRequest = null;
+            if (S.pendingRequest === pending) S.pendingRequest = null;
         }
-        S.pendingRequest = { giveUp, controller: null };
         return outer.finally(settle);
     }
 
@@ -6998,7 +7032,7 @@
      */
     async function testProfile(profile) {
         const t0 = Date.now();
-        const out = await callModel('你是一个连通性测试助手，只回一个字。', '只回复两个字：收到', profile);
+        const out = await callModel('你是一个连通性测试助手，只回一个字。', '只回复两个字：收到', undefined, profile);
         return { ok: true, ms: Date.now() - t0, sample: String(out || '').trim().slice(0, 60) };
     }
 
@@ -9387,7 +9421,7 @@
      * 采用一个待选事件：写世界书条目、设为当前事件。
      * 生成和写入分开，就是为了反复重生成时不弄脏世界书。
      */
-    async function commitDraft(id) {
+    async function commitDraft(id, opts) {
         const meta = getMeta();
         const event = meta.events[id];
         if (!event) throw new Error('找不到这个待选事件');
@@ -9395,9 +9429,18 @@
 
         const cur = getCurrentEvent();
         if (cur) {
-            throw new Error(`「${cur.name}」还在进行中，请先完结或废弃它，再采用新的待选事件`);
+            // 2026-11-10 修：整条链一起采用时，前一个节点刚被设成当前事件，
+            // 走到第二个节点必然撞上这道守卫，于是整条链只能落第一个。
+            // 同一条链内部的节点互相接续是正常状态，不算冲突；
+            // 只有「当前事件属于别的链或别的单事件」时才拦。
+            const sameChain = !!(opts && opts.allowChain
+                && cur.chain && cur.chain.id
+                && event.chain && event.chain.id
+                && String(cur.chain.id) === String(event.chain.id));
+            if (!sameChain) {
+                throw new Error(`「${cur.name}」还在进行中，请先完结或废弃它，再采用新的待选事件`);
+            }
         }
-
         setBusy(true, false, '正在采用事件并写入世界书…');
         try {
             const book = event.worldBook || getCharacterBookName();
@@ -9565,9 +9608,22 @@
         if (!fatal.length) {
             // 2026-11-05 M2 评审：按顶层读会让新形状草稿改完保存时被判「一个节点都没有」而拒存。
             // 这是用户直接撞得上的功能中断，比日志误报严重。
-            const n = innerNodesOf(r.parsed).length;
-            if (!n) {
-                fatal.push('一个信息节点都没有解析出来，多半是 nodes 下面的缩进或破折号被改坏了');
+            //
+            // 2026-11-10 修（评审 P0-2）：这条检查的本意是「缩进被改乱、节点认不出来，
+            // 存下去就是空壳」，可它只看 nodes，而九类里只有案件推理有 nodes，
+            // 其余八类（战斗/谈判/生存/探险/社交/日常/禁忌/NSFW）就算内容完整也一律被拒。
+            //
+            // 改成：外层必备键齐全，或该类型声明的进度字段有内容，满足任一就放行。
+            // 为什么不是「只认进度字段」：那样等于把 nodes 换成 phases 继续拦——
+            // 一份战斗大纲写了参战者、战场、契约，只是还没排阶段，照样存不进去，
+            // 和原来的毛病一模一样。真正被改坏的稿子，外层键会一起缺；
+            // 外层齐全却进度为空，那是「还没填完」，不是「坏了」，该让用户存。
+            const shape = checkOutlineShape(r.parsed);
+            const outerOk = !!(shape && shape.ok);
+            let hasProgress = false;
+            try { hasProgress = progressItemsOf(r.parsed).items.length > 0; } catch (e) { hasProgress = false; }
+            if (!outerOk && !hasProgress) {
+                fatal.push('内容结构不完整，多半是缩进或破折号被改坏了');
             }
         }
         if (fatal.length) {
@@ -10784,8 +10840,6 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         }
     }
 
-    let fabState = S.fabState; // 引用指向 S，值统一存 S
-
     function loadFabState() {
         const s = getSettings();
         const saved = s.ui.floatingPos || {};
@@ -10800,7 +10854,12 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
     function saveFabState() {
         const s = getSettings();
-        s.ui.floatingPos = { anchor: { ...fabState.anchor }, dock: S.fabState.dock };
+        // 2026-11-10 修（原第 15 条）：这里原来是两个来源混用。
+        // anchor 取自一个早已失效的别名（loadFabState 整个替换了 S.fabState，别名还指着旧对象），
+        // 永远读到初始值 {x:14,y:40}，于是拖完悬浮球、刷新又回左上角；
+        // dock 却取的是新对象，两者不同步，pointercancel 时还会瞬移。
+        // 现在两个字段都从 S.fabState 就地读。
+        s.ui.floatingPos = { anchor: { ...S.fabState.anchor }, dock: S.fabState.dock };
         saveSettings();
     }
 
@@ -10933,7 +10992,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 startY: e.clientY,
                 offsetX: e.clientX - (S.fabState.dock ? rect.left : S.fabState.anchor.x),
                 offsetY: e.clientY - (S.fabState.dock ? rect.top : S.fabState.anchor.y),
-                anchor: { ...fabState.anchor },
+                anchor: { ...S.fabState.anchor },
                 dock: S.fabState.dock,
             };
 
@@ -11491,14 +11550,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const view = captureView();
         body.innerHTML = '';
 
-        // 面板重建后按钮和提示都是新造的，按当前 busy 状态恢复，否则切页回来就像没在忙
-        if (S.busy) {
-            const bb = S.panelEl.querySelector('#eo_busy');
-            if (bb) {
-                bb.textContent = S.busyText;
-                bb.style.display = 'block';
-            }
-        }
+        // 面板重建后按钮和提示都是新造的，按当前 busy 状态恢复，否则切页回来就像没在忙。
+        // 2026-11-10 修（评审 P1-7）：这里原来只写 textContent，把忙碌条里那个
+        // 「放弃等待」按钮一起冲掉了——请求挂住时切个页签，唯一的出路就没了，
+        // 只能刷新页面。改成走 setBusy 重建整块（文字 + 按钮），
+        // 它本来就是造这块内容的唯一入口，不该在别处按半套逻辑拼一遍。
+        // 第二个参数给 true：这次只恢复显示，不要顺带清掉进度列表。
+        if (S.busy) setBusy(true, true);
 
         const context = ctx();
         if (!context) {
@@ -12052,7 +12110,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         } finally {
             d.running = false;
             setBusy(false);
-            endProgress();
+            resetProgress();
         }
     }
 
@@ -12121,7 +12179,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         for (const d of list) {
             step(`采用链「${name}」第 ${d.chain.pos}/${list.length} 个节点`);
             try {
-                await commitDraft(d.id);
+                await commitDraft(d.id, { allowChain: true });
                 done++;
             } catch (e) {
                 error(`采用链「${name}」第 ${d.chain.pos} 个节点失败：`, e);
@@ -13163,7 +13221,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             } finally {
                 btnGo.disabled = false;
                 btnGo.textContent = '生成链骨架';
-                endProgress();
+                resetProgress();
             }
         });
         goRow.appendChild(btnGo);
@@ -13336,6 +13394,51 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         });
         brRow.appendChild(bi);
         body.appendChild(brRow);
+
+        // 额外要求 / 事件目的 / 框架提示（2026-11-10 补）
+        // 起因：查第 8 项时才发现节点编辑器里根本没有这三项的输入框，
+        // 它们只长在单事件页上。而 buildChainNodePrompt 本来就按
+        // extra / goal / promptHint 去读节点参数，读的永远是空值。
+        // 换句话说链模式下这三项既没有入口、也没有输出，用户想给某一环写点具体剧情没有地方写。
+        //
+        // 存法：和单事件页一样存在 cur.prefs 上（extra 有默认值「无」，另两项空着就是没填）。
+        // 为此这里要先把 cur.prefs 建好——原来它在下面「事件参数」那段里才懒创建，
+        // 而那一段要求先选了主类型。这三项不该等主类型，所以在前面就补上。
+        if (!cur.prefs) {
+            cur.prefs = Object.assign(defaultPrefs(), { eventMainType: cur.primary || '' });
+            // 链级难度等级作为这个节点的初值，与下面「事件参数」那段原来的做法一致
+            if (prefs[PREF_LEVEL_ITEM.key]) cur.prefs[PREF_LEVEL_ITEM.key] = prefs[PREF_LEVEL_ITEM.key];
+        }
+
+        {
+            // 注意：「额外要求」这个输入框不用在这里造——renderPrefsBlock 末尾本来就有，
+            // 链节点正是调它渲染参数区的，再加一个就会出现两个一模一样的框（真机上撞到过）。
+            // 这里只补它没有的两项：事件目的、框架提示。
+
+            const goalLab = el('div', 'eo-hint', '事件目的（这一环最终要达成什么，填了会成为硬约束）');
+            body.appendChild(goalLab);
+            const goalIn = el('textarea', 'eo-input eo-textarea');
+            goalIn.rows = 2;
+            goalIn.placeholder = '例如：让玩家在踏查中发现兽崽不是普通野兽，而是被谁放出来的';
+            goalIn.value = cur.prefs.goal || '';
+            goalIn.addEventListener('input', () => {
+                cur.prefs.goal = goalIn.value;
+                persistGenForm();
+            });
+            body.appendChild(goalIn);
+
+            const hintLab = el('div', 'eo-hint', '框架提示（你自己构思的大致框架或想要的桥段）');
+            body.appendChild(hintLab);
+            const hintIn = el('textarea', 'eo-input eo-textarea');
+            hintIn.rows = 2;
+            hintIn.placeholder = '例如：先看羊圈，再顺着足迹进林子，中途被扑一次';
+            hintIn.value = cur.prefs.promptHint || '';
+            hintIn.addEventListener('input', () => {
+                cur.prefs.promptHint = hintIn.value;
+                persistGenForm();
+            });
+            body.appendChild(hintIn);
+        }
 
         // 衔接条件（2026-11-09 危晓）：在「各节点」这里填，不用跑去骨架预览里改。
         // 放到这里的原因是节点数在这一屏就能定，填条件时已经知道有几个节点可以指向。
@@ -13714,10 +13817,16 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             prefs.eventMainType = chosenMain;
             const name = String(nameInput.value || '').trim();
             // 事件名可以留空：留空就由模型根据当前剧情自己起名
-            prefs.extra = String(extraInput.value || '无').trim() || '无';
+            // 2026-11-10 修：这一行原来读 extraInput.value，可 extraInput 是
+            // renderPrefsBlock 里的局部变量，这里在 renderGenPage，根本够不着。
+            // 于是点「开始生成大纲」立刻抛 ReferenceError: extraInput is not defined，
+            // 后面的按钮禁用、忙碌态、真正发起请求全都没执行——表现就是「点了没反应」，
+            // 控制台却能连点出好几条同样的报错（按钮一直没被禁用）。
+            // 那个输入框的 input 事件本来就把值实时写进了 prefs.extra，
+            // 所以这里根本不用再读一次 DOM，直接用 prefs 里的现值。
+            prefs.extra = String(prefs.extra || '无').trim() || '无';
             prefs.goal = String(goalInput.value || '').trim();
             prefs.promptHint = String(hintInput.value || '').trim();
-            if (prefs.goal) log(`本次生成带事件目的（${prefs.goal.length} 字）：${prefs.goal.slice(0, 40)}${prefs.goal.length > 40 ? '…' : ''}`);
             if (prefs.promptHint) log(`本次生成带框架提示（${prefs.promptHint.length} 字）`);
             btnGo.disabled = true;
             btnGo.textContent = '正在生成…';
@@ -15757,7 +15866,38 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         commentMatchesEvent,
         getCharacterBookName,
         collectSheetsFromChat,
+        // 2026-11-10 排障入口（只读，不改任何东西）：
+        // __debugState()      看忙碌、待选、进度这些运行状态；
+        // __chainPrompt(pos)  打印第 pos 个节点最终发出去的提示词全文，
+        //                     用来核对用户填的额外要求 / 目的 / 框架提示是不是各只出现一次。
+        __debugState: () => {
+            const d = S.chainDraft || null;
+            return {
+                busy: S.busy,
+                busyText: S.busyText,
+                pendingRequest: !!S.pendingRequest,
+                activeTab: S.activeTab,
+                progressSteps: (S.progress && S.progress.steps || []).length,
+                hasChainDraft: !!(d && d.chain),
+                chainName: (d && d.chain && d.chain.chain_name) || '',
+                chainNodes: (d && d.chain && Array.isArray(d.chain.nodes)) ? d.chain.nodes.length : 0,
+                nodePrefs: (S.draftPrefs && Array.isArray(S.draftPrefs.__chainNodePrefs))
+                    ? S.draftPrefs.__chainNodePrefs.length : 0,
+            };
+        },
+        __chainPrompt: (pos) => {
+            const d = S.chainDraft;
+            if (!d || !d.chain || !Array.isArray(d.chain.nodes) || !d.chain.nodes.length) {
+                return '（当前没有正在编辑的事件链骨架，先在链页生成一条）';
+            }
+            const n = parseInt(pos, 10) || 1;
+            const prefs = S.draftPrefs || {};
+            try {
+                return buildChainNodePrompt(d.chain, n, prefs, '', '', null);
+            } catch (e) {
+                return '（生成提示词出错：' + (e && e.message || e) + '）';
+            }
+        },
     };
-
     init();
 })();
