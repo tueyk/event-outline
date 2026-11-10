@@ -9,7 +9,7 @@
     'use strict';
 
     const MODULE = 'event_outline';
-    const VERSION = '0.1.6';
+    const VERSION = '0.1.7';
     const ENTRY_PREFIX = '▸事件｜';
     // 待选事件最多留几个：生成不再直接写世界书，草稿得有个上限。
     // 2026-11-10 危晓定：改成可配置，默认 5。上限放在设置页「待选上限」里。
