@@ -1463,23 +1463,27 @@
         const nameLine = named
             ? '   a. 事件名直接用上面给定的名字'
             : '   a. 事件名：你没有收到指定的名字，请根据当前剧情、角色处境和即将发生的事，起一个简洁的中文事件名（4-12 字，如「开膛手杰克案」「石桥镇失踪案」），写进 event_name 键';
-        // 2026-11-07 0C：第 1–5 项按主类型给。
-        // 原先这五项写死在案件流程里，选战斗、探险、谈判的模型照样被要求
-        // 「写出核心真相」「列 5-8 条信息节点」——真机上战斗事件被迫硬凑核心真相就是这个原因。
-        // 现在从 OUTLINE_TYPE_ITEMS 取；表里没有的（将来新加的类型）退回通用说法，
-        // 但不再套用案件措辞。
-        const typeItems = OUTLINE_TYPE_ITEMS[mainTypeLabel] || [
+        // 2026-11-10 批 3 第 15 项：字段清单不再手写，从该类型的 spec 现生成。
+        // 原来手写那份已经和 spec 漂移过一次（spec 是 steps、提示词写 task），
+        // 现在字段名与顺序单一来源是 spec，这里只补中文说明。
+        const typeItems = typeFieldLines(mainTypeLabel);
+        const fallbackItems = typeItems.length ? typeItems : [
             '1. 事件类型：写明本事件属于哪一类',
             '2. 结构：按这个类型自己的机制列字段，内层一律放在 structure 下',
             '3. 角色：列出参与各方及其诉求',
             '4. 推进：写清从开局到结束的分步过程',
             '5. 禁止事项：不得让角色知道其不应知道的信息',
         ];
+        // 2026-11-10 裁定二：spec.rules 接进提示词（when / not_when 不接，那两项已在渲染层与校验层用着）
+        const ruleLines = typeRuleLines(mainTypeLabel);
         return [
             head,
             '0. 事件名（event_name）与事件简介（event_brief，一句话说清这事件要解决什么）',
             nameLine,
-            ...typeItems,
+            ...fallbackItems,
+            // 2026-11-10 裁定二：每类的关键约束贴着自己的字段清单写，
+            // 不并进【硬性要求】——那段是所有类型通用的，混在一起模型分不清哪条属于本类型。
+            ...(ruleLines.length ? ['', ...ruleLines] : []),
             '',
             buildPrefsBlock(prefs),
             '',

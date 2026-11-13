@@ -2637,6 +2637,13 @@
             for (const p of validateSpecMeta(spec, type, type + '.')) problems.push(p);
         }
         for (const p of validateSpecMeta(OUTLINE_SPEC_OTHER, '其他', '其他.')) problems.push(p);
+        // 2026-11-10 裁定二：rules 里出现的 snake_case 标识符必须存在于该类型 spec 的键集合里。
+        // 挂在已有的这个自检上，不新开入口——否则又是一处「定义了但没接上」。
+        // 真出现过的情况：rules 引用了一个拼错或已改名的字段，提示词照抄给模型，
+        // 模型写出来的键校验层不认识，报错却指向模型。
+        for (const p of rulesIdentifierProblems()) {
+            problems.push(`${p.type}.rules 引用了不存在的标识符「${p.ident}」：${String(p.rule).slice(0, 40)}`);
+        }
         if (problems.length) {
             try { warn('[事件大纲] spec 表自检不通过：' + problems.join('；')); } catch (e) { /* 日志没就绪也不影响 */ }
         }
@@ -2644,113 +2651,102 @@
     }
 
     /**
-     * 0C（2026-11-07）：生成提示词的第 1–5 项按主类型给。
+     * 提示词里的中文说明（2026-11-10 批 3 第 15 项）。
      *
-     * 原先这五项是硬编码的案件流程：「核心真相」「信息节点 5-8 条」「助力者/阻碍者/知情者」
-     * 「推进路径」。选了战斗或探险，模型照样被要求写核心真相与信息节点——
-     * 真机上战斗事件被迫硬凑一个核心真相出来，就是这个原因。
+     * 这里只放「怎么写」的话，不再写字段名与编号——
+     * 字段名、顺序、子字段全部由 typeFieldLines() 从 spec 现生成，
+     * 所以新增一个类型只改 spec 一处，提示词自己就跟上了。
      *
-     * 现在按类型分开：有骨架的类型给专属字段说明；没骨架的七类给定稿 §3 列出的字段清单
-     * （虽然还没有专属示例，至少模型知道该写哪些键，而不是照案件的样子硬套）。
-     * 内容来源：docs-repo 的《事件骨架字段与约束规格》§3.1–§3.8 与定稿 §5。
+     * 原来那份 OUTLINE_TYPE_ITEMS 是「1. 步骤 task：每一步写（步骤/地点/时限）…」这种
+     * 字段名和说明混在一行的写法，已经和 spec 漂移过一次
+     * （spec 是 steps，提示词写 task，模型照提示词写、校验层按 steps 找，永远对不上）。
      *
-     * 返回 { items: [...], note: 可选补充说明 }
+     * 键 = 该类型 spec 里的字段名，值 = 该字段的写法说明。
+     * 字段在 spec 里有、这里没写说明的，生成出来就只有字段名本身，不会丢。
      */
-    const OUTLINE_TYPE_ITEMS = {
-        '案件推理': [
-            '1. 事件类型与核心真相：判断本事件属于哪类（案件/谈判/探险/危机/社交博弈/其他），写出核心真相或隐情（仅记录，后续不得直接透露）',
-            '2. 信息节点清单：按发现顺序列 5-8 条，每条含编号（从 1 开始）、类型（物证/证言/环境/时间线/关系）、触发关键词、指向的信息或后果',
-            '   节点字段名固定用：id（编号，数字）、type（类型）、trigger（触发关键词或触发条件）、info（指向的信息或后果）、refute_by（可选，这条是误导时填可推翻它的节点编号数组）',
-            '   注意 refute_by 的用法很容易搞反：它标记的是「这条信息本身有问题，会被哪个节点拆穿」，',
-            '   不是「这条和哪个节点有关」。判断标准是：如果被引用的那个节点出现后，本条信息的结论就要被否定或大改，才写 refute_by；',
-            '   如果被引用节点只是证实、补充、或从另一角度印证本条，那就不写 refute_by，它们之间是普通的前后线索关系。',
-            '   一条正确的推理线索不写 refute_by。整份大纲可以一个 refute_by 都没有（没有误导项时不写）。',
-            '   另外单独输出「推进所需最少信息节点编号」：只列出推理必需的最少节点编号',
-            '3. 参与角色：按立场分类——',
-            '   a. 助力者：每个助力者的动机须各不相同（利益一致/情感羁绊/交易/被迫/其他），并标明是否有条件或代价。同阵营且利益一致者可以无条件；交易或被迫者须写明代价。按实际情况判断，不要为所有助力者统一附加条件',
-            '   b. 阻碍者：会阻止玩家推进，其阻碍理由须合理且可被化解',
-            '   c. 知情者/关键人物：掌握核心信息，不会无理由主动交出；其信息只能经由信息节点清单中的条目逐步获得',
-            '   d. 幕后方（如有）：标记 reveal: forbidden，暴露路径只能经由信息节点清单逐步指向',
-            '4. 推进路径：从开局到结局的分步逻辑链，注明哪些节点是必经、哪些可跳过；并按"危险程度"标注每个高风险节点的失败后果（如受伤/被俘/死亡/失去关键信息）',
-            '5. 禁止事项：不得新增清单外信息节点、不得提前揭示核心真相、不得让角色知道其不应知道的信息',
-        ],
-        '战斗冲突': [
-            '1. 敌方编制 enemy_forces：每一项写 name（名称）、strength（兵力）、level（等级）、tactic（战术）、morale（士气）。没有敌人就不叫战斗，这一项必须有',
-            '2. 战斗目标 objectives：每一项写 name（名称）、type（守住/突破/护送/拖延/歼灭）、condition（达成条件）、fail（失败后果）。',
-            '   condition 要写成可判断的客观状态（「玩家站住脚且没被撞倒」），不要写「表现良好」这种主观话；',
-            '   fail 必须写，模型要据此判断「已失败」而不是「未达成」',
-            '3. 地形 terrain：写 cover（掩体）、elevation（高低差）、chokepoint（狭窄处）、note（备注）。哪怕是一片平地也要写一句，地形影响走位与掩体',
-            '   注意：天气、地形、路况都写进 terrain，不要把它们塞进 enemy_forces——那里只放会主动对抗的东西',
-            '4. 事先准备 preparation（有准备阶段时才写）：五项 supplies（物资）、traps（陷阱）、intel（情报）、allies（盟友）、depart_time（出发时间），要么五项都写，要么整块不写',
-            '5. 可选三块：reinforcements（援军，写波次与到达时间）、retreat（撤退，写条件与代价）、casualty（伤亡与俘虏）。没有就不写，不要为凑数硬编',
-            '   禁止事项：不要让角色知道其不应知道的信息；不要让敌人做出与其战术、士气不符的行为',
-        ],
-        '谈判交涉': [
-            '1. 各方立场 parties：每一方写（诉求/底线/可让步/不可让步）四件事。至少两方，否则不叫谈判',
-            '2. 筹码 leverage：每个筹码写（筹码/来源/可信度）三件事。可信度决定对方买不买账',
-            '3. 中间人 intermediaries：写姓名、立场、能做什么。没有中间人就整块不写',
-            '4. 轮次 rounds：每一轮写（轮次/破裂点/冷却）三件事，轮次从 1 连续编号。',
-            '   破裂点是「这一轮谈崩」的条件，不是事件整体的超时后果——后者写在外层 time_pressure.timeout_result',
-            '5. 协议 agreement：写（达成条件/草签后果）两件事。至少一方要让利，全是得利的一方不叫谈判',
-            '   禁止事项：不得让某一方无条件接受全部要求；不得提前揭示对方的底线',
-        ],
-        '探险探索': [
-            '1. 地点 sites：每个地点写（地点/机关/守卫/补给）四件事，并给每处编 id（从 1 连续），后面 route 要用编号引用',
-            '2. 路线 route：写（节点编号/路线描述/是否必经/风险/失败后果）。只能引用 sites 里存在的编号',
-            '3. 危险 hazards：每种危险写（种类/触发条件/后果）三件事。危险要能在现场被发现，不能只在事后才知道',
-            '4. 发现 discoveries：每个发现写（发现物/触发条件）两件事。发现是这类型的核心回报，不能一个都没有',
-            '5. 出口 exit：写撤离条件。这是「什么算出去了」，与外层 time_pressure 的「多久内」不是一回事',
-            '   禁止事项：不得让玩家不探索就拿到发现；不得出现大纲外的新地点',
-        ],
-        '生存危机': [
-            '1. 资源 resources：写五项——water（水）、food（食）、medicine（药）、fire（火）、stamina（体力）。这五项是封闭清单，不要自加',
-            '2. 环境 environment：写 weather（天气）、terrain（地形）、visibility（能见度）三件事',
-            '3. 威胁 threats：每一波写（波次/强度/间隔）三件事。间隔可以写「每隔两小时」这种自然语言，不必是纯数字',
-            '4. 避难所 shelters：每个避难所写名称与可获得的东西。避难所要有代价（比如能挡风但会被发现）',
-            '5. 时间窗口 time_window：写 start（从什么时候开始）、end（到什么时候结束）、duration（持续多久）、note（这个窗口里会发生什么）。',
-            '   允许用自然语言（「入夜后第一声钟」），不要求填数字',
-            '   禁止事项：不得让资源凭空出现；不得让威胁在有光、有声的条件下完全不被察觉',
-        ],
-        '社交博弈': [
-            '1. 阵营 factions：每一方写（立场/诉求/把柄）三件事，并给每方编 id（从 1 连续）。把柄是这类型的核心，没有把柄就没有博弈',
-            '2. 场合 occasions：写宴会/庭审/葬礼这类具体场合。场合决定了谁能出场、能说什么话',
-            '3. 人情 favours：写谁欠谁、欠什么。人情要是能被兑现或被赖掉的，不能只是背景设定',
-            '4. 传言 rumours：每条写（源/扩散）。源如果要指向某个阵营，用 factions 里的编号',
-            '5. 声望 reputation：写观感如何变化——做什么会升、做什么会降',
-            '   禁止事项：不得让 NPC 无理由地相信玩家；不得让某个阵营同时拥有人格魅力与绝对武力',
-        ],
-        '日常杂务': [
-            '1. 步骤 task：每一步写（步骤/地点/时限）三件事。这类是低结构、低风险，步骤控制在 1-3 步，不要写成大冒险',
-            '2. 交付 deliverable：写交付物与验收标准两件事。验收要能当场判定，不能靠事后追认',
-            '3. 变数 complications：写可能出岔子的小事。变数应该有幽默感或生活气息，不是致命威胁',
-            '4. 道德岔口 moral：写有没有需要选择的地方。没有也照实写「无」，不要硬造',
-            '5. 委托关系写在外层 contract（谁委托、代价是什么），不要塞进 structure',
-            '   禁止事项：不要把这类事件升级成生死危机；不要让杂务牵扯进主线阴谋',
-        ],
-        '禁忌秘辛': [
-            '1. 禁忌 taboo：一句话说清「什么不能说、不能做」。必须是具体的，不能是「有些事不能说」这种空话',
-            '2. 知情者 knowers：每个知情者写（知情者/沉默原因）两件事。沉默原因要站得住（恐惧、利益、承诺、无知之罪），不能只是「他不肯说」',
-            '3. 代价 cost：触碰禁忌要付出什么。代价应该是即时的、可感知的，不是「以后会倒霉」',
-            '4. 掩盖 cover_up：写掩盖手段。手段要留下痕迹，玩家才有得查',
-            '5. 破禁 breaking 与后果 consequences：写破禁条件与爆发后果两件事。后果要与禁忌本身的重量相称',
-            '   禁止事项：不得提前揭示禁忌内容；不得让知情者无缘无故主动开口',
-        ],
-        'NSFW': [
-            '1. 边界 boundaries：写清本次的尺度与红线。边界必须在生成时就定下来，不能在剧情里临时放宽',
-            '2. 意愿 consent：写清各方的意愿状态。任何一方的不自愿都不能被叙述成自愿',
-            '3. 场景 scenes：写场景与推进顺序。每一场要有明确的开始与结束，不做无休止的流水账',
-            '4. 退出 exit：写任意一方中止的条件。中止必须被尊重，不能写成「欲拒还迎」',
-            '5. 禁止事项：不得越过第 1 项写下的边界；不得把不自愿描写成自愿；不得在未成年角色上使用本类型',
-        ],
-        '其他': [
-            '1. 目标 goal：这个事件最终要达成什么。一句话说清，不要写成流程说明',
-            '2. 障碍 obstacles：列出会挡路的因素。每一条都要具体到「谁、因为什么、怎么挡」',
-            '3. 资源 resources：玩家手上有什么可用的东西。包括物品、信息、人脉',
-            '4. 变数 variables：列出会让局面变化的东西（倒计时、好感、某人的状态），每条写名称、类型、影响',
-            '5. 失败代价 failure_cost 与相关方 stakeholders：失败要付出什么；牵涉到谁、各自想要什么',
-            '   禁止事项：不得照搬案件的信息节点或战斗的战斗目标；这个事件如果要分阶段，写在外层 structure.phases 里（最多 3 段）',
-        ],
+    const OUTLINE_TYPE_ITEMS_HINT = {
+        '案件推理': {
+            core_truth: '判断本事件属于哪类，写出核心真相或隐情（仅记录，后续不得直接透露）',
+            nodes: '按发现顺序列 5-8 条。refute_by 很容易搞反：它标记的是「这条信息本身有问题、会被哪个节点拆穿」，'
+                + '不是「这条和哪个节点有关」。判断标准是：被引用的节点出现后，本条结论要被否定或大改才写；'
+                + '只是证实、补充、从另一角度印证就不写。一条正确的线索不写 refute_by，整份大纲可以一个都没有',
+            min_nodes_for_deduction: '只列出推理必需的最少节点编号',
+            suspects: '每人写动机、不在场、谎言三项，各自不能为空',
+            characters: '按立场分：助力者（动机各不相同，标明是否有条件或代价；同阵营且利益一致者可无条件，交易或被迫者须写代价）、'
+                + '阻碍者（阻碍理由须合理且可化解）、知情者（不会无理由主动交出，信息只能经信息节点逐步获得）、'
+                + '幕后方（标记 reveal: forbidden，暴露路径只能经信息节点逐步指向）',
+            paths: '从开局到结局的分步逻辑链，注明哪些必经、哪些可跳过，并按危险程度标注高风险节点的失败后果',
+        },
+        '战斗冲突': {
+            enemy_forces: '没有敌人就不叫战斗，这一项必须有',
+            objectives: 'condition 要写成可判断的客观状态（「玩家站住脚且没被撞倒」），不要写「表现良好」这种主观话；'
+                + 'fail 必须写，模型要据此判断「已失败」而不是「未达成」',
+            terrain: '哪怕是一片平地也要写一句，地形影响走位与掩体。'
+                + '天气、地形、路况都写进 terrain，不要塞进 enemy_forces——那里只放会主动对抗的东西',
+            preparation: '有准备阶段时才写；要么五项都写，要么整块不写',
+            reinforcements: '写波次与到达时间',
+            retreat: '写条件与代价',
+            casualty: '伤亡与俘虏',
+        },
+        '谈判交涉': {
+            parties: '至少两方，否则不叫谈判',
+            leverage: '可信度决定对方买不买账',
+            intermediaries: '写姓名、立场、能做什么。没有中间人就整块不写',
+            rounds: '轮次从 1 连续编号。破裂点是「这一轮谈崩」的条件，不是事件整体的超时后果——'
+                + '后者写在外层 time_pressure.timeout_result',
+            agreement: '至少一方要让利，全是得利的一方不叫谈判',
+        },
+        '探险探索': {
+            sites: '每个地点给编 id（从 1 连续），后面 route 要用编号引用',
+            routes: '只能引用 sites 里存在的编号',
+            hazards: '危险要能在现场被发现，不能只在事后才知道',
+            discoveries: '发现是这类型的核心回报，不能一个都没有',
+            exit: '写撤离条件。这是「什么算出去了」，与外层 time_pressure 的「多久内」不是一回事',
+        },
+        '生存危机': {
+            resources: '五项是封闭清单，不要自加',
+            environment: '写天气、地形、能见度三件事',
+            threats: '间隔可以写「每隔两小时」这种自然语言，不必是纯数字',
+            shelters: '每个避难所写名称与可获得的东西。避难所要有代价（比如能挡风但会被发现）',
+            time_window: '允许用自然语言（「入夜后第一声钟」），不要求填数字',
+        },
+        '社交博弈': {
+            factions: '给每方编 id（从 1 连续）。把柄是这类型的核心，没有把柄就没有博弈',
+            occasions: '写宴会/庭审/葬礼这类具体场合。场合决定了谁能出场、能说什么话',
+            favours: '写谁欠谁、欠什么。人情要是能被兑现或被赖掉的，不能只是背景设定',
+            rumours: '源如果要指向某个阵营，用 factions 里的编号',
+            reputation: '写观感如何变化——做什么会升、做什么会降',
+        },
+        '日常杂务': {
+            steps: '这类是低结构、低风险，步骤控制在 1-3 步，不要写成大冒险',
+            deliverable: '验收要能当场判定，不能靠事后追认',
+            complications: '写可能出岔子的小事，应该有幽默感或生活气息，不是致命威胁',
+            moral: '没有也照实写「无」，不要硬造道德困境',
+        },
+        '禁忌秘辛': {
+            taboo: '一句话说清「什么不能说、不能做」。必须是具体的，不能是「有些事不能说」这种空话',
+            knowers: '沉默原因要站得住（恐惧、利益、承诺、无知之罪），不能只是「他不肯说」',
+            cost: '代价应该是即时的、可感知的，不是「以后会倒霉」',
+            cover_up: '手段要留下痕迹，玩家才有得查',
+            breaking: '写破禁条件与爆发后果',
+            consequences: '后果要与禁忌本身的重量相称',
+        },
+        'NSFW': {
+            boundaries: '写清本次的尺度与红线。边界必须在生成时就定下来，不能在剧情里临时放宽',
+            consent: '写清各方的意愿状态。任何一方的不自愿都不能被叙述成自愿',
+            scenes: '写场景与推进顺序。每一场要有明确的开始与结束，不做无休止的流水账',
+            exit: '写任意一方中止的条件。中止必须被尊重，不能写成「欲拒还迎」',
+        },
+        '其他': {
+            goal: '这个事件最终要达成什么。一句话说清，不要写成流程说明',
+            obstacles: '每条都要具体到「谁、因为什么、怎么挡」',
+            resources: '包括物品、信息、人脉',
+            variables: '列出会让局面变化的东西（倒计时、好感、某人的状态），每条写名称、类型、影响',
+            failure_cost: '失败要付出什么',
+            stakeholders: '牵涉到谁、各自想要什么',
+        },
     };
+
 
     /**
      * M7（2026-11-07）：把用户自定义的类型名解析成「它该用哪个内置主类型的骨架」。
@@ -2800,6 +2796,132 @@
         if (resolved === '其他') return OUTLINE_SPEC_OTHER;
         return OUTLINE_SPEC_BY_TYPE[resolved] || null;
     }
+
+    /**
+     * 2026-11-10 批 3 第 15 项：从 spec 生成提示词里的字段清单。
+     *
+     * 为什么要有它：同一类型的定义原来散在三处——spec（校验与渲染）、
+     * OUTLINE_TYPE_ITEMS（提示词）、骨架（示例）。已经漂过一次：
+     * spec 里日常杂务的进度字段是 steps，提示词里却写着「步骤 task」，
+     * 模型照着提示词写 task，校验层按 steps 找，结果永远对不上。
+     * 现在字段名与顺序一律由 spec 给，表里只留中文说明，新增类型只改 spec 一处。
+     *
+     * 输出形如：
+     *   1. 步骤 steps：每一步写 step（序号）、what（这一步做什么）、where（在哪做）、deadline（什么时候前做完）
+     * 冒号后面那段中文说明来自 OUTLINE_TYPE_ITEMS_HINT，没有就只写字段名。
+     */
+    function typeFieldLines(mainType) {
+        const spec = specOfType(mainType);
+        if (!spec) return [];
+        const hints = (typeof OUTLINE_TYPE_ITEMS_HINT !== 'undefined' && OUTLINE_TYPE_ITEMS_HINT[mainType]) || {};
+        const out = [];
+        // 字段顺序：spec.order 优先，其余按 required → optional 的声明顺序补齐
+        const ordered = [];
+        const seen = new Set();
+        for (const k of (spec.order || [])) {
+            if (!seen.has(k) && ((spec.required && spec.required[k]) || (spec.optional && spec.optional[k]))) {
+                ordered.push(k); seen.add(k);
+            }
+        }
+        for (const grp of ['required', 'optional']) {
+            for (const k of Object.keys(spec[grp] || {})) {
+                if (!seen.has(k)) { ordered.push(k); seen.add(k); }
+            }
+        }
+        ordered.forEach((key, i) => {
+            const meta = (spec.required && spec.required[key]) || (spec.optional && spec.optional[key]) || {};
+            const subs = subFieldNames(meta);
+            const cn = hintLabelOf(key);
+            const subText = subs.length ? `（${subs.join('、')}）` : '';
+            const hint = hints[key] ? `：${hints[key]}` : '';
+            out.push(`${i + 1}. ${cn} ${key}${subText}${hint}`);
+        });
+        return out;
+    }
+
+    /** 取一个字段声明下的子字段名（列表项的 item、map 的 keys） */
+    function subFieldNames(meta) {
+        if (!meta || typeof meta !== 'object') return [];
+        if (meta.item && typeof meta.item === 'object') return Object.keys(meta.item);
+        if (Array.isArray(meta.keys)) return meta.keys.slice();
+        return [];
+    }
+
+    /** 字段名的中文标签；没有就退回英文本身 */
+    function hintLabelOf(key) {
+        if (typeof labelOf === 'function') {
+            const t = labelOf(key);
+            if (t && t !== key) return t;
+        }
+        return key;
+    }
+
+    /**
+     * 2026-11-10 批 3 第 15 项（裁定二）：把 spec.rules 接进提示词。
+     *
+     * 为什么不接 when / not_when：那两项已经在渲染层与校验层用着，
+     * 再塞进提示词是重复；rules 是每类的关键约束，之前只存在 spec 里，白放着。
+     */
+    function typeRuleLines(mainType) {
+        const spec = specOfType(mainType);
+        const rules = (spec && Array.isArray(spec.rules)) ? spec.rules : [];
+        return rules.map(r => `- ${r}`);
+    }
+
+    /**
+     * 裁定二的自检：rules 里出现的 snake_case 标识符必须存在于该类型 spec 的键集合里。
+     * 挂在已有的 selfCheckSpecMeta() 上，不新开检查入口——
+     * 否则又是一处「定义了但没接上」，正是本轮反复出现的那类问题。
+     *
+     * 返回 [{type, rule, ident}]，空数组表示全部命中。
+     */
+    function rulesIdentifierProblems() {
+        const problems = [];
+        const types = Object.keys(OUTLINE_SPEC_BY_TYPE || {});
+        if (OUTLINE_SPEC_OTHER) types.push('其他');
+        for (const t of types) {
+            const spec = t === '其他' ? OUTLINE_SPEC_OTHER : OUTLINE_SPEC_BY_TYPE[t];
+            if (!spec || !Array.isArray(spec.rules)) continue;
+            const valid = specKeySet(spec, t);
+            for (const rule of spec.rules) {
+                const ids = String(rule || '').match(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g) || [];
+                for (const id of ids) {
+                    if (!valid.has(id)) problems.push({ type: t, rule, ident: id });
+                }
+            }
+        }
+        return problems;
+    }
+
+    /** 一份 spec 里出现过的全部键名（含子字段、keys 列表、ref 目标、progress 字段、外层键） */
+    function specKeySet(spec, mainType) {
+        const set = new Set();
+        const addMeta = (meta) => {
+            if (!meta || typeof meta !== 'object') return;
+            if (meta.item && typeof meta.item === 'object') Object.keys(meta.item).forEach(k => set.add(k));
+            if (Array.isArray(meta.keys)) meta.keys.forEach(k => set.add(k));
+            if (meta.ref) set.add(String(meta.ref).split('.')[0]);
+        };
+        for (const grp of ['required', 'optional']) {
+            for (const [k, meta] of Object.entries(spec[grp] || {})) {
+                set.add(k);
+                addMeta(meta);
+            }
+        }
+        if (spec.progress && spec.progress.field) set.add(spec.progress.field);
+        // 外层键也是合法的引用目标（rules 里可能写 time_pressure.timeout_result 这类）
+        for (const k of ['event_name', 'event_brief', 'event_type', 'time_pressure', 'danger',
+            'forbidden', 'structure', 'contract']) {
+            set.add(k);
+        }
+        // time_pressure / danger 的子键也认，否则「time_pressure.timeout_result」会被误报
+        for (const k of ['countdown', 'duration', 'timeout_result', 'delay_cost',
+            'lethality', 'failure', 'tolerance', 'threat_source']) {
+            set.add(k);
+        }
+        return set;
+    }
+
 
     /** M6.3：收集一份 spec 里所有声明了 refable 的列表名 → 它们的 id 前缀 */
     function refableNamesOf(spec) {

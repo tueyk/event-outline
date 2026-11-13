@@ -169,18 +169,24 @@
 
             // 传了事件对象就重新定位：世界书可能被别的插件重排过 uid，
             // 记下的编号未必还指着自己那条，照着旧编号写会覆盖别人的条目。
+            //
+            // 2026-11-10 修（评审 P1-8）：记下的编号认不出来时，原来会把 existingUid 原样留着，
+            // 后面只要那个编号上还是一条 ▸事件 条目，就照样覆盖写入——那条可能是别人的。
+            // 认不出来就该老老实实当新增：多一条看得见、删得掉；顶掉别人的条目是静默丢内容。
             if (event) {
                 const found = findEventEntryUid(data, event);
-                if (found != null && String(found) !== String(existingUid)) {
-                    warn(`事件「${event.name}」的条目位置变了：记录 uid=${existingUid}，实际 uid=${found}，按实际位置写入`);
+                if (found != null) {
+                    if (String(found) !== String(existingUid)) {
+                        warn(`事件「${event.name}」的条目位置变了：记录 uid=${existingUid}，实际 uid=${found}，按实际位置写入`);
+                    }
                     uid = found;
-                } else if (found != null) {
-                    uid = found;
+                } else {
+                    if (existingUid != null) {
+                        warn(`事件「${event.name}」的记录 uid=${existingUid} 已认不出来（名字或对话对不上），本次按新增处理，不覆盖那个编号上的内容`);
+                    }
+                    uid = null;
                 }
             }
-
-            // 「往前挪」对已有条目同样成立（2026-11-04）：order 改成设置里的值，老的 ▸事件 条目
-            // 不能因为设置变了就永远停在旧的 100。只拨 order，位置、深度、概率一个都不碰——
             // 那几项用户可能在酒馆界面里手动调过，扩展没资格覆盖。
             const wantOrder = eventOrderValue();
             for (const [k, e] of Object.entries(data.entries)) {
@@ -191,18 +197,22 @@
                 }
             }
 
+            let wasUpdate = false;
             if (uid != null && data.entries[uid] &&
                 String(data.entries[uid].comment || '').startsWith(ENTRY_PREFIX)) {
                 data.entries[uid].content = content;
                 data.entries[uid].comment = comment;
                 data.entries[uid].constant = true;
+                wasUpdate = true;
             } else {
                 uid = nextUid(data);
                 data.entries[uid] = buildEntry(uid, content, comment);
             }
 
             await writeWorldBook(bookName, data);
-            log(`世界书已写入「${bookName}」：${existingUid != null ? '更新' : '新增'}条目 uid=${uid}，正文 ${String(content).length} 字`);
+            // 更新还是新增，看实际走了哪条路，不看传进来的值：
+            // 传了记录但认不出来时会按新增走，那时说「更新」是错的。
+            log(`世界书已写入「${bookName}」：${wasUpdate ? '更新' : '新增'}条目 uid=${uid}，正文 ${String(content).length} 字`);
             debug(`世界书写入明细：条目总数 ${Object.keys(data.entries).length}，本次改动 uid=${uid}`);
 
             // 回读校验
@@ -211,22 +221,58 @@
             if (!check.ok) {
                 // 明细（含 uid）只进日志；界面上说「有别的条目被改动」就够，uid 用户不认识
                 error(`世界书写后校验失败：${check.reason}`);
-                throw new Error('世界书写后校验失败：有其他条目内容被改动，已中止本次写入');
+                // 2026-11-10 修（评审 P1-9）：抛出前把 uid 挂到错误上。
+                // 内容这时已经真的写进世界书了，说「已中止」是假的——它没中止，是写完了才发现别处被动了。
+                // 挂上 uid 让调用方能记账：不记的话，这本书里留着一条内容正确、
+                // 扩展却不知道属于谁的事件条目，下次采用会在旁边再写一条重复的。
+                const err = new Error('世界书写后校验失败：有其他条目内容被改动。本次内容已写入世界书，请先刷新页面检查再决定是否保留');
+                err.uid = uid;
+                err.written = true;
+                throw err;
             }
             if (!after.entries[uid] || String(after.entries[uid].content || '') !== String(content)) {
                 error(`世界书回读内容不一致：uid=${uid}，期望 ${String(content).length} 字，实际 ${String((after.entries[uid] || {}).content || '').length} 字`);
-                throw new Error('世界书写后回读内容不一致');
+                const err = new Error('世界书回读内容不一致：条目已写入，但内容与预期不符，请刷新页面核对');
+                err.uid = uid;
+                err.written = true;
+                throw err;
             }
-            debug(`世界书写后校验通过：uid=${uid}，其余 ${Object.keys(foreignBefore).length} 条外部条目零变化`);
 
             return { uid };
         });
     }
 
-    async function deleteEventEntry(bookName, uid) {
+    /**
+     * 删除路径的唯一实现。定位、复核、删除三步必须在同一把锁里：
+     * 先读出来找 uid、再另起一次写，中间隔着一次 await，别人动了世界书就可能删错条目。
+     * 2026-11-10 修（评审 P1-8 / 本方案第 10 项）：
+     *   - 传了 event 时按名字+对话现查，并且再复核一次 commentMatchesEvent——
+     *     findEventEntryUid 的判定口径可能与删除要求不同，删之前必须确认它就是自己那条；
+     *   - 只传 uid 时（测试条目清理）按 uid 删，仍校验 ▸事件 前缀。
+     */
+    async function deleteEventEntryLocked(bookName, uidOrEvent) {
         return withWriteLock(async () => {
             const data = await readWorldBook(bookName);
             if (!data || !data.entries) throw new Error('世界书数据无效');
+
+            let uid;
+            let expectedEvent = null;
+            if (uidOrEvent && typeof uidOrEvent === 'object') {
+                const event = uidOrEvent;
+                const found = findEventEntryUid(data, event);
+                if (found == null) {
+                    warn(`事件「${event.name}」在世界书里找不到对应条目，跳过删除`);
+                    return { deleted: false, reason: '条目不存在' };
+                }
+                if (String(event.entryUid) !== String(found)) {
+                    warn(`事件「${event.name}」的条目位置与记录不符：记录 uid=${event.entryUid}，实际 uid=${found}，按实际位置删除`);
+                }
+                uid = found;
+                expectedEvent = event;
+            } else {
+                uid = uidOrEvent;
+            }
+
             const entry = data.entries[uid];
             if (!entry) {
                 warn(`删除条目 uid=${uid} 时发现它已不存在，可能已被别处删过`);
@@ -236,35 +282,61 @@
                 error(`拒绝删除 uid=${uid}：注释「${entry.comment}」不是本扩展创建的条目`);
                 throw new Error('拒绝删除：该条目不是本扩展创建的');
             }
+            if (!String(entry.comment || '').startsWith(ENTRY_PREFIX)) {
+                error(`拒绝删除 uid=${uid}：注释「${entry.comment}」不是本扩展创建的条目`);
+                throw new Error('拒绝删除：该条目不是本扩展创建的');
+            }
+            // 复核这一条到底是不是它自己的（评审原第 8 条要求）。
+            // 注意判定口径要和 findEventEntryUid 一致：那个函数允许两种命中——
+            //   · 事件名 + chatId 都对上；或
+            //   · 条目极老、没写 chatId，靠事件名唯一认出（它的第 4 步）。
+            // 所以这里不能一律要求 chatId 匹配：那就把「名字对、没写 chatId」的老条目判成别人，
+            // 永远删不掉，收尾后它留在世界书里没人认领。
+            // 只在明确对不上时拒绝：名字不同，或双方都写了 chatId 却不是同一个。
+            if (expectedEvent) {
+                const cName = commentNameOf(entry.comment);
+                const nameOk = !expectedEvent.name || cName === String(expectedEvent.name);
+                const entryChat = (String(entry.comment || '').match(/chatId=([^｜|]*)/) || [])[1];
+                const wantChat = expectedEvent.chatId == null ? '' : String(expectedEvent.chatId);
+                const chatOk = !entryChat || !wantChat || String(entryChat).trim() === wantChat;
+                if (!nameOk || !chatOk) {
+                    error(`拒绝删除 uid=${uid}：条目注释「${entry.comment}」与事件「${expectedEvent.name}」对不上（${!nameOk ? '名字不同' : '对话不同'}）`);
+                    throw new Error('拒绝删除：世界书里这一条不是该事件的条目');
+                }
+            }
+
             const foreignBefore = snapshotForeignEntries(data);
+            const beforeCount = Object.keys(data.entries).length;
             delete data.entries[uid];
             await writeWorldBook(bookName, data);
             const after = await readWorldBook(bookName);
+            if (after && after.entries && after.entries[uid]) {
+                // 写回成功但条目还在，说明这次删除没落盘，不能报成功
+                error(`删除回读校验失败：uid=${uid} 写入后仍然存在，删除未生效`);
+                throw new Error('删除后回读校验失败：条目仍在世界书里，请刷新页面确认');
+            }
             const check = verifyForeignEntriesUnchanged(foreignBefore, after);
             if (!check.ok) {
                 error(`删除后校验失败：${check.reason}`);
                 throw new Error('删除后校验失败：有其他条目内容被改动，已中止本次删除');
             }
-            log(`世界书已删除事件条目 uid=${uid}，退回 ${Object.keys(foreignBefore).length} 条外部条目`);
+            log(`世界书已删除事件条目 uid=${uid}，退回 ${Object.keys(foreignBefore).length} 条外部条目（总条目 ${beforeCount} → ${Object.keys((after && after.entries) || {}).length}）`);
             return { deleted: true };
         });
+    }
+
+    /** 按 uid 删本扩展的条目（测试条目清理等）。 */
+    async function deleteEventEntry(bookName, uid) {
+        return deleteEventEntryLocked(bookName, uid);
     }
 
     /**
      * 删掉某个事件在世界书里的条目，位置由 findEventEntryUid 现查，
      * 不信 event.entryUid——它可能已经被别的插件重排成了别人的编号。
+     * 定位与删除在同一把锁内完成，见 deleteEventEntryLocked。
      */
     async function deleteEventEntryForEvent(bookName, event) {
-        const data = await readWorldBook(bookName);
-        const found = findEventEntryUid(data, event);
-        if (found == null) {
-            warn(`事件「${event.name}」在世界书里找不到对应条目，跳过删除`);
-            return { deleted: false, reason: '条目不存在' };
-        }
-        if (String(event.entryUid) !== String(found)) {
-            warn(`事件「${event.name}」的条目位置与记录不符：记录 uid=${event.entryUid}，实际 uid=${found}，按实际位置删除`);
-        }
-        return deleteEventEntry(bookName, found);
+        return deleteEventEntryLocked(bookName, event);
     }
 
     /**
@@ -316,6 +388,38 @@
             }
         }
         return out;
+    }
+
+
+    /**
+     * 2026-11-10 批 3 第 17 项：当前对话的可读标识。
+     *
+     * 事件存档存在 chatMetadata 里，天然跟着对话走——换对话不会串数据。
+     * 但面板上写「进行中：某某事件」时没说这事件是哪段对话里开的，
+     * 用户从别的对话切回来、或者开了两个窗口，就看不出手里这个事件的出处。
+     * 长期口径已定（裁定一）为「新增数据一律按对话隔离」，这一条是不改结构前提下先给出的可见性。
+     *
+     * 返回形如 { id, label }：id 是 chatId 原值，label 是给人看的短名。
+     * 拿不到就返回 { id:'', label:'未知对话' }，不抛异常——面板不能因为这个挂掉。
+     */
+    function currentChatTag() {
+        const context = ctx();
+        if (!context) return { id: '', label: '未知对话' };
+        const id = context.chatId == null ? '' : String(context.chatId);
+        // 优先角色名 + 文件名：ST 的 chatId 是一串不透明的标识，单看它用户认不出是哪个对话
+        const chars = context.characters || [];
+        const chid = context.characterId;
+        const chName = (chid != null && chars[chid] && (chars[chid].name || '')) || '';
+        // fileName 形如「角色名 - 2026-11-10@20时30分.jsonl」，只去扩展名、不去时间戳：
+        // 用正则切时间戳依赖文件名的具体格式，ST 换个写法就切错，宁可多显示一段也不切坏。
+        // 拿到角色名与文件名就用「角色名 · 文件名」，缺一个时用另一个，都没有就退回归档 id 末 6 位。
+        const chatFile = String(context.chatMetadata && context.chatMetadata.file_name || '');
+        let label;
+        if (chName && chatFile) label = `${chName} · ${chatFile.replace(/\.jsonl?$/i, '')}`;
+        else if (chName) label = chName;
+        else if (chatFile) label = chatFile.replace(/\.jsonl?$/i, '');
+        else label = id ? `对话 ${id.slice(-6)}` : '当前对话';
+        return { id, label };
     }
 
     function getCharacterBookName() {

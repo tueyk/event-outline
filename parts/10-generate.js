@@ -260,6 +260,8 @@
     /** 极简 YAML 解析：覆盖大纲实际会出现的结构（2-4 层映射与列表） */
     function parseSimpleYaml(text) {
         const rawLines = String(text || '').replace(/\r/g, '').split('\n');
+        // 撞名的键收集在这里，解析完挂在返回对象上（不可枚举，不影响遍历与序列化）
+        const duplicateKeys = [];
 
         // 去注释：只有引号外、且前面是空白或行首的 # 才算注释
         const stripComment = (s) => {
@@ -299,27 +301,83 @@
             return t;
         };
 
-        // 预扫描：把有效行整理成 {indent, text}
-        const lines = [];
-        for (const raw of rawLines) {
-            const s = stripComment(raw);
-            if (!s.trim()) continue;
-            const trimmed = s.trim();
-            if (trimmed === '---' || trimmed === '...') continue;
-            lines.push({ indent: s.length - s.trimStart().length, text: trimmed });
-        }
+        // 键值切分：半角冒号与全角冒号都认（P1-11）。
+        // 模型偶尔把分隔符写成「事件名：甲」，原来只找半角冒号，整行被跳过、最终解析成空对象，
+        // 界面只报「外层键缺失」，根本看不出是写法没认。全角冒号后面允许没有空格。
+        // 返回 null 表示这行不是键值行；否则给 {key, value}，value 已去掉首尾空白。
+        const splitKeyValue = (text) => {
+            const s = String(text || '');
+            let idx = -1;
+            let sepLen = 1;
+            for (let i = 0; i < s.length; i++) {
+                const ch = s[i];
+                if (ch === ':') { idx = i; sepLen = 1; break; }
+                if (ch === '：') { idx = i; sepLen = 1; break; }
+            }
+            if (idx <= 0) return null;
+            const key = s.slice(0, idx).trim();
+            if (!key) return null;
+            return { key, value: s.slice(idx + sepLen).trim() };
+        };
 
-        // 块标量（| 或 >）的后续行必须以原样保留缩进与空行，不能走上面的通用预处理。
-        // 先标记出哪些行属于块标量正文，后面统一跳过。
-        const isBlockHeader = (t) => /^[|>][+-]?\d*$/.test(t) || /^[|>][+-]?$/.test(t);
-        const blockBody = new Array(lines.length).fill(false);
-        for (let i = 0; i < lines.length; i++) {
-            const kv = lines[i].text.match(/^[^:]+:\s*([|>][+-]?)\s*$/);
-            if (!kv) continue;
-            const baseIndent = lines[i].indent;
-            for (let j = i + 1; j < lines.length; j++) {
-                if (lines[j].indent <= baseIndent) break;
-                blockBody[j] = true;
+        // 预扫描要分两段做，因为块标量（| 或 >）的正文在语义上是纯文本：
+        // 里面的空行、以 # 开头的行都是内容，不是格式。
+        // 原来的写法是先对所有行统一去注释、丢空行，之后再去找块标量区间——
+        // 那时候正文已经被改成一行行了，保护等于没做（那段的注释说「要原样保留」，代码里没接）。
+        // 现在先按原始行划出块标量区间，区间内原样收进 lines，区间外才走去注释与丢空行。
+        const lines = [];
+
+        // 块标量标记：| 或 >，可带 +/- 与数字
+        const isBlockMarkerText = (v) => /^[|>][+-]?\d*$/.test(String(v || '').trim());
+        // 一行是否是「键: |」或「键: >」这类块标量头（也认全角冒号）
+        const blockHeaderOf = (rawText) => {
+            const kv = splitKeyValue(rawText);
+            if (!kv) return null;
+            return isBlockMarkerText(kv.value) ? kv.value : null;
+        };
+
+        // 第一遍：逐行扫描，遇到块标量头就把后续所有比它更深的原始行原样收进来
+        let scanIdx = 0;
+        while (scanIdx < rawLines.length) {
+            const raw = rawLines[scanIdx];
+            const s = stripComment(raw);
+            if (!s.trim()) { scanIdx++; continue; }
+            const trimmed = s.trim();
+            if (trimmed === '---' || trimmed === '...') { scanIdx++; continue; }
+
+            const lineIndent = s.length - s.trimStart().length;
+            lines.push({ indent: lineIndent, text: trimmed });
+
+            // 这一行是块标量头吗？用去注释后的文本判断，避免把正文里的 # 当成注释处理
+            const marker = blockHeaderOf(trimmed);
+            scanIdx++;
+            if (!marker) continue;
+
+            // 块标量正文：后续所有缩进比头部更深的原始行，原样收（不去注释、不丢空行）
+            // 空行的缩进不能瞎定：它要跟正文行一致，否则去公共缩进时会被算成最小缩进，
+            // 结果是正文每行都被多切掉一截（真机上表现为整段前面多一个空格）。
+            // 所以空行先存着，等遇到第一个真实正文行、拿到它的缩进后再补上。
+            let pendingBlank = 0;
+            while (scanIdx < rawLines.length) {
+                const bodyRaw = rawLines[scanIdx];
+                if (!bodyRaw.trim()) {
+                    pendingBlank++;
+                    scanIdx++;
+                    continue;
+                }
+                const bodyIndent = bodyRaw.length - bodyRaw.trimStart().length;
+                if (bodyIndent <= lineIndent) break;
+                // 正文开始，把攒着的空行按这个缩进补进去
+                while (pendingBlank > 0) {
+                    lines.push({ indent: bodyIndent, text: '' });
+                    pendingBlank--;
+                }
+                lines.push({ indent: bodyIndent, text: bodyRaw.trim() });
+                scanIdx++;
+            }
+            // 去掉正文尾部多余的空行占位
+            while (lines.length && lines[lines.length - 1].text === '' && lines[lines.length - 1].indent > lineIndent) {
+                lines.pop();
             }
         }
 
@@ -372,15 +430,14 @@
                         continue;
                     }
 
-                    // "- key: value" 形式，属于对象列表项
-                    const kvIdx = content.indexOf(':');
-                    const looksLikeKv = kvIdx > 0 && !content.startsWith('"') && !content.startsWith("'")
-                        && (kvIdx === content.length - 1 || /\s/.test(content[kvIdx + 1]));
+                    // "- key: value" 形式，属于对象列表项（半角全角冒号都认）
+                    const kvSplit = splitKeyValue(content);
+                    const looksLikeKv = kvSplit !== null && !content.startsWith('"') && !content.startsWith("'");
 
                     if (looksLikeKv) {
                         const itemObj = {};
-                        const key = content.slice(0, kvIdx).trim();
-                        const valStr = content.slice(kvIdx + 1).trim();
+                        const key = kvSplit.key;
+                        const valStr = kvSplit.value;
                         pos++;
                         if (valStr === '') {
                             const child = parseBlock(childIndent);
@@ -394,10 +451,10 @@
                         while (pos < lines.length && lines[pos].indent > childIndent
                             && !(lines[pos].text === '-' || lines[pos].text.startsWith('- '))) {
                             const sub = lines[pos];
-                            const kIdx = sub.text.indexOf(':');
-                            if (kIdx <= 0) { pos++; continue; }
-                            const k2 = sub.text.slice(0, kIdx).trim();
-                            const v2 = sub.text.slice(kIdx + 1).trim();
+                            const subKv = splitKeyValue(sub.text);
+                            if (!subKv) { pos++; continue; }
+                            const k2 = subKv.key;
+                            const v2 = subKv.value;
                             const subIndent = sub.indent;
                             pos++;
                             if (v2 === '') {
@@ -422,26 +479,65 @@
             while (pos < lines.length && lines[pos].indent === childIndent
                 && !(lines[pos].text === '-' || lines[pos].text.startsWith('- '))) {
                 const line = lines[pos];
-                const kvIdx = line.text.indexOf(':');
-                if (kvIdx <= 0) { pos++; continue; }
-                const key = line.text.slice(0, kvIdx).trim();
-                const valStr = line.text.slice(kvIdx + 1).trim();
+                const mapKv = splitKeyValue(line.text);
+                if (!mapKv) { pos++; continue; }
+                const key = mapKv.key;
+                const valStr = mapKv.value;
                 pos++;
+                let value;
                 if (valStr === '') {
                     const child = parseBlock(childIndent);
-                    obj[key] = child === null ? null : child;
+                    value = child === null ? null : child;
                 } else if (isBlockMarker(valStr)) {
-                    obj[key] = readBlockScalar(childIndent, String(valStr).trim());
+                    value = readBlockScalar(childIndent, String(valStr).trim());
                 } else {
-                    obj[key] = unquote(valStr);
+                    value = unquote(valStr);
+                }
+
+                // 同名键（2026-11-10 修）：模型偶尔把同一个键写两遍，例如两段 nodes。
+                // 原来的做法是后一段直接盖掉前一段，前一段静默消失——用户只看到节点少了一半，
+                // 界面不会报任何错，查起来无从下手。
+                // 现在两段都留：数组与数组首尾接起来，其它情况把两段都收进数组（内容一个字不丢），
+                // 同时把撞名的键记下来，由上层带进提示让用户看见。
+                if (Object.prototype.hasOwnProperty.call(obj, key)) {
+                    const prev = obj[key];
+                    if (Array.isArray(prev) && Array.isArray(value)) {
+                        obj[key] = prev.concat(value);
+                    } else if (Array.isArray(prev)) {
+                        obj[key] = prev.concat([value]);
+                    } else {
+                        obj[key] = [prev, value];
+                    }
+                    duplicateKeys.push(key);
+                } else {
+                    obj[key] = value;
                 }
             }
             return obj;
         }
 
         const root = parseBlock(-1);
-        return root === null ? {} : root;
+        const out = root === null ? {} : root;
+        // 撞名信息挂在返回对象上：不可枚举，JSON.stringify 与 Object.keys 都看不到，
+        // 老调用方行为不变；需要的地方用 parseSimpleYaml.duplicatesOf() 读。
+        if (duplicateKeys.length && out && typeof out === 'object') {
+            try {
+                Object.defineProperty(out, '__duplicateKeys', {
+                    value: duplicateKeys.slice(),
+                    enumerable: false,
+                    configurable: true,
+                    writable: true,
+                });
+            } catch (e) { /* 极端情况下挂不上就算了，不影响解析结果 */ }
+        }
+        return out;
     }
+
+    /** 取一份解析结果里撞过名的键（没有就返回空数组） */
+    parseSimpleYaml.duplicatesOf = (obj) => {
+        if (!obj || typeof obj !== 'object') return [];
+        return Array.isArray(obj.__duplicateKeys) ? obj.__duplicateKeys.slice() : [];
+    };
 
     // ---------- 结构规范化 ----------
 
@@ -809,16 +905,34 @@
         })();
         // 模型时不时把个别键写成中文（step 是英文、内容/风险 是中文），
         // 这里统一规范化成英文，后面所有代码只面对一套键名，不用到处写 p['内容'] 兼容
-        const parsed = patchFromOutsideFence(normalizeOutline(parseSimpleYaml(block)), tailText);
+        //
+        // 2026-11-10（批 2 同名键那条补完）：撞名的键要在规范化之前取走。
+        // 撞名信息挂在解析结果的不可枚举属性上，normalizeOutline 会造新对象，
+        // 一过这一手就没了——原来定义好的 parseSimpleYaml.duplicatesOf 全文零调用，
+        // 「两段 nodes 拼起来不丢内容」是做到了，但用户永远看不到「模型写重复了」。
+        // 方案要求的是「要么合并，要么解析时就报错提示」，所以这里必须接上。
+        const rawParsed = parseSimpleYaml(block);
+        const dupKeys = (parseSimpleYaml.duplicatesOf ? parseSimpleYaml.duplicatesOf(rawParsed) : []);
+        const parsed = patchFromOutsideFence(normalizeOutline(rawParsed), tailText);
+        // 撞名的键稍后并进 quality.warnings（quality 在下面几行才算出来）
         const hasYaml = !!extractCodeBlock(raw, 'yaml');
         // 2026-11-05 M2 评审：nodes 在 structure 里，按顶层读会恒为 0，
         // 下面那句 error「没有解析出任何信息节点」每次生成都会误报。
         const nodeCount = innerNodesOf(parsed).length;
         const keys = Object.keys(parsed || {});
         const quality = checkOutlineQuality(parsed);
+        // 撞名的键进结构检查的 warnings（2026-11-10 批 2 补完）：
+        // 详情页那条警示会说清是哪个键被写了两次，而不是只让用户看到「节点少了一半」却不知道原因。
+        if (dupKeys.length) {
+            quality.warnings = (quality.warnings || []).concat(
+                dupKeys.map(k => `模型把键「${k}」写了不止一次，两段内容已合并保留，请核对是否重复或冲突`));
+        }
 
         debug(`大纲解析：原文 ${String(raw || '').length} 字，YAML 块${hasYaml ? '命中' : '未命中（整段兜底）'}，`
             + `顶层键 ${keys.length} 个：${keys.join('、') || '无'}，节点 ${nodeCount} 个`);
+        if (dupKeys.length) {
+            warn(`大纲里有键被写了不止一次：${dupKeys.join('、')}。两段内容已合并保留，请在详情页核对是否重复`);
+        }
         if (hasYaml) {
             log(`大纲解析成功：节点 ${nodeCount} 个，顶层键 ${keys.length} 个`);
         } else {

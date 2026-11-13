@@ -92,10 +92,11 @@
     }
 
     /** 生成事件状态卡文本 */
-    function buildStateCard(event) {
+    function buildStateCard(event, statusOverride) {
         if (!event) return '';
         const lines = [];
-        lines.push(`事件：${event.name}（${event.status === 'active' ? '进行中' : event.status}）`);
+        const shownStatus = statusOverride || event.status;
+        lines.push(`事件：${event.name}（${shownStatus === 'active' ? '进行中' : shownStatus}）`);
 
         // 内层取值（2026-11-05 M1；M2 评审后收成公共函数）：
         // 内层字段只从 structure 下面取，不回落顶层。老事件的扁平形状读不出来，这是既定口径。

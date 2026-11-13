@@ -14,6 +14,14 @@
         draftGroupModes: null,
         draftName: '',
         busy: false,
+        // 2026-11-10 批 3 第 18 项：谁占着这个忙碌状态。
+        // 原来只有一个布尔值，任何一条流程跑完都 setBusy(false)，把别人的锁一起放了；
+        // 自动盘点和手动操作抢同一把锁时更糟：手动弹「正在盘点」时，
+        // 自动盘点跑完一句 setBusy(false) 就把提示条收掉了，而手动那次还在跑。
+        // 令牌记的是占用者标识（'gen' / 'inv' / 'inv-auto' / 'adopt' / 'close' …），
+        // 只有持有者能解锁，别人要动就被告知「正在做另一件事」。
+        busyOwner: null,
+        busyText: '处理中…',
         busyText: '处理中…',
         panelEl: null,
         fabEl: null,

@@ -262,7 +262,7 @@
         btnCheck.addEventListener('click', () => {
             const r = checkEditedRaw(wrapCodeFence(keysToEnglish(buf.text, buf.backMap), buf.fenced));
             S.draftEditIssues = r.issues.length ? r.issues : null;
-            renderPanel();
+            repaintPage();
             if (!r.ok) log('格式检查未通过：' + r.fatal.join('；'));
             else if (!r.issues.length) log('格式检查通过，没有发现问题');
             else log('格式检查通过，但有 ' + r.issues.length + ' 条提醒');
@@ -277,7 +277,7 @@
             buf.backMap = rebuilt.backMap;
             buf.original = rebuilt.text;
             S.pendingDraftEditDirty = false;
-            renderPanel();
+            repaintPage();
             log('已按结构重建编辑框内容');
         });
 
@@ -319,12 +319,12 @@
                     S.draftEditIssues = res.issues && res.issues.length ? res.issues : null;
                     discardPendingEdit();
                     S.previewDraftIds.add(d.id);
-                    renderPanel();
+                    repaintPage();
                 } catch (e) {
                     // 格式硬错：不保存、不退出编辑，把原文留在框里让人接着改
                     error('保存草稿编辑失败：', e);
                     S.draftEditIssues = [String(e && e.message || e)];
-                    renderPanel();
+                    repaintPage();
                 }
             });
             btnRow.appendChild(btnSave);
@@ -334,7 +334,7 @@
             btnCancel.addEventListener('click', async () => {
                 if (buf.text !== buf.original && !(await askConfirm('放弃这次编辑？改动不会保存。'))) return;
                 discardPendingEdit();
-                renderPanel();
+                repaintPage();
             });
             btnRow.appendChild(btnCancel);
 
@@ -345,7 +345,7 @@
                 btnDone.type = 'button';
                 btnDone.addEventListener('click', () => {
                     discardPendingEdit();
-                    renderPanel();
+                    repaintPage();
                 });
                 btnRow.appendChild(btnDone);
             }
@@ -435,7 +435,8 @@
         // 只能刷新页面。改成走 setBusy 重建整块（文字 + 按钮），
         // 它本来就是造这块内容的唯一入口，不该在别处按半套逻辑拼一遍。
         // 第二个参数给 true：这次只恢复显示，不要顺带清掉进度列表。
-        if (S.busy) setBusy(true, true);
+        // 2026-11-10 批 3：重建时沿用原来的持有者，不另立新令牌——否则一重建就易主了
+        if (S.busy) setBusy(true, true, null, S.busyOwner || null);
 
         const context = ctx();
         if (!context) {
@@ -573,7 +574,7 @@
             if (!(await askConfirm('这份草稿还有没保存的改动，关掉就丢了。继续？'))) return;
         }
         discardPendingEdit();
-        renderPanel();
+        repaintPage();
     }
 
     /**
@@ -701,7 +702,7 @@
             btnRaw.type = 'button';
             btnRaw.addEventListener('click', () => {
                 d.rawOpen = !d.rawOpen;
-                renderPanel();
+                repaintPage();
             });
             rawRow.appendChild(btnRaw);
             box.appendChild(rawRow);
@@ -873,7 +874,7 @@
             btnGen.disabled = true;
             await startChainRun(d);
             btnGen.disabled = false;
-            renderPanel();
+            repaintPage();
         });
         btnRow.appendChild(btnGen);
 
@@ -888,7 +889,7 @@
                 if (!(await askConfirm('会把已经生成的 ' + d.generated.length
                     + ' 个节点事件全部丢掉重做（链骨架不动）。继续？'))) return;
                 await regenChainNodes(d);
-                renderPanel();
+                repaintPage();
             });
             btnRow.appendChild(btnRedo);
         }
@@ -899,7 +900,7 @@
             S.chainDraft = null;
             // 存着的骨架也一起删掉，否则刷新一下它又冒出来
             clearChainDraft();
-            renderPanel();
+            repaintPage();
         });
 
         btnRow.appendChild(btnDrop);
@@ -950,7 +951,7 @@
             ? d.generated[d.generated.length - 1].exitState
             : null;
 
-        setBusy(true, false, '正在逐条生成事件');
+        setBusy(true, false, '正在逐条生成事件', 'gen-chain');
         try {
             startProgress('正在生成事件链');
             const made = await runChain(chain, d.chainId, prefs, mode, {
@@ -958,7 +959,7 @@
                     d.generated.push(ev);
                     S.previewDraftIds.add(ev.id);
                     log(`链节点 ${ev.chain.pos}/${total} 生成完成：${ev.name}`);
-                    renderPanel();
+                    repaintPage();
                 },
                 waitNext: async (nextPos, total) => {
                     // 手动模式：等用户点「下一个」。
@@ -988,7 +989,7 @@
             toast('生成事件链失败：' + (e && e.message || e));
         } finally {
             d.running = false;
-            setBusy(false);
+            setBusy(false, null, null, 'gen-chain');
             resetProgress();
         }
     }
@@ -1018,20 +1019,31 @@
         // 根因是这里只数 status === 'draft'，把链节点也算进去了——
         // 3 条链各 2 个节点，6 个节点事件被当成 6 个单事件报出来。
         // 链节点在列表里归组显示在各自链下面，不该混进「待选事件」这个说法里。
-        const allDrafts = Object.values(getMeta().events).filter(e => e && e.status === 'draft');
+        const allDrafts = Object.values((getMeta() || {}).events || {}).filter(e => e && e.status === 'draft');
         const singleN = allDrafts.filter(e => !(e.chain && e.chain.id)).length;
         const chainN = new Set(allDrafts.filter(e => e.chain && e.chain.id)
             .map(e => e.chain.id)).size;
         const draftN = singleN + chainN;
+        // 2026-11-10 批 3 第 17 项：标出当前事件来自哪个对话。
+        // 存档在 chatMetadata 里、跟着对话走，换对话不会串，但面板不写出处时，
+        // 从别的对话切回来或同时开两个窗口就看不出手里这个事件是哪段聊天里开的。
+        const tag = currentChatTag();
+        // 事件记下的 chatId 与当前对话不一致 = 这条记录不是在这里开的（老存档/被手工改过）。
+        // 这时要说出来，而不是照样显示得像本地事件。
+        const fromElsewhere = ev && ev.chatId != null && tag.id && String(ev.chatId) !== tag.id;
+        const chatLine = ev
+            ? `\n来自对话：${tag.label}` + (fromElsewhere ? `（注意：该事件记录在对话 ${String(ev.chatId).slice(-6)}，不是当前对话）` : '')
+            : '';
         statusBox.textContent = ev
             ? `进行中：${ev.name}\n开始于 ${String(ev.createdAt || '').slice(0, 19)}\n世界书：${ev.worldBook}　条目已同步`
+                + chatLine
                 + (draftN ? `\n另有 ${draftN} 个待选等你决定` : '')
             : (draftN
-                ? `当前没有进行中的事件。上方有 ${draftN} 个待选`
+                ? `当前没有进行中的事件（对话：${tag.label}）。上方有 ${draftN} 个待选`
                     + '（' + [singleN ? `${singleN} 个单事件` : '', chainN ? `${chainN} 条事件链` : '']
                         .filter(Boolean).join('、') + '）'
                     + '，点「采用」即可开始；也可以继续生成新的来比较。'
-                : '当前没有进行中的事件。填好下面的事件名和偏好即可开始。生成后先进待选，满意再采用。');
+                : `当前没有进行中的事件（对话：${tag.label}）。填好下面的事件名和偏好即可开始。生成后先进待选，满意再采用。`);
         page.appendChild(statusBox);
 
     }
@@ -1164,7 +1176,7 @@
                     btnDrop.addEventListener('click', async () => {
                         if (!(await askConfirm(`丢弃待选事件「${d.name}」？它还没写进世界书，丢弃不会留下任何东西。`))) return;
                         discardDraft(d.id);
-                        renderPanel();
+                        repaintPage();
                     });
                     useActs.appendChild(btnDrop);
                 }
@@ -1188,7 +1200,7 @@
                         btnRaw.addEventListener('click', () => {
                             if (rawOn) S.previewRawDraftIds.delete(d.id);
                             else S.previewRawDraftIds.add(d.id);
-                            renderPanel();
+                            repaintPage();
                         });
                     }
                     lookActs.appendChild(btnRaw);
@@ -1211,7 +1223,7 @@
                     } else {
                         S.previewDraftIds.add(d.id);
                     }
-                    renderPanel();
+                    repaintPage();
                 });
                 lookActs.appendChild(btnLook);
 
@@ -1232,7 +1244,7 @@
                         S.draftEditIssues = null;
                         S.previewDraftIds.add(d.id);
                     }
-                    renderPanel();
+                    repaintPage();
                 });
                 lookActs.appendChild(btnEdit);
                 item.appendChild(acts);
@@ -1314,7 +1326,7 @@
                     await closeEvent(false);
                     opOut.className = 'eo-ok';
                     opOut.textContent = '已完结。';
-                    renderPanel();
+                    repaintPage();
                 } catch (e) {
                     opOut.className = 'eo-bad';
                     opOut.textContent = '失败：' + (e && e.message || e);
@@ -1332,7 +1344,7 @@
                     await closeEvent(true);
                     opOut.className = 'eo-ok';
                     opOut.textContent = '已废弃。';
-                    renderPanel();
+                    repaintPage();
                 } catch (e) {
                     opOut.className = 'eo-bad';
                     opOut.textContent = '失败：' + (e && e.message || e);
@@ -1350,7 +1362,7 @@
                 btnOutline.type = 'button';
                 btnOutline.addEventListener('click', () => {
                     S.currentShowOutline = !S.currentShowOutline;
-                    renderPanel();
+                    repaintPage();
                 });
                 row.appendChild(btnOutline);
             }
@@ -1360,7 +1372,7 @@
                 btnRaw.type = 'button';
                 btnRaw.addEventListener('click', () => {
                     S.currentShowRaw = !S.currentShowRaw;
-                    renderPanel();
+                    repaintPage();
                 });
                 row.appendChild(btnRaw);
             }
@@ -1402,7 +1414,7 @@
         // 这样反复重生成不会来回写删世界书条目。
         // 2026-11-04 起挪到当前事件下面：先看正在跑的，再看攒着的候补。
         // 2026-11-10：按生成模式过滤，单事件只列待选事件、链只列待选事件链。
-        const drafts = Object.values(getMeta().events)
+        const drafts = Object.values((getMeta() || {}).events || {})
             .filter(e => e && e.status === 'draft')
             .filter(e => (e && e.chain && e.chain.id ? wantChain : !wantChain))
             .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
@@ -1469,7 +1481,7 @@
                     if (!(await askConfirm(`采用整条链「${head.name || '未命名'}」的 ${list.length} 个节点？`
                         + '\n会依次写世界书条目。'))) return;
                     await useChainDrafts(list);
-                    renderPanel();
+                    repaintPage();
                 });
                 headActs.appendChild(btnUseChain);
 
@@ -1480,7 +1492,7 @@
                     if (!(await askConfirm(`丢掉整条链「${head.name || '未命名'}」的 ${list.length} 个节点？\n丢掉就找不回来了。`))) return;
                     for (const dd of list) discardDraft(dd.id);
                     log(`丢弃整条链「${head.name || '未命名'}」，共 ${list.length} 个节点`);
-                    renderPanel();
+                    repaintPage();
                 });
                 headActs.appendChild(btnDropChain);
                 // 2026-11-10：这两个按钮在 summary 里，点按钮会顺带触发折叠/展开。
@@ -1939,7 +1951,7 @@
                 if ((prefs.__genMode || 'single') === mk) return;
                 prefs.__genMode = mk;
                 persistGenForm();
-                renderPanel();
+                repaintPage();
             });
             btns[mk] = b;
             row.appendChild(b);
@@ -2013,7 +2025,7 @@
             (v) => {
                 prefs.__chainNodes = chainNodeCountOf(v);
                 persistGenForm();
-                renderPanel();
+                repaintPage();
             },
             '这条链由几个事件串成。默认 3 个。太长的话世界书条目会变多，模型也容易在后面跑偏。');
         page.appendChild(nRow);
@@ -2052,7 +2064,7 @@
 
         const list = el('div', 'eo-chainnodes');
         for (let i = 0; i < n; i++) {
-            list.appendChild(renderChainNodeEditor(prefs, i, () => renderPanel()));
+            list.appendChild(renderChainNodeEditor(prefs, i, () => repaintPage()));
         }
         page.appendChild(list);
 
@@ -2256,7 +2268,7 @@
             persistGenForm();
             paintSum();
             // 类型一变，参数区要整个换掉（不同主类型参数不同）
-            renderPanel();
+            repaintPage();
         });
         tyRow.appendChild(sel);
         body.appendChild(tyRow);
@@ -2764,11 +2776,11 @@
             opOut.className = 'eo-hint';
             opOut.textContent = '正在盘点…';
             try {
-                const r = await runInventory();
+                const r = await runInventory('inv-manual');
                 log(`第 ${r.record.round} 次盘点完成，世界书条目已更新（uid=${r.event.entryUid}）`);
                 opOut.className = 'eo-ok';
                 opOut.textContent = `第 ${r.record.round} 次盘点完成，世界书已更新`;
-                renderPanel();
+                repaintPage();
             } catch (e) {
                 error('盘点失败：', e);
                 opOut.className = 'eo-bad';
@@ -3188,7 +3200,7 @@
         page.appendChild(entryDet);
 
         const btn = el('button', 'eo-btn', '刷新');
-        btn.addEventListener('click', () => renderPanel());
+        btn.addEventListener('click', () => repaintPage());
         const r = el('div', 'eo-row');
         r.appendChild(btn);
         page.appendChild(r);
@@ -3212,18 +3224,9 @@
     const openProfiles = new Set();
 
     function renderSetPage(page) {
-        // 只重画设置页用的入口（2026-11-02）：切换当前配置、改配置方式这两件事
-        // 只需要把设置页重画一遍。以前调 renderPanel() 会把整个面板连同滚动位置一起重建，
-        // 在手机上改一个下拉就跳回顶部。
-        const repaint = () => {
-            if (!page.isConnected) { renderPanel(); return; }
-            const host = page.parentNode;
-            const top = page.getBoundingClientRect().top;
-            page.innerHTML = '';
-            renderSetPage(page);
-            const dy = page.getBoundingClientRect().top - top;
-            if (dy && host && host.scrollTop != null) host.scrollTop += dy;
-        };
+        // 2026-11-13：原来这里有一个局部闭包做设置页局部重绘。它只在 renderSetModel 里被引用过，
+        // 而那是另一个函数、取不到它，等于摆着一个随时会被复制回去的陷阱，已删除。
+        // 设置页要重画就调 repaintPage()——它在页签为设置时分派到本函数，效果等价，且带滚动补偿。
         // 各段单独兜底（2026-11-02）：某一段抛出异常时，以前整页从那里断掉，
         // 下面全是空白，用户完全不知道发生了什么。现在把错误画进页面并写日志，其余段照画
         // 注意：分段以后各段是独立函数，看不到本函数的局部变量，所以 s 要显式传进去
@@ -3374,7 +3377,9 @@
             saveSettings();
             const p = (getSettings().apiProfiles || []).find(x => x.id === apiSel.value);
             log(`模型 API 已切换为「${p ? p.name : apiSel.value}」`);
-            repaint();
+            // 2026-11-13 修：这里原来调的是 renderSetPage 的局部闭包，那个名字在 renderSetModel 里
+            // 根本取不到，运行时抛 ReferenceError（设置已保存、页面不重绘）。改走模块作用域的整页重绘入口。
+            repaintPage();
         });
         apiRow.appendChild(apiSel);
         page.appendChild(apiRow);
@@ -3630,7 +3635,7 @@
                     if (!nm) { nameIn.value = p.name; return; }
                     updateProfile(p.id, t => { t.name = nm; });
                     log(`模型配置「${p.name}」已更名为「${nm}」`);
-                    renderPanel();
+                    repaintPage();
                 });
                 actRow.appendChild(btnSave);
 
@@ -3679,7 +3684,7 @@
                         openProfiles.delete(p.id);
                         saveSettings();
                         log(`已删除模型配置「${p.name}」`);
-                        renderPanel();
+                        repaintPage();
                     });
                     delRow.appendChild(btnDel);
                     body.appendChild(delRow);
@@ -3713,7 +3718,7 @@
             // 新建即展开，用户点完就能直接填，不用再点一下
             openProfiles.add(id);
             log(`新建了模型配置「自定义配置 ${n}」，请填写地址、密钥和模型名`);
-            renderPanel();
+            repaintPage();
         });
         addRow.appendChild(btnAdd);
         page.appendChild(addRow);
@@ -3857,24 +3862,28 @@
         page.appendChild(wbBox);
 
         // 世界书字数上限：超了会截断后面的条目，用户必须能自己调
+        // 2026-11-10 修（评审原第 16 条）：这一项和下面「设定字数上限」绑的是同一个字段 maxChars，
+        // 但两处的口径原来相反——这里下限 1000、空值回落 30000，0 会被抬成 1000；
+        // 那里写着「0 = 不限」。设成 0 的人在这里一保存就变回 1000，看起来像设置没生效。
+        // 统一成 0 = 不限：两处都允许 0，都按 0 表示不截断。
         const wcRow = el('div', 'eo-row');
         wcRow.appendChild(el('label', null, '世界书字数上限'));
         const wcIn = el('input', 'eo-input');
         markKey(wcIn, 'set.worldbookChars');
         wcIn.type = 'number';
-        wcIn.min = '1000';
+        wcIn.min = '0';
         wcIn.step = '1000';
-        wcIn.value = String((s.worldbook && s.worldbook.maxChars) || 30000);
+        wcIn.value = String((s.worldbook && s.worldbook.maxChars) || 0);
         wcIn.style.flex = '0 0 110px';
         wcIn.addEventListener('change', () => {
-            const n = Math.max(1000, Number(wcIn.value) || 30000);
+            const n = Math.max(0, Number(wcIn.value) || 0);
             getSettings().worldbook.maxChars = n;
             wcIn.value = String(n);
             saveSettings();
-            log(`世界书字数上限已设为 ${n} 字`);
+            log(n === 0 ? '世界书字数上限已设为不限' : `世界书字数上限已设为 ${n} 字`);
         });
         wcRow.appendChild(wcIn);
-        wcRow.appendChild(el('span', 'eo-hint', '字。超出会截断后面的条目'));
+        wcRow.appendChild(el('span', 'eo-hint', '字，0 = 不限。超出会截断后面的条目'));
         page.appendChild(wcRow);
 
         const wbBook = getCharacterBookName();
@@ -3995,7 +4004,7 @@
             afIn.value = String(v);
             getSettings().tracker.autoEveryFloors = v;
             saveSettings();
-            renderPanel();
+            repaintPage();
         });
         afRow.appendChild(afIn);
         afRow.appendChild(el('span', 'eo-hint', '层楼自动盘点一次'));
@@ -4041,7 +4050,7 @@
                 afBtn.disabled = true;
                 afBtn.textContent = '盘点中…';
                 await runInventory();
-                renderPanel();
+                repaintPage();
             } catch (e) {
                 afBtn.disabled = false;
                 afBtn.textContent = '现在盘点一次';

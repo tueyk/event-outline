@@ -2665,6 +2665,13 @@
             for (const p of validateSpecMeta(spec, type, type + '.')) problems.push(p);
         }
         for (const p of validateSpecMeta(OUTLINE_SPEC_OTHER, '其他', '其他.')) problems.push(p);
+        // 2026-11-10 裁定二：rules 里出现的 snake_case 标识符必须存在于该类型 spec 的键集合里。
+        // 挂在已有的这个自检上，不新开入口——否则又是一处「定义了但没接上」。
+        // 真出现过的情况：rules 引用了一个拼错或已改名的字段，提示词照抄给模型，
+        // 模型写出来的键校验层不认识，报错却指向模型。
+        for (const p of rulesIdentifierProblems()) {
+            problems.push(`${p.type}.rules 引用了不存在的标识符「${p.ident}」：${String(p.rule).slice(0, 40)}`);
+        }
         if (problems.length) {
             try { warn('[事件大纲] spec 表自检不通过：' + problems.join('；')); } catch (e) { /* 日志没就绪也不影响 */ }
         }
@@ -2672,113 +2679,102 @@
     }
 
     /**
-     * 0C（2026-11-07）：生成提示词的第 1–5 项按主类型给。
+     * 提示词里的中文说明（2026-11-10 批 3 第 15 项）。
      *
-     * 原先这五项是硬编码的案件流程：「核心真相」「信息节点 5-8 条」「助力者/阻碍者/知情者」
-     * 「推进路径」。选了战斗或探险，模型照样被要求写核心真相与信息节点——
-     * 真机上战斗事件被迫硬凑一个核心真相出来，就是这个原因。
+     * 这里只放「怎么写」的话，不再写字段名与编号——
+     * 字段名、顺序、子字段全部由 typeFieldLines() 从 spec 现生成，
+     * 所以新增一个类型只改 spec 一处，提示词自己就跟上了。
      *
-     * 现在按类型分开：有骨架的类型给专属字段说明；没骨架的七类给定稿 §3 列出的字段清单
-     * （虽然还没有专属示例，至少模型知道该写哪些键，而不是照案件的样子硬套）。
-     * 内容来源：docs-repo 的《事件骨架字段与约束规格》§3.1–§3.8 与定稿 §5。
+     * 原来那份 OUTLINE_TYPE_ITEMS 是「1. 步骤 task：每一步写（步骤/地点/时限）…」这种
+     * 字段名和说明混在一行的写法，已经和 spec 漂移过一次
+     * （spec 是 steps，提示词写 task，模型照提示词写、校验层按 steps 找，永远对不上）。
      *
-     * 返回 { items: [...], note: 可选补充说明 }
+     * 键 = 该类型 spec 里的字段名，值 = 该字段的写法说明。
+     * 字段在 spec 里有、这里没写说明的，生成出来就只有字段名本身，不会丢。
      */
-    const OUTLINE_TYPE_ITEMS = {
-        '案件推理': [
-            '1. 事件类型与核心真相：判断本事件属于哪类（案件/谈判/探险/危机/社交博弈/其他），写出核心真相或隐情（仅记录，后续不得直接透露）',
-            '2. 信息节点清单：按发现顺序列 5-8 条，每条含编号（从 1 开始）、类型（物证/证言/环境/时间线/关系）、触发关键词、指向的信息或后果',
-            '   节点字段名固定用：id（编号，数字）、type（类型）、trigger（触发关键词或触发条件）、info（指向的信息或后果）、refute_by（可选，这条是误导时填可推翻它的节点编号数组）',
-            '   注意 refute_by 的用法很容易搞反：它标记的是「这条信息本身有问题，会被哪个节点拆穿」，',
-            '   不是「这条和哪个节点有关」。判断标准是：如果被引用的那个节点出现后，本条信息的结论就要被否定或大改，才写 refute_by；',
-            '   如果被引用节点只是证实、补充、或从另一角度印证本条，那就不写 refute_by，它们之间是普通的前后线索关系。',
-            '   一条正确的推理线索不写 refute_by。整份大纲可以一个 refute_by 都没有（没有误导项时不写）。',
-            '   另外单独输出「推进所需最少信息节点编号」：只列出推理必需的最少节点编号',
-            '3. 参与角色：按立场分类——',
-            '   a. 助力者：每个助力者的动机须各不相同（利益一致/情感羁绊/交易/被迫/其他），并标明是否有条件或代价。同阵营且利益一致者可以无条件；交易或被迫者须写明代价。按实际情况判断，不要为所有助力者统一附加条件',
-            '   b. 阻碍者：会阻止玩家推进，其阻碍理由须合理且可被化解',
-            '   c. 知情者/关键人物：掌握核心信息，不会无理由主动交出；其信息只能经由信息节点清单中的条目逐步获得',
-            '   d. 幕后方（如有）：标记 reveal: forbidden，暴露路径只能经由信息节点清单逐步指向',
-            '4. 推进路径：从开局到结局的分步逻辑链，注明哪些节点是必经、哪些可跳过；并按"危险程度"标注每个高风险节点的失败后果（如受伤/被俘/死亡/失去关键信息）',
-            '5. 禁止事项：不得新增清单外信息节点、不得提前揭示核心真相、不得让角色知道其不应知道的信息',
-        ],
-        '战斗冲突': [
-            '1. 敌方编制 enemy_forces：每一项写 name（名称）、strength（兵力）、level（等级）、tactic（战术）、morale（士气）。没有敌人就不叫战斗，这一项必须有',
-            '2. 战斗目标 objectives：每一项写 name（名称）、type（守住/突破/护送/拖延/歼灭）、condition（达成条件）、fail（失败后果）。',
-            '   condition 要写成可判断的客观状态（「玩家站住脚且没被撞倒」），不要写「表现良好」这种主观话；',
-            '   fail 必须写，模型要据此判断「已失败」而不是「未达成」',
-            '3. 地形 terrain：写 cover（掩体）、elevation（高低差）、chokepoint（狭窄处）、note（备注）。哪怕是一片平地也要写一句，地形影响走位与掩体',
-            '   注意：天气、地形、路况都写进 terrain，不要把它们塞进 enemy_forces——那里只放会主动对抗的东西',
-            '4. 事先准备 preparation（有准备阶段时才写）：五项 supplies（物资）、traps（陷阱）、intel（情报）、allies（盟友）、depart_time（出发时间），要么五项都写，要么整块不写',
-            '5. 可选三块：reinforcements（援军，写波次与到达时间）、retreat（撤退，写条件与代价）、casualty（伤亡与俘虏）。没有就不写，不要为凑数硬编',
-            '   禁止事项：不要让角色知道其不应知道的信息；不要让敌人做出与其战术、士气不符的行为',
-        ],
-        '谈判交涉': [
-            '1. 各方立场 parties：每一方写（诉求/底线/可让步/不可让步）四件事。至少两方，否则不叫谈判',
-            '2. 筹码 leverage：每个筹码写（筹码/来源/可信度）三件事。可信度决定对方买不买账',
-            '3. 中间人 intermediaries：写姓名、立场、能做什么。没有中间人就整块不写',
-            '4. 轮次 rounds：每一轮写（轮次/破裂点/冷却）三件事，轮次从 1 连续编号。',
-            '   破裂点是「这一轮谈崩」的条件，不是事件整体的超时后果——后者写在外层 time_pressure.timeout_result',
-            '5. 协议 agreement：写（达成条件/草签后果）两件事。至少一方要让利，全是得利的一方不叫谈判',
-            '   禁止事项：不得让某一方无条件接受全部要求；不得提前揭示对方的底线',
-        ],
-        '探险探索': [
-            '1. 地点 sites：每个地点写（地点/机关/守卫/补给）四件事，并给每处编 id（从 1 连续），后面 route 要用编号引用',
-            '2. 路线 route：写（节点编号/路线描述/是否必经/风险/失败后果）。只能引用 sites 里存在的编号',
-            '3. 危险 hazards：每种危险写（种类/触发条件/后果）三件事。危险要能在现场被发现，不能只在事后才知道',
-            '4. 发现 discoveries：每个发现写（发现物/触发条件）两件事。发现是这类型的核心回报，不能一个都没有',
-            '5. 出口 exit：写撤离条件。这是「什么算出去了」，与外层 time_pressure 的「多久内」不是一回事',
-            '   禁止事项：不得让玩家不探索就拿到发现；不得出现大纲外的新地点',
-        ],
-        '生存危机': [
-            '1. 资源 resources：写五项——water（水）、food（食）、medicine（药）、fire（火）、stamina（体力）。这五项是封闭清单，不要自加',
-            '2. 环境 environment：写 weather（天气）、terrain（地形）、visibility（能见度）三件事',
-            '3. 威胁 threats：每一波写（波次/强度/间隔）三件事。间隔可以写「每隔两小时」这种自然语言，不必是纯数字',
-            '4. 避难所 shelters：每个避难所写名称与可获得的东西。避难所要有代价（比如能挡风但会被发现）',
-            '5. 时间窗口 time_window：写 start（从什么时候开始）、end（到什么时候结束）、duration（持续多久）、note（这个窗口里会发生什么）。',
-            '   允许用自然语言（「入夜后第一声钟」），不要求填数字',
-            '   禁止事项：不得让资源凭空出现；不得让威胁在有光、有声的条件下完全不被察觉',
-        ],
-        '社交博弈': [
-            '1. 阵营 factions：每一方写（立场/诉求/把柄）三件事，并给每方编 id（从 1 连续）。把柄是这类型的核心，没有把柄就没有博弈',
-            '2. 场合 occasions：写宴会/庭审/葬礼这类具体场合。场合决定了谁能出场、能说什么话',
-            '3. 人情 favours：写谁欠谁、欠什么。人情要是能被兑现或被赖掉的，不能只是背景设定',
-            '4. 传言 rumours：每条写（源/扩散）。源如果要指向某个阵营，用 factions 里的编号',
-            '5. 声望 reputation：写观感如何变化——做什么会升、做什么会降',
-            '   禁止事项：不得让 NPC 无理由地相信玩家；不得让某个阵营同时拥有人格魅力与绝对武力',
-        ],
-        '日常杂务': [
-            '1. 步骤 task：每一步写（步骤/地点/时限）三件事。这类是低结构、低风险，步骤控制在 1-3 步，不要写成大冒险',
-            '2. 交付 deliverable：写交付物与验收标准两件事。验收要能当场判定，不能靠事后追认',
-            '3. 变数 complications：写可能出岔子的小事。变数应该有幽默感或生活气息，不是致命威胁',
-            '4. 道德岔口 moral：写有没有需要选择的地方。没有也照实写「无」，不要硬造',
-            '5. 委托关系写在外层 contract（谁委托、代价是什么），不要塞进 structure',
-            '   禁止事项：不要把这类事件升级成生死危机；不要让杂务牵扯进主线阴谋',
-        ],
-        '禁忌秘辛': [
-            '1. 禁忌 taboo：一句话说清「什么不能说、不能做」。必须是具体的，不能是「有些事不能说」这种空话',
-            '2. 知情者 knowers：每个知情者写（知情者/沉默原因）两件事。沉默原因要站得住（恐惧、利益、承诺、无知之罪），不能只是「他不肯说」',
-            '3. 代价 cost：触碰禁忌要付出什么。代价应该是即时的、可感知的，不是「以后会倒霉」',
-            '4. 掩盖 cover_up：写掩盖手段。手段要留下痕迹，玩家才有得查',
-            '5. 破禁 breaking 与后果 consequences：写破禁条件与爆发后果两件事。后果要与禁忌本身的重量相称',
-            '   禁止事项：不得提前揭示禁忌内容；不得让知情者无缘无故主动开口',
-        ],
-        'NSFW': [
-            '1. 边界 boundaries：写清本次的尺度与红线。边界必须在生成时就定下来，不能在剧情里临时放宽',
-            '2. 意愿 consent：写清各方的意愿状态。任何一方的不自愿都不能被叙述成自愿',
-            '3. 场景 scenes：写场景与推进顺序。每一场要有明确的开始与结束，不做无休止的流水账',
-            '4. 退出 exit：写任意一方中止的条件。中止必须被尊重，不能写成「欲拒还迎」',
-            '5. 禁止事项：不得越过第 1 项写下的边界；不得把不自愿描写成自愿；不得在未成年角色上使用本类型',
-        ],
-        '其他': [
-            '1. 目标 goal：这个事件最终要达成什么。一句话说清，不要写成流程说明',
-            '2. 障碍 obstacles：列出会挡路的因素。每一条都要具体到「谁、因为什么、怎么挡」',
-            '3. 资源 resources：玩家手上有什么可用的东西。包括物品、信息、人脉',
-            '4. 变数 variables：列出会让局面变化的东西（倒计时、好感、某人的状态），每条写名称、类型、影响',
-            '5. 失败代价 failure_cost 与相关方 stakeholders：失败要付出什么；牵涉到谁、各自想要什么',
-            '   禁止事项：不得照搬案件的信息节点或战斗的战斗目标；这个事件如果要分阶段，写在外层 structure.phases 里（最多 3 段）',
-        ],
+    const OUTLINE_TYPE_ITEMS_HINT = {
+        '案件推理': {
+            core_truth: '判断本事件属于哪类，写出核心真相或隐情（仅记录，后续不得直接透露）',
+            nodes: '按发现顺序列 5-8 条。refute_by 很容易搞反：它标记的是「这条信息本身有问题、会被哪个节点拆穿」，'
+                + '不是「这条和哪个节点有关」。判断标准是：被引用的节点出现后，本条结论要被否定或大改才写；'
+                + '只是证实、补充、从另一角度印证就不写。一条正确的线索不写 refute_by，整份大纲可以一个都没有',
+            min_nodes_for_deduction: '只列出推理必需的最少节点编号',
+            suspects: '每人写动机、不在场、谎言三项，各自不能为空',
+            characters: '按立场分：助力者（动机各不相同，标明是否有条件或代价；同阵营且利益一致者可无条件，交易或被迫者须写代价）、'
+                + '阻碍者（阻碍理由须合理且可化解）、知情者（不会无理由主动交出，信息只能经信息节点逐步获得）、'
+                + '幕后方（标记 reveal: forbidden，暴露路径只能经信息节点逐步指向）',
+            paths: '从开局到结局的分步逻辑链，注明哪些必经、哪些可跳过，并按危险程度标注高风险节点的失败后果',
+        },
+        '战斗冲突': {
+            enemy_forces: '没有敌人就不叫战斗，这一项必须有',
+            objectives: 'condition 要写成可判断的客观状态（「玩家站住脚且没被撞倒」），不要写「表现良好」这种主观话；'
+                + 'fail 必须写，模型要据此判断「已失败」而不是「未达成」',
+            terrain: '哪怕是一片平地也要写一句，地形影响走位与掩体。'
+                + '天气、地形、路况都写进 terrain，不要塞进 enemy_forces——那里只放会主动对抗的东西',
+            preparation: '有准备阶段时才写；要么五项都写，要么整块不写',
+            reinforcements: '写波次与到达时间',
+            retreat: '写条件与代价',
+            casualty: '伤亡与俘虏',
+        },
+        '谈判交涉': {
+            parties: '至少两方，否则不叫谈判',
+            leverage: '可信度决定对方买不买账',
+            intermediaries: '写姓名、立场、能做什么。没有中间人就整块不写',
+            rounds: '轮次从 1 连续编号。破裂点是「这一轮谈崩」的条件，不是事件整体的超时后果——'
+                + '后者写在外层 time_pressure.timeout_result',
+            agreement: '至少一方要让利，全是得利的一方不叫谈判',
+        },
+        '探险探索': {
+            sites: '每个地点给编 id（从 1 连续），后面 route 要用编号引用',
+            routes: '只能引用 sites 里存在的编号',
+            hazards: '危险要能在现场被发现，不能只在事后才知道',
+            discoveries: '发现是这类型的核心回报，不能一个都没有',
+            exit: '写撤离条件。这是「什么算出去了」，与外层 time_pressure 的「多久内」不是一回事',
+        },
+        '生存危机': {
+            resources: '五项是封闭清单，不要自加',
+            environment: '写天气、地形、能见度三件事',
+            threats: '间隔可以写「每隔两小时」这种自然语言，不必是纯数字',
+            shelters: '每个避难所写名称与可获得的东西。避难所要有代价（比如能挡风但会被发现）',
+            time_window: '允许用自然语言（「入夜后第一声钟」），不要求填数字',
+        },
+        '社交博弈': {
+            factions: '给每方编 id（从 1 连续）。把柄是这类型的核心，没有把柄就没有博弈',
+            occasions: '写宴会/庭审/葬礼这类具体场合。场合决定了谁能出场、能说什么话',
+            favours: '写谁欠谁、欠什么。人情要是能被兑现或被赖掉的，不能只是背景设定',
+            rumours: '源如果要指向某个阵营，用 factions 里的编号',
+            reputation: '写观感如何变化——做什么会升、做什么会降',
+        },
+        '日常杂务': {
+            steps: '这类是低结构、低风险，步骤控制在 1-3 步，不要写成大冒险',
+            deliverable: '验收要能当场判定，不能靠事后追认',
+            complications: '写可能出岔子的小事，应该有幽默感或生活气息，不是致命威胁',
+            moral: '没有也照实写「无」，不要硬造道德困境',
+        },
+        '禁忌秘辛': {
+            taboo: '一句话说清「什么不能说、不能做」。必须是具体的，不能是「有些事不能说」这种空话',
+            knowers: '沉默原因要站得住（恐惧、利益、承诺、无知之罪），不能只是「他不肯说」',
+            cost: '代价应该是即时的、可感知的，不是「以后会倒霉」',
+            cover_up: '手段要留下痕迹，玩家才有得查',
+            breaking: '写破禁条件与爆发后果',
+            consequences: '后果要与禁忌本身的重量相称',
+        },
+        'NSFW': {
+            boundaries: '写清本次的尺度与红线。边界必须在生成时就定下来，不能在剧情里临时放宽',
+            consent: '写清各方的意愿状态。任何一方的不自愿都不能被叙述成自愿',
+            scenes: '写场景与推进顺序。每一场要有明确的开始与结束，不做无休止的流水账',
+            exit: '写任意一方中止的条件。中止必须被尊重，不能写成「欲拒还迎」',
+        },
+        '其他': {
+            goal: '这个事件最终要达成什么。一句话说清，不要写成流程说明',
+            obstacles: '每条都要具体到「谁、因为什么、怎么挡」',
+            resources: '包括物品、信息、人脉',
+            variables: '列出会让局面变化的东西（倒计时、好感、某人的状态），每条写名称、类型、影响',
+            failure_cost: '失败要付出什么',
+            stakeholders: '牵涉到谁、各自想要什么',
+        },
     };
+
 
     /**
      * M7（2026-11-07）：把用户自定义的类型名解析成「它该用哪个内置主类型的骨架」。
@@ -2828,6 +2824,132 @@
         if (resolved === '其他') return OUTLINE_SPEC_OTHER;
         return OUTLINE_SPEC_BY_TYPE[resolved] || null;
     }
+
+    /**
+     * 2026-11-10 批 3 第 15 项：从 spec 生成提示词里的字段清单。
+     *
+     * 为什么要有它：同一类型的定义原来散在三处——spec（校验与渲染）、
+     * OUTLINE_TYPE_ITEMS（提示词）、骨架（示例）。已经漂过一次：
+     * spec 里日常杂务的进度字段是 steps，提示词里却写着「步骤 task」，
+     * 模型照着提示词写 task，校验层按 steps 找，结果永远对不上。
+     * 现在字段名与顺序一律由 spec 给，表里只留中文说明，新增类型只改 spec 一处。
+     *
+     * 输出形如：
+     *   1. 步骤 steps：每一步写 step（序号）、what（这一步做什么）、where（在哪做）、deadline（什么时候前做完）
+     * 冒号后面那段中文说明来自 OUTLINE_TYPE_ITEMS_HINT，没有就只写字段名。
+     */
+    function typeFieldLines(mainType) {
+        const spec = specOfType(mainType);
+        if (!spec) return [];
+        const hints = (typeof OUTLINE_TYPE_ITEMS_HINT !== 'undefined' && OUTLINE_TYPE_ITEMS_HINT[mainType]) || {};
+        const out = [];
+        // 字段顺序：spec.order 优先，其余按 required → optional 的声明顺序补齐
+        const ordered = [];
+        const seen = new Set();
+        for (const k of (spec.order || [])) {
+            if (!seen.has(k) && ((spec.required && spec.required[k]) || (spec.optional && spec.optional[k]))) {
+                ordered.push(k); seen.add(k);
+            }
+        }
+        for (const grp of ['required', 'optional']) {
+            for (const k of Object.keys(spec[grp] || {})) {
+                if (!seen.has(k)) { ordered.push(k); seen.add(k); }
+            }
+        }
+        ordered.forEach((key, i) => {
+            const meta = (spec.required && spec.required[key]) || (spec.optional && spec.optional[key]) || {};
+            const subs = subFieldNames(meta);
+            const cn = hintLabelOf(key);
+            const subText = subs.length ? `（${subs.join('、')}）` : '';
+            const hint = hints[key] ? `：${hints[key]}` : '';
+            out.push(`${i + 1}. ${cn} ${key}${subText}${hint}`);
+        });
+        return out;
+    }
+
+    /** 取一个字段声明下的子字段名（列表项的 item、map 的 keys） */
+    function subFieldNames(meta) {
+        if (!meta || typeof meta !== 'object') return [];
+        if (meta.item && typeof meta.item === 'object') return Object.keys(meta.item);
+        if (Array.isArray(meta.keys)) return meta.keys.slice();
+        return [];
+    }
+
+    /** 字段名的中文标签；没有就退回英文本身 */
+    function hintLabelOf(key) {
+        if (typeof labelOf === 'function') {
+            const t = labelOf(key);
+            if (t && t !== key) return t;
+        }
+        return key;
+    }
+
+    /**
+     * 2026-11-10 批 3 第 15 项（裁定二）：把 spec.rules 接进提示词。
+     *
+     * 为什么不接 when / not_when：那两项已经在渲染层与校验层用着，
+     * 再塞进提示词是重复；rules 是每类的关键约束，之前只存在 spec 里，白放着。
+     */
+    function typeRuleLines(mainType) {
+        const spec = specOfType(mainType);
+        const rules = (spec && Array.isArray(spec.rules)) ? spec.rules : [];
+        return rules.map(r => `- ${r}`);
+    }
+
+    /**
+     * 裁定二的自检：rules 里出现的 snake_case 标识符必须存在于该类型 spec 的键集合里。
+     * 挂在已有的 selfCheckSpecMeta() 上，不新开检查入口——
+     * 否则又是一处「定义了但没接上」，正是本轮反复出现的那类问题。
+     *
+     * 返回 [{type, rule, ident}]，空数组表示全部命中。
+     */
+    function rulesIdentifierProblems() {
+        const problems = [];
+        const types = Object.keys(OUTLINE_SPEC_BY_TYPE || {});
+        if (OUTLINE_SPEC_OTHER) types.push('其他');
+        for (const t of types) {
+            const spec = t === '其他' ? OUTLINE_SPEC_OTHER : OUTLINE_SPEC_BY_TYPE[t];
+            if (!spec || !Array.isArray(spec.rules)) continue;
+            const valid = specKeySet(spec, t);
+            for (const rule of spec.rules) {
+                const ids = String(rule || '').match(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g) || [];
+                for (const id of ids) {
+                    if (!valid.has(id)) problems.push({ type: t, rule, ident: id });
+                }
+            }
+        }
+        return problems;
+    }
+
+    /** 一份 spec 里出现过的全部键名（含子字段、keys 列表、ref 目标、progress 字段、外层键） */
+    function specKeySet(spec, mainType) {
+        const set = new Set();
+        const addMeta = (meta) => {
+            if (!meta || typeof meta !== 'object') return;
+            if (meta.item && typeof meta.item === 'object') Object.keys(meta.item).forEach(k => set.add(k));
+            if (Array.isArray(meta.keys)) meta.keys.forEach(k => set.add(k));
+            if (meta.ref) set.add(String(meta.ref).split('.')[0]);
+        };
+        for (const grp of ['required', 'optional']) {
+            for (const [k, meta] of Object.entries(spec[grp] || {})) {
+                set.add(k);
+                addMeta(meta);
+            }
+        }
+        if (spec.progress && spec.progress.field) set.add(spec.progress.field);
+        // 外层键也是合法的引用目标（rules 里可能写 time_pressure.timeout_result 这类）
+        for (const k of ['event_name', 'event_brief', 'event_type', 'time_pressure', 'danger',
+            'forbidden', 'structure', 'contract']) {
+            set.add(k);
+        }
+        // time_pressure / danger 的子键也认，否则「time_pressure.timeout_result」会被误报
+        for (const k of ['countdown', 'duration', 'timeout_result', 'delay_cost',
+            'lethality', 'failure', 'tolerance', 'threat_source']) {
+            set.add(k);
+        }
+        return set;
+    }
+
 
     /** M6.3：收集一份 spec 里所有声明了 refable 的列表名 → 它们的 id 前缀 */
     function refableNamesOf(spec) {
@@ -3131,6 +3253,14 @@
         draftGroupModes: null,
         draftName: '',
         busy: false,
+        // 2026-11-10 批 3 第 18 项：谁占着这个忙碌状态。
+        // 原来只有一个布尔值，任何一条流程跑完都 setBusy(false)，把别人的锁一起放了；
+        // 自动盘点和手动操作抢同一把锁时更糟：手动弹「正在盘点」时，
+        // 自动盘点跑完一句 setBusy(false) 就把提示条收掉了，而手动那次还在跑。
+        // 令牌记的是占用者标识（'gen' / 'inv' / 'inv-auto' / 'adopt' / 'close' …），
+        // 只有持有者能解锁，别人要动就被告知「正在做另一件事」。
+        busyOwner: null,
+        busyText: '处理中…',
         busyText: '处理中…',
         panelEl: null,
         fabEl: null,
@@ -3278,11 +3408,16 @@
     function getMeta() {
         const context = ctx();
         if (!context) return null;
-        if (!context.chatMetadata[MODULE]) {
-            context.chatMetadata[MODULE] = { version: 1, currentEventId: null, events: {} };
-        }
-        const m = context.chatMetadata[MODULE];
-        m.events = m.events || {};
+        // 2026-11-10 修（评审原第 19 条）：存档里的这一块是外部数据，可能被手工改坏或来自老版本，
+        // 原来是「没有就建」，但存着 null、字符串、数组时会把那个值原样返回，
+        // 调用方接着 `.events` 就抛「Cannot read properties of null」——整个面板直接崩。
+        // 这里只认对象，别的类型一律重建。
+        const holder = context.chatMetadata;
+        if (!holder || typeof holder !== 'object') return null;
+        let m = holder[MODULE];
+        if (!m || typeof m !== 'object' || Array.isArray(m)) m = { version: 1, currentEventId: null, events: {} };
+        holder[MODULE] = m;
+        if (!m.events || typeof m.events !== 'object' || Array.isArray(m.events)) m.events = {};
         return m;
     }
     function saveMeta() {
@@ -3373,9 +3508,39 @@
         if (event.outline) event.parseQuality = checkOutlineQuality(event.outline);
         if (!event.outlineRaw) return event;
         const o = event.outline || {};
-        // 2026-11-05 M2 评审：M2 之后 nodes 在 structure 里，还按顶层读会恒判「坏了」，
-        // 于是每次加载都要白跑一遍重解析，而且重解析读的也是同一个空结果。
-        const looksBroken = innerNodesOf(o).length === 0;
+        // 2026-11-05 M2 评审：M2 之后 nodes 在 structure 里，还按顶层读会恒判「坏了」。
+        //
+        // 2026-11-10 修（评审 P1-10）：原来只认 nodes，战斗、探险这些本来就没有 nodes 的类型
+        // 每次加载都被判「坏了」，白跑一遍重解析，重解析读出来的当然还是没有 nodes，于是下次继续重跑。
+        // 现在按这个类型自己的 spec 判：它要求的那些内层键里，只要有一个真的解析出了东西，
+        // 就算这卡没坏。类型认不出来时退回看有没有任何内层键，别一律判坏。
+        const looksBroken = (() => {
+            const mainType = String((o.event_type && o.event_type.primary)
+                || event.mainType || '').trim();
+            const spec = innerKeysOf(mainType);
+            const keys = spec.known && spec.required.length ? spec.required : null;
+            const inner = outlineInner(o) || {};
+            if (keys) {
+                return keys.every((k) => {
+                    const v = inner[k];
+                    if (v === undefined || v === null) return true;
+                    if (Array.isArray(v)) return v.length === 0;
+                    if (typeof v === 'string') return v.trim() === '';
+                    if (typeof v === 'object') return Object.keys(v).length === 0;
+                    return false;
+                });
+            }
+            // 类型认不出来：只要有任何一个内层键解析出了内容，就当它没坏
+            const anyFilled = Object.keys(inner).some((k) => {
+                const v = inner[k];
+                if (v === undefined || v === null) return false;
+                if (Array.isArray(v)) return v.length > 0;
+                if (typeof v === 'string') return v.trim() !== '';
+                if (typeof v === 'object') return Object.keys(v).length > 0;
+                return true;
+            });
+            return !anyFilled;
+        })();
         if (!looksBroken) return event;
         try {
             const re = parseOutline(event.outlineRaw).parsed;
@@ -3562,18 +3727,24 @@
 
             // 传了事件对象就重新定位：世界书可能被别的插件重排过 uid，
             // 记下的编号未必还指着自己那条，照着旧编号写会覆盖别人的条目。
+            //
+            // 2026-11-10 修（评审 P1-8）：记下的编号认不出来时，原来会把 existingUid 原样留着，
+            // 后面只要那个编号上还是一条 ▸事件 条目，就照样覆盖写入——那条可能是别人的。
+            // 认不出来就该老老实实当新增：多一条看得见、删得掉；顶掉别人的条目是静默丢内容。
             if (event) {
                 const found = findEventEntryUid(data, event);
-                if (found != null && String(found) !== String(existingUid)) {
-                    warn(`事件「${event.name}」的条目位置变了：记录 uid=${existingUid}，实际 uid=${found}，按实际位置写入`);
+                if (found != null) {
+                    if (String(found) !== String(existingUid)) {
+                        warn(`事件「${event.name}」的条目位置变了：记录 uid=${existingUid}，实际 uid=${found}，按实际位置写入`);
+                    }
                     uid = found;
-                } else if (found != null) {
-                    uid = found;
+                } else {
+                    if (existingUid != null) {
+                        warn(`事件「${event.name}」的记录 uid=${existingUid} 已认不出来（名字或对话对不上），本次按新增处理，不覆盖那个编号上的内容`);
+                    }
+                    uid = null;
                 }
             }
-
-            // 「往前挪」对已有条目同样成立（2026-11-04）：order 改成设置里的值，老的 ▸事件 条目
-            // 不能因为设置变了就永远停在旧的 100。只拨 order，位置、深度、概率一个都不碰——
             // 那几项用户可能在酒馆界面里手动调过，扩展没资格覆盖。
             const wantOrder = eventOrderValue();
             for (const [k, e] of Object.entries(data.entries)) {
@@ -3584,18 +3755,22 @@
                 }
             }
 
+            let wasUpdate = false;
             if (uid != null && data.entries[uid] &&
                 String(data.entries[uid].comment || '').startsWith(ENTRY_PREFIX)) {
                 data.entries[uid].content = content;
                 data.entries[uid].comment = comment;
                 data.entries[uid].constant = true;
+                wasUpdate = true;
             } else {
                 uid = nextUid(data);
                 data.entries[uid] = buildEntry(uid, content, comment);
             }
 
             await writeWorldBook(bookName, data);
-            log(`世界书已写入「${bookName}」：${existingUid != null ? '更新' : '新增'}条目 uid=${uid}，正文 ${String(content).length} 字`);
+            // 更新还是新增，看实际走了哪条路，不看传进来的值：
+            // 传了记录但认不出来时会按新增走，那时说「更新」是错的。
+            log(`世界书已写入「${bookName}」：${wasUpdate ? '更新' : '新增'}条目 uid=${uid}，正文 ${String(content).length} 字`);
             debug(`世界书写入明细：条目总数 ${Object.keys(data.entries).length}，本次改动 uid=${uid}`);
 
             // 回读校验
@@ -3604,22 +3779,58 @@
             if (!check.ok) {
                 // 明细（含 uid）只进日志；界面上说「有别的条目被改动」就够，uid 用户不认识
                 error(`世界书写后校验失败：${check.reason}`);
-                throw new Error('世界书写后校验失败：有其他条目内容被改动，已中止本次写入');
+                // 2026-11-10 修（评审 P1-9）：抛出前把 uid 挂到错误上。
+                // 内容这时已经真的写进世界书了，说「已中止」是假的——它没中止，是写完了才发现别处被动了。
+                // 挂上 uid 让调用方能记账：不记的话，这本书里留着一条内容正确、
+                // 扩展却不知道属于谁的事件条目，下次采用会在旁边再写一条重复的。
+                const err = new Error('世界书写后校验失败：有其他条目内容被改动。本次内容已写入世界书，请先刷新页面检查再决定是否保留');
+                err.uid = uid;
+                err.written = true;
+                throw err;
             }
             if (!after.entries[uid] || String(after.entries[uid].content || '') !== String(content)) {
                 error(`世界书回读内容不一致：uid=${uid}，期望 ${String(content).length} 字，实际 ${String((after.entries[uid] || {}).content || '').length} 字`);
-                throw new Error('世界书写后回读内容不一致');
+                const err = new Error('世界书回读内容不一致：条目已写入，但内容与预期不符，请刷新页面核对');
+                err.uid = uid;
+                err.written = true;
+                throw err;
             }
-            debug(`世界书写后校验通过：uid=${uid}，其余 ${Object.keys(foreignBefore).length} 条外部条目零变化`);
 
             return { uid };
         });
     }
 
-    async function deleteEventEntry(bookName, uid) {
+    /**
+     * 删除路径的唯一实现。定位、复核、删除三步必须在同一把锁里：
+     * 先读出来找 uid、再另起一次写，中间隔着一次 await，别人动了世界书就可能删错条目。
+     * 2026-11-10 修（评审 P1-8 / 本方案第 10 项）：
+     *   - 传了 event 时按名字+对话现查，并且再复核一次 commentMatchesEvent——
+     *     findEventEntryUid 的判定口径可能与删除要求不同，删之前必须确认它就是自己那条；
+     *   - 只传 uid 时（测试条目清理）按 uid 删，仍校验 ▸事件 前缀。
+     */
+    async function deleteEventEntryLocked(bookName, uidOrEvent) {
         return withWriteLock(async () => {
             const data = await readWorldBook(bookName);
             if (!data || !data.entries) throw new Error('世界书数据无效');
+
+            let uid;
+            let expectedEvent = null;
+            if (uidOrEvent && typeof uidOrEvent === 'object') {
+                const event = uidOrEvent;
+                const found = findEventEntryUid(data, event);
+                if (found == null) {
+                    warn(`事件「${event.name}」在世界书里找不到对应条目，跳过删除`);
+                    return { deleted: false, reason: '条目不存在' };
+                }
+                if (String(event.entryUid) !== String(found)) {
+                    warn(`事件「${event.name}」的条目位置与记录不符：记录 uid=${event.entryUid}，实际 uid=${found}，按实际位置删除`);
+                }
+                uid = found;
+                expectedEvent = event;
+            } else {
+                uid = uidOrEvent;
+            }
+
             const entry = data.entries[uid];
             if (!entry) {
                 warn(`删除条目 uid=${uid} 时发现它已不存在，可能已被别处删过`);
@@ -3629,35 +3840,61 @@
                 error(`拒绝删除 uid=${uid}：注释「${entry.comment}」不是本扩展创建的条目`);
                 throw new Error('拒绝删除：该条目不是本扩展创建的');
             }
+            if (!String(entry.comment || '').startsWith(ENTRY_PREFIX)) {
+                error(`拒绝删除 uid=${uid}：注释「${entry.comment}」不是本扩展创建的条目`);
+                throw new Error('拒绝删除：该条目不是本扩展创建的');
+            }
+            // 复核这一条到底是不是它自己的（评审原第 8 条要求）。
+            // 注意判定口径要和 findEventEntryUid 一致：那个函数允许两种命中——
+            //   · 事件名 + chatId 都对上；或
+            //   · 条目极老、没写 chatId，靠事件名唯一认出（它的第 4 步）。
+            // 所以这里不能一律要求 chatId 匹配：那就把「名字对、没写 chatId」的老条目判成别人，
+            // 永远删不掉，收尾后它留在世界书里没人认领。
+            // 只在明确对不上时拒绝：名字不同，或双方都写了 chatId 却不是同一个。
+            if (expectedEvent) {
+                const cName = commentNameOf(entry.comment);
+                const nameOk = !expectedEvent.name || cName === String(expectedEvent.name);
+                const entryChat = (String(entry.comment || '').match(/chatId=([^｜|]*)/) || [])[1];
+                const wantChat = expectedEvent.chatId == null ? '' : String(expectedEvent.chatId);
+                const chatOk = !entryChat || !wantChat || String(entryChat).trim() === wantChat;
+                if (!nameOk || !chatOk) {
+                    error(`拒绝删除 uid=${uid}：条目注释「${entry.comment}」与事件「${expectedEvent.name}」对不上（${!nameOk ? '名字不同' : '对话不同'}）`);
+                    throw new Error('拒绝删除：世界书里这一条不是该事件的条目');
+                }
+            }
+
             const foreignBefore = snapshotForeignEntries(data);
+            const beforeCount = Object.keys(data.entries).length;
             delete data.entries[uid];
             await writeWorldBook(bookName, data);
             const after = await readWorldBook(bookName);
+            if (after && after.entries && after.entries[uid]) {
+                // 写回成功但条目还在，说明这次删除没落盘，不能报成功
+                error(`删除回读校验失败：uid=${uid} 写入后仍然存在，删除未生效`);
+                throw new Error('删除后回读校验失败：条目仍在世界书里，请刷新页面确认');
+            }
             const check = verifyForeignEntriesUnchanged(foreignBefore, after);
             if (!check.ok) {
                 error(`删除后校验失败：${check.reason}`);
                 throw new Error('删除后校验失败：有其他条目内容被改动，已中止本次删除');
             }
-            log(`世界书已删除事件条目 uid=${uid}，退回 ${Object.keys(foreignBefore).length} 条外部条目`);
+            log(`世界书已删除事件条目 uid=${uid}，退回 ${Object.keys(foreignBefore).length} 条外部条目（总条目 ${beforeCount} → ${Object.keys((after && after.entries) || {}).length}）`);
             return { deleted: true };
         });
+    }
+
+    /** 按 uid 删本扩展的条目（测试条目清理等）。 */
+    async function deleteEventEntry(bookName, uid) {
+        return deleteEventEntryLocked(bookName, uid);
     }
 
     /**
      * 删掉某个事件在世界书里的条目，位置由 findEventEntryUid 现查，
      * 不信 event.entryUid——它可能已经被别的插件重排成了别人的编号。
+     * 定位与删除在同一把锁内完成，见 deleteEventEntryLocked。
      */
     async function deleteEventEntryForEvent(bookName, event) {
-        const data = await readWorldBook(bookName);
-        const found = findEventEntryUid(data, event);
-        if (found == null) {
-            warn(`事件「${event.name}」在世界书里找不到对应条目，跳过删除`);
-            return { deleted: false, reason: '条目不存在' };
-        }
-        if (String(event.entryUid) !== String(found)) {
-            warn(`事件「${event.name}」的条目位置与记录不符：记录 uid=${event.entryUid}，实际 uid=${found}，按实际位置删除`);
-        }
-        return deleteEventEntry(bookName, found);
+        return deleteEventEntryLocked(bookName, event);
     }
 
     /**
@@ -3709,6 +3946,38 @@
             }
         }
         return out;
+    }
+
+
+    /**
+     * 2026-11-10 批 3 第 17 项：当前对话的可读标识。
+     *
+     * 事件存档存在 chatMetadata 里，天然跟着对话走——换对话不会串数据。
+     * 但面板上写「进行中：某某事件」时没说这事件是哪段对话里开的，
+     * 用户从别的对话切回来、或者开了两个窗口，就看不出手里这个事件的出处。
+     * 长期口径已定（裁定一）为「新增数据一律按对话隔离」，这一条是不改结构前提下先给出的可见性。
+     *
+     * 返回形如 { id, label }：id 是 chatId 原值，label 是给人看的短名。
+     * 拿不到就返回 { id:'', label:'未知对话' }，不抛异常——面板不能因为这个挂掉。
+     */
+    function currentChatTag() {
+        const context = ctx();
+        if (!context) return { id: '', label: '未知对话' };
+        const id = context.chatId == null ? '' : String(context.chatId);
+        // 优先角色名 + 文件名：ST 的 chatId 是一串不透明的标识，单看它用户认不出是哪个对话
+        const chars = context.characters || [];
+        const chid = context.characterId;
+        const chName = (chid != null && chars[chid] && (chars[chid].name || '')) || '';
+        // fileName 形如「角色名 - 2026-11-10@20时30分.jsonl」，只去扩展名、不去时间戳：
+        // 用正则切时间戳依赖文件名的具体格式，ST 换个写法就切错，宁可多显示一段也不切坏。
+        // 拿到角色名与文件名就用「角色名 · 文件名」，缺一个时用另一个，都没有就退回归档 id 末 6 位。
+        const chatFile = String(context.chatMetadata && context.chatMetadata.file_name || '');
+        let label;
+        if (chName && chatFile) label = `${chName} · ${chatFile.replace(/\.jsonl?$/i, '')}`;
+        else if (chName) label = chName;
+        else if (chatFile) label = chatFile.replace(/\.jsonl?$/i, '');
+        else label = id ? `对话 ${id.slice(-6)}` : '当前对话';
+        return { id, label };
     }
 
     function getCharacterBookName() {
@@ -3940,43 +4209,38 @@
         for (let i = chat.length - 1; i >= 0; i--) {
             const msg = chat[i];
             if (!msg) continue;
+
             const iso = msg.TavernDB_ACU_IsolatedData;
-            if (!iso || typeof iso !== 'object') continue;
+            const hasIso = !!iso && typeof iso === 'object';
 
-            for (const key of Object.keys(iso)) {
-                const container = iso[key];
-                if (!container || typeof container !== 'object') continue;
+            if (hasIso) {
+                for (const key of Object.keys(iso)) {
+                    const container = iso[key];
+                    if (!container || typeof container !== 'object') continue;
 
-                // v2: storageFrame.logEntries
-                const entries = container.storageFrame && container.storageFrame.logEntries;
-                if (Array.isArray(entries)) {
-                    const sorted = entries.slice().sort((a, b) => (a.seq || 0) - (b.seq || 0));
-                    for (const e of sorted) {
-                        for (const op of (e.operations || [])) {
-                            if (op && op.sheetKey && op.sheet && op.sheet.content) {
-                                // 楼层是从新到旧遍历的，第一次遇到即最新快照；
-                                // 后面更旧的楼层会带同一张表的旧版本，不能覆盖
-                                if (!result.has(op.sheetKey)) result.set(op.sheetKey, op.sheet);
+                    // v2: storageFrame.logEntries
+                    const entries = container.storageFrame && container.storageFrame.logEntries;
+                    if (Array.isArray(entries)) {
+                        // 2026-11-10 修（评审原第 17 条）：楼内按 seq 降序，让同一楼里最后一次操作胜出。
+                        // 原先是升序 +「第一次命中就留」，留下来的反而是 seq 最小、最早的那一版；
+                        // 而一个回合内「先追加、再改单元格」是 shujuku 的常见批量行为，
+                        // 本楼的修正全被丢掉，跟楼层之间「新的赢」正好相反。
+                        const sorted = entries.slice().sort((a, b) => (b.seq || 0) - (a.seq || 0));
+                        for (const e of sorted) {
+                            for (const op of (e.operations || [])) {
+                                if (op && op.sheetKey && op.sheet && op.sheet.content) {
+                                    // 楼层是从新到旧遍历的，第一次遇到即最新快照；
+                                    // 后面更旧的楼层会带同一张表的旧版本，不能覆盖
+                                    if (!result.has(op.sheetKey)) result.set(op.sheetKey, op.sheet);
+                                }
                             }
                         }
                     }
-                }
 
-                // legacy: independentData / 直接 sheet_
-                const legacy = container.independentData || container;
-                if (legacy && typeof legacy === 'object') {
-                    for (const [k, v] of Object.entries(legacy)) {
-                        if (k.startsWith('sheet_') && v && typeof v === 'object' && v.content) {
-                            if (!result.has(k)) result.set(k, v);
-                        }
-                    }
-                }
-
-                // 老字段兜底：TavernDB_ACU_Data / SummaryData / IndependentData
-                for (const legacyKey of ['TavernDB_ACU_IndependentData', 'TavernDB_ACU_Data', 'TavernDB_ACU_SummaryData']) {
-                    const box = msg[legacyKey];
-                    if (box && typeof box === 'object') {
-                        for (const [k, v] of Object.entries(box)) {
+                    // legacy: independentData / 直接 sheet_
+                    const legacy = container.independentData || container;
+                    if (legacy && typeof legacy === 'object') {
+                        for (const [k, v] of Object.entries(legacy)) {
                             if (k.startsWith('sheet_') && v && typeof v === 'object' && v.content) {
                                 if (!result.has(k)) result.set(k, v);
                             }
@@ -3984,8 +4248,32 @@
                     }
                 }
             }
+
+            // 2026-11-10 修（评审原第 18 条）：老字段兜底原来写在 iso 的 key 循环里，
+            // 而循环前面有一句「没有 IsolatedData 就 continue」——正需要这段兜底的旧存档
+            // 一条都扫不到，iso 是空对象时循环体也一次都不进。现在提到 iso 判断之外，每条消息只跑一次。
+            //
+            // 位置必须在 v2 之后：同一条消息里 v2 是这一楼的正式数据，老字段是历史残留，
+            // 先跑老字段会让它的旧版本把本楼的新数据挤掉（result.has 命中就不再覆盖）。
+            collectLegacySheets(msg, result);
         }
         return result;
+    }
+
+    /**
+     * 老字段兜底：TavernDB_ACU_IndependentData / Data / SummaryData。
+     * 抽出来是因为它原来被困在 IsolatedData 的循环里，没 IsolatedData 的旧楼层永远扫不到。
+     */
+    function collectLegacySheets(msg, result) {
+        for (const legacyKey of ['TavernDB_ACU_IndependentData', 'TavernDB_ACU_Data', 'TavernDB_ACU_SummaryData']) {
+            const box = msg[legacyKey];
+            if (!box || typeof box !== 'object') continue;
+            for (const [k, v] of Object.entries(box)) {
+                if (k.startsWith('sheet_') && v && typeof v === 'object' && v.content) {
+                    if (!result.has(k)) result.set(k, v);
+                }
+            }
+        }
     }
 
     /** 按名字找纪要表（不按 key，见设计 §4.3） */
@@ -6052,23 +6340,27 @@
         const nameLine = named
             ? '   a. 事件名直接用上面给定的名字'
             : '   a. 事件名：你没有收到指定的名字，请根据当前剧情、角色处境和即将发生的事，起一个简洁的中文事件名（4-12 字，如「开膛手杰克案」「石桥镇失踪案」），写进 event_name 键';
-        // 2026-11-07 0C：第 1–5 项按主类型给。
-        // 原先这五项写死在案件流程里，选战斗、探险、谈判的模型照样被要求
-        // 「写出核心真相」「列 5-8 条信息节点」——真机上战斗事件被迫硬凑核心真相就是这个原因。
-        // 现在从 OUTLINE_TYPE_ITEMS 取；表里没有的（将来新加的类型）退回通用说法，
-        // 但不再套用案件措辞。
-        const typeItems = OUTLINE_TYPE_ITEMS[mainTypeLabel] || [
+        // 2026-11-10 批 3 第 15 项：字段清单不再手写，从该类型的 spec 现生成。
+        // 原来手写那份已经和 spec 漂移过一次（spec 是 steps、提示词写 task），
+        // 现在字段名与顺序单一来源是 spec，这里只补中文说明。
+        const typeItems = typeFieldLines(mainTypeLabel);
+        const fallbackItems = typeItems.length ? typeItems : [
             '1. 事件类型：写明本事件属于哪一类',
             '2. 结构：按这个类型自己的机制列字段，内层一律放在 structure 下',
             '3. 角色：列出参与各方及其诉求',
             '4. 推进：写清从开局到结束的分步过程',
             '5. 禁止事项：不得让角色知道其不应知道的信息',
         ];
+        // 2026-11-10 裁定二：spec.rules 接进提示词（when / not_when 不接，那两项已在渲染层与校验层用着）
+        const ruleLines = typeRuleLines(mainTypeLabel);
         return [
             head,
             '0. 事件名（event_name）与事件简介（event_brief，一句话说清这事件要解决什么）',
             nameLine,
-            ...typeItems,
+            ...fallbackItems,
+            // 2026-11-10 裁定二：每类的关键约束贴着自己的字段清单写，
+            // 不并进【硬性要求】——那段是所有类型通用的，混在一起模型分不清哪条属于本类型。
+            ...(ruleLines.length ? ['', ...ruleLines] : []),
             '',
             buildPrefsBlock(prefs),
             '',
@@ -6594,10 +6886,11 @@
     }
 
     /** 生成事件状态卡文本 */
-    function buildStateCard(event) {
+    function buildStateCard(event, statusOverride) {
         if (!event) return '';
         const lines = [];
-        lines.push(`事件：${event.name}（${event.status === 'active' ? '进行中' : event.status}）`);
+        const shownStatus = statusOverride || event.status;
+        lines.push(`事件：${event.name}（${shownStatus === 'active' ? '进行中' : shownStatus}）`);
 
         // 内层取值（2026-11-05 M1；M2 评审后收成公共函数）：
         // 内层字段只从 structure 下面取，不回落顶层。老事件的扁平形状读不出来，这是既定口径。
@@ -7051,6 +7344,8 @@
     /** 极简 YAML 解析：覆盖大纲实际会出现的结构（2-4 层映射与列表） */
     function parseSimpleYaml(text) {
         const rawLines = String(text || '').replace(/\r/g, '').split('\n');
+        // 撞名的键收集在这里，解析完挂在返回对象上（不可枚举，不影响遍历与序列化）
+        const duplicateKeys = [];
 
         // 去注释：只有引号外、且前面是空白或行首的 # 才算注释
         const stripComment = (s) => {
@@ -7090,27 +7385,83 @@
             return t;
         };
 
-        // 预扫描：把有效行整理成 {indent, text}
-        const lines = [];
-        for (const raw of rawLines) {
-            const s = stripComment(raw);
-            if (!s.trim()) continue;
-            const trimmed = s.trim();
-            if (trimmed === '---' || trimmed === '...') continue;
-            lines.push({ indent: s.length - s.trimStart().length, text: trimmed });
-        }
+        // 键值切分：半角冒号与全角冒号都认（P1-11）。
+        // 模型偶尔把分隔符写成「事件名：甲」，原来只找半角冒号，整行被跳过、最终解析成空对象，
+        // 界面只报「外层键缺失」，根本看不出是写法没认。全角冒号后面允许没有空格。
+        // 返回 null 表示这行不是键值行；否则给 {key, value}，value 已去掉首尾空白。
+        const splitKeyValue = (text) => {
+            const s = String(text || '');
+            let idx = -1;
+            let sepLen = 1;
+            for (let i = 0; i < s.length; i++) {
+                const ch = s[i];
+                if (ch === ':') { idx = i; sepLen = 1; break; }
+                if (ch === '：') { idx = i; sepLen = 1; break; }
+            }
+            if (idx <= 0) return null;
+            const key = s.slice(0, idx).trim();
+            if (!key) return null;
+            return { key, value: s.slice(idx + sepLen).trim() };
+        };
 
-        // 块标量（| 或 >）的后续行必须以原样保留缩进与空行，不能走上面的通用预处理。
-        // 先标记出哪些行属于块标量正文，后面统一跳过。
-        const isBlockHeader = (t) => /^[|>][+-]?\d*$/.test(t) || /^[|>][+-]?$/.test(t);
-        const blockBody = new Array(lines.length).fill(false);
-        for (let i = 0; i < lines.length; i++) {
-            const kv = lines[i].text.match(/^[^:]+:\s*([|>][+-]?)\s*$/);
-            if (!kv) continue;
-            const baseIndent = lines[i].indent;
-            for (let j = i + 1; j < lines.length; j++) {
-                if (lines[j].indent <= baseIndent) break;
-                blockBody[j] = true;
+        // 预扫描要分两段做，因为块标量（| 或 >）的正文在语义上是纯文本：
+        // 里面的空行、以 # 开头的行都是内容，不是格式。
+        // 原来的写法是先对所有行统一去注释、丢空行，之后再去找块标量区间——
+        // 那时候正文已经被改成一行行了，保护等于没做（那段的注释说「要原样保留」，代码里没接）。
+        // 现在先按原始行划出块标量区间，区间内原样收进 lines，区间外才走去注释与丢空行。
+        const lines = [];
+
+        // 块标量标记：| 或 >，可带 +/- 与数字
+        const isBlockMarkerText = (v) => /^[|>][+-]?\d*$/.test(String(v || '').trim());
+        // 一行是否是「键: |」或「键: >」这类块标量头（也认全角冒号）
+        const blockHeaderOf = (rawText) => {
+            const kv = splitKeyValue(rawText);
+            if (!kv) return null;
+            return isBlockMarkerText(kv.value) ? kv.value : null;
+        };
+
+        // 第一遍：逐行扫描，遇到块标量头就把后续所有比它更深的原始行原样收进来
+        let scanIdx = 0;
+        while (scanIdx < rawLines.length) {
+            const raw = rawLines[scanIdx];
+            const s = stripComment(raw);
+            if (!s.trim()) { scanIdx++; continue; }
+            const trimmed = s.trim();
+            if (trimmed === '---' || trimmed === '...') { scanIdx++; continue; }
+
+            const lineIndent = s.length - s.trimStart().length;
+            lines.push({ indent: lineIndent, text: trimmed });
+
+            // 这一行是块标量头吗？用去注释后的文本判断，避免把正文里的 # 当成注释处理
+            const marker = blockHeaderOf(trimmed);
+            scanIdx++;
+            if (!marker) continue;
+
+            // 块标量正文：后续所有缩进比头部更深的原始行，原样收（不去注释、不丢空行）
+            // 空行的缩进不能瞎定：它要跟正文行一致，否则去公共缩进时会被算成最小缩进，
+            // 结果是正文每行都被多切掉一截（真机上表现为整段前面多一个空格）。
+            // 所以空行先存着，等遇到第一个真实正文行、拿到它的缩进后再补上。
+            let pendingBlank = 0;
+            while (scanIdx < rawLines.length) {
+                const bodyRaw = rawLines[scanIdx];
+                if (!bodyRaw.trim()) {
+                    pendingBlank++;
+                    scanIdx++;
+                    continue;
+                }
+                const bodyIndent = bodyRaw.length - bodyRaw.trimStart().length;
+                if (bodyIndent <= lineIndent) break;
+                // 正文开始，把攒着的空行按这个缩进补进去
+                while (pendingBlank > 0) {
+                    lines.push({ indent: bodyIndent, text: '' });
+                    pendingBlank--;
+                }
+                lines.push({ indent: bodyIndent, text: bodyRaw.trim() });
+                scanIdx++;
+            }
+            // 去掉正文尾部多余的空行占位
+            while (lines.length && lines[lines.length - 1].text === '' && lines[lines.length - 1].indent > lineIndent) {
+                lines.pop();
             }
         }
 
@@ -7163,15 +7514,14 @@
                         continue;
                     }
 
-                    // "- key: value" 形式，属于对象列表项
-                    const kvIdx = content.indexOf(':');
-                    const looksLikeKv = kvIdx > 0 && !content.startsWith('"') && !content.startsWith("'")
-                        && (kvIdx === content.length - 1 || /\s/.test(content[kvIdx + 1]));
+                    // "- key: value" 形式，属于对象列表项（半角全角冒号都认）
+                    const kvSplit = splitKeyValue(content);
+                    const looksLikeKv = kvSplit !== null && !content.startsWith('"') && !content.startsWith("'");
 
                     if (looksLikeKv) {
                         const itemObj = {};
-                        const key = content.slice(0, kvIdx).trim();
-                        const valStr = content.slice(kvIdx + 1).trim();
+                        const key = kvSplit.key;
+                        const valStr = kvSplit.value;
                         pos++;
                         if (valStr === '') {
                             const child = parseBlock(childIndent);
@@ -7185,10 +7535,10 @@
                         while (pos < lines.length && lines[pos].indent > childIndent
                             && !(lines[pos].text === '-' || lines[pos].text.startsWith('- '))) {
                             const sub = lines[pos];
-                            const kIdx = sub.text.indexOf(':');
-                            if (kIdx <= 0) { pos++; continue; }
-                            const k2 = sub.text.slice(0, kIdx).trim();
-                            const v2 = sub.text.slice(kIdx + 1).trim();
+                            const subKv = splitKeyValue(sub.text);
+                            if (!subKv) { pos++; continue; }
+                            const k2 = subKv.key;
+                            const v2 = subKv.value;
                             const subIndent = sub.indent;
                             pos++;
                             if (v2 === '') {
@@ -7213,26 +7563,65 @@
             while (pos < lines.length && lines[pos].indent === childIndent
                 && !(lines[pos].text === '-' || lines[pos].text.startsWith('- '))) {
                 const line = lines[pos];
-                const kvIdx = line.text.indexOf(':');
-                if (kvIdx <= 0) { pos++; continue; }
-                const key = line.text.slice(0, kvIdx).trim();
-                const valStr = line.text.slice(kvIdx + 1).trim();
+                const mapKv = splitKeyValue(line.text);
+                if (!mapKv) { pos++; continue; }
+                const key = mapKv.key;
+                const valStr = mapKv.value;
                 pos++;
+                let value;
                 if (valStr === '') {
                     const child = parseBlock(childIndent);
-                    obj[key] = child === null ? null : child;
+                    value = child === null ? null : child;
                 } else if (isBlockMarker(valStr)) {
-                    obj[key] = readBlockScalar(childIndent, String(valStr).trim());
+                    value = readBlockScalar(childIndent, String(valStr).trim());
                 } else {
-                    obj[key] = unquote(valStr);
+                    value = unquote(valStr);
+                }
+
+                // 同名键（2026-11-10 修）：模型偶尔把同一个键写两遍，例如两段 nodes。
+                // 原来的做法是后一段直接盖掉前一段，前一段静默消失——用户只看到节点少了一半，
+                // 界面不会报任何错，查起来无从下手。
+                // 现在两段都留：数组与数组首尾接起来，其它情况把两段都收进数组（内容一个字不丢），
+                // 同时把撞名的键记下来，由上层带进提示让用户看见。
+                if (Object.prototype.hasOwnProperty.call(obj, key)) {
+                    const prev = obj[key];
+                    if (Array.isArray(prev) && Array.isArray(value)) {
+                        obj[key] = prev.concat(value);
+                    } else if (Array.isArray(prev)) {
+                        obj[key] = prev.concat([value]);
+                    } else {
+                        obj[key] = [prev, value];
+                    }
+                    duplicateKeys.push(key);
+                } else {
+                    obj[key] = value;
                 }
             }
             return obj;
         }
 
         const root = parseBlock(-1);
-        return root === null ? {} : root;
+        const out = root === null ? {} : root;
+        // 撞名信息挂在返回对象上：不可枚举，JSON.stringify 与 Object.keys 都看不到，
+        // 老调用方行为不变；需要的地方用 parseSimpleYaml.duplicatesOf() 读。
+        if (duplicateKeys.length && out && typeof out === 'object') {
+            try {
+                Object.defineProperty(out, '__duplicateKeys', {
+                    value: duplicateKeys.slice(),
+                    enumerable: false,
+                    configurable: true,
+                    writable: true,
+                });
+            } catch (e) { /* 极端情况下挂不上就算了，不影响解析结果 */ }
+        }
+        return out;
     }
+
+    /** 取一份解析结果里撞过名的键（没有就返回空数组） */
+    parseSimpleYaml.duplicatesOf = (obj) => {
+        if (!obj || typeof obj !== 'object') return [];
+        return Array.isArray(obj.__duplicateKeys) ? obj.__duplicateKeys.slice() : [];
+    };
 
     // ---------- 结构规范化 ----------
 
@@ -7600,16 +7989,34 @@
         })();
         // 模型时不时把个别键写成中文（step 是英文、内容/风险 是中文），
         // 这里统一规范化成英文，后面所有代码只面对一套键名，不用到处写 p['内容'] 兼容
-        const parsed = patchFromOutsideFence(normalizeOutline(parseSimpleYaml(block)), tailText);
+        //
+        // 2026-11-10（批 2 同名键那条补完）：撞名的键要在规范化之前取走。
+        // 撞名信息挂在解析结果的不可枚举属性上，normalizeOutline 会造新对象，
+        // 一过这一手就没了——原来定义好的 parseSimpleYaml.duplicatesOf 全文零调用，
+        // 「两段 nodes 拼起来不丢内容」是做到了，但用户永远看不到「模型写重复了」。
+        // 方案要求的是「要么合并，要么解析时就报错提示」，所以这里必须接上。
+        const rawParsed = parseSimpleYaml(block);
+        const dupKeys = (parseSimpleYaml.duplicatesOf ? parseSimpleYaml.duplicatesOf(rawParsed) : []);
+        const parsed = patchFromOutsideFence(normalizeOutline(rawParsed), tailText);
+        // 撞名的键稍后并进 quality.warnings（quality 在下面几行才算出来）
         const hasYaml = !!extractCodeBlock(raw, 'yaml');
         // 2026-11-05 M2 评审：nodes 在 structure 里，按顶层读会恒为 0，
         // 下面那句 error「没有解析出任何信息节点」每次生成都会误报。
         const nodeCount = innerNodesOf(parsed).length;
         const keys = Object.keys(parsed || {});
         const quality = checkOutlineQuality(parsed);
+        // 撞名的键进结构检查的 warnings（2026-11-10 批 2 补完）：
+        // 详情页那条警示会说清是哪个键被写了两次，而不是只让用户看到「节点少了一半」却不知道原因。
+        if (dupKeys.length) {
+            quality.warnings = (quality.warnings || []).concat(
+                dupKeys.map(k => `模型把键「${k}」写了不止一次，两段内容已合并保留，请核对是否重复或冲突`));
+        }
 
         debug(`大纲解析：原文 ${String(raw || '').length} 字，YAML 块${hasYaml ? '命中' : '未命中（整段兜底）'}，`
             + `顶层键 ${keys.length} 个：${keys.join('、') || '无'}，节点 ${nodeCount} 个`);
+        if (dupKeys.length) {
+            warn(`大纲里有键被写了不止一次：${dupKeys.join('、')}。两段内容已合并保留，请在详情页核对是否重复`);
+        }
         if (hasYaml) {
             log(`大纲解析成功：节点 ${nodeCount} 个，顶层键 ${keys.length} 个`);
         } else {
@@ -7968,6 +8375,24 @@
     // ==================== 10. 事件流程 ====================
 
     let busy = S.busy; // 引用指向 S，值统一存 S
+    /**
+     * 令牌 → 人话（2026-11-10 批 3 第 18 项）。
+     * 忙碌时用户看到「正在生成大纲」是够的，但多条流程互相避让时要能说清是谁占着，
+     * 日志里写「inventoryOwner」这种东西没人看得懂。
+     */
+    const BUSY_OWNER_LABEL = {
+        'gen': '生成大纲',
+        'gen-chain': '逐条生成事件',
+        'adopt': '采用事件',
+        'inv': '盘点',
+        'inv-auto': '自动盘点',
+        'inv-manual': '手动盘点',
+        'close': '废弃/完结',
+    };
+    function ownerLabel(owner) {
+        return BUSY_OWNER_LABEL[owner] || String(owner || '另一个操作');
+    }
+
     // 忙碌提示文案随操作变：废弃/完结是本地操作，不该显示「正在请求模型」
     let busyText = S.busyText; // 引用指向 S，值统一存 S
 
@@ -7976,9 +8401,22 @@
      * @param on 是否忙碌
      * @param keepProgress 结束时是否保留进度列表（生成/盘点用）
      * @param text 忙碌提示文案。不传就沿用上一次的，避免文案互相覆盖
+     * @param owner 占用者标识（2026-11-10 批 3 第 18 项）。
+     *        解锁时只有持有者放得开：别人调 setBusy(false) 会被忽略，
+     *        免得自动盘点跑完把手动盘点的提示条收掉。不传 owner 的老调用一律当作持有者，
+     *        行为与改前一致，不会因为漏传就把锁死住。
      */
-    function setBusy(on, keepProgress, text) {
+    function setBusy(on, keepProgress, text, owner) {
+        const who = owner || null;
+        if (!on && S.busy) {
+            // 解锁时认持有者：记着别人名字的不放
+            if (S.busyOwner && who && S.busyOwner !== who) {
+                debug(`忽略 ${who} 的解锁：当前忙碌由 ${S.busyOwner} 占着`);
+                return;
+            }
+        }
         S.busy = on;
+        S.busyOwner = on ? (who || S.busyOwner) : null;
         if (text) S.busyText = text;
         if (S.panelEl) {
             const b = S.panelEl.querySelector('#eo_busy');
@@ -8988,12 +9426,17 @@
             + `-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
     }
 
-    /** 把事件卡状态压成世界书条目内容（800-1500 字） */
-    function buildEntryContent(event, round) {
+    /**
+     * 把事件卡状态压成世界书条目内容（800-1500 字）。
+     * statusOverride：采用时正文要写「进行中」，而那时 event.status 还是 draft
+     * （状态在写入成功后才改），直接读 event.status 会把 draft 写进世界书正文，
+     * 用户在世界书面板看到 draft 会以为没采用成功。见 2026-11-10 批 2 遗留问题一。
+     */
+    function buildEntryContent(event, round, statusOverride) {
         const context = ctx();
         const lines = [];
         lines.push(`〔事件大纲｜chatId=${context.chatId || ''}｜v${event.entryVersion || 1}｜更新于 ${new Date().toLocaleString('zh-CN')}〕`);
-        lines.push(buildStateCard(event));
+        lines.push(buildStateCard(event, statusOverride));
         if (round) lines.push(`盘点轮次：${round}`);
         const o = event.outline || {};
         // forbidden 在外层，直接读；characters 属于内层（2026-11-05 M2 评审 4.3）：
@@ -9317,7 +9760,7 @@
         const book = getCharacterBookName();
         if (!book) throw new Error('当前角色未绑定世界书');
 
-        setBusy(true, false, '正在生成大纲，请稍候…');
+        setBusy(true, false, '正在生成大纲，请稍候…', 'gen');
         try {
             startProgress('正在生成事件大纲');
             step('准备提示词');
@@ -9413,7 +9856,7 @@
             failProgress(e && e.message || String(e));
             throw e;
         } finally {
-            setBusy(false, true);
+            setBusy(false, true, null, 'gen');
         }
     }
 
@@ -9441,11 +9884,12 @@
                 throw new Error(`「${cur.name}」还在进行中，请先完结或废弃它，再采用新的待选事件`);
             }
         }
-        setBusy(true, false, '正在采用事件并写入世界书…');
+        setBusy(true, false, '正在采用事件并写入世界书…', 'adopt');
         try {
             const book = event.worldBook || getCharacterBookName();
             if (!book) throw new Error('当前角色未绑定世界书');
-            const content = buildEntryContent(event, 0);
+            // 正文按「采用后的状态」写：此时 event.status 还是 draft，不传这个就会把 draft 写进世界书
+            const content = buildEntryContent(event, 0, 'active');
             const res = await upsertEventEntry(
                 book,
                 content,
@@ -9469,10 +9913,23 @@
             toast('已写入世界书。要查看或手动编辑世界书，请先刷新页面（F5），否则改的是旧数据，会把这批内容盖掉', { ms: 9000 });
             return event;
         } catch (e) {
+            // 2026-11-10 修（评审 P1-9）：内容已经写进世界书、只是校验没过时，错误上带着 uid。
+            // 这里必须记账——不记的话，书里那条属于本事件的条目从此没人认领，
+            // 下次采用会在旁边再写一条，同一件事在书里出现两遍。
+            // 状态也推进到进行中：条目确实已经在世界里了，装成没发生反而更乱。
+            if (e && e.written && e.uid != null) {
+                event.entryUid = e.uid;
+                event.status = 'active';
+                event.floorBase = countFloors();
+                event.floorBaseNarration = !!getSettings().memory.narrationMode;
+                meta.currentEventId = id;
+                try { saveMeta(); } catch (e2) { /* 存盘失败不该盖住原始错误 */ }
+                warn(`事件「${event.name}」的条目已写入（uid=${e.uid}）但校验未通过，已记账避免重复写入`);
+            }
             failProgress(e && e.message || String(e));
             throw e;
         } finally {
-            setBusy(false, true);
+            setBusy(false, true, null, 'adopt');
         }
     }
 
@@ -9519,6 +9976,7 @@
         while (singles.length >= draftCap('single')) {
             const drop = singles.shift();
             delete meta.events[drop.id];
+            cleanupDraftViewState(drop.id);
             log(`待选事件已有 ${draftCap('single')} 个，挤掉最早的「${drop.name}」`);
         }
 
@@ -9546,10 +10004,24 @@
         }).sort((a, b) => a.at.localeCompare(b.at));
 
         // 严格大于才挤：允许恰好 MAX_CHAIN_DRAFTS 条并存
-        while (born.length > draftCap('chain')) {
+        //
+        // 2026-11-10 修（评审第 14 条，设计债 F）：上面统计的是 all，而 all 排除了 newId。
+        // 新链的第一个节点正在写入时，它自己不在 all 里，于是「已有链数」只数到旧链，
+        // 判停看起来没超，可新链一进来就变成上限加一。差一就差在这里。
+        // 现在把 newId 自己那条链先补进计数再判——它马上就要占一个名额。
+        const capChain = draftCap('chain');
+        const metaNew = meta.events[newId];
+        let extraNewChain = 0;
+        if (metaNew && metaNew.status === 'draft' && metaNew.chain && metaNew.chain.id
+            && !byChain[metaNew.chain.id]) {
+            extraNewChain = 1;
+        }
+        while (born.length + extraNewChain > capChain) {
+            // 没有旧链可挤时不能死循环：新链自己必须留下，超出的额度只能由旧的让出来
+            if (!born.length) break;
             const drop = born.shift();
-            for (const e of drop.evs) delete meta.events[e.id];
-            log(`待选链超过 ${draftCap('chain')} 条，挤掉最早的「${drop.name || drop.id}」`);
+            for (const e of drop.evs) { delete meta.events[e.id]; cleanupDraftViewState(e.id); }
+            log(`待选链超过 ${capChain} 条，挤掉最早的「${drop.name || drop.id}」`);
         }
     }
 
@@ -9558,9 +10030,27 @@
         const event = meta.events[id];
         if (!event || event.status !== 'draft') return false;
         delete meta.events[id];
+        // 2026-11-10 修（评审 P1-14）：草稿没了，跟着它走的内存状态也要清。
+        // 原来这里只删事件，正在编辑的是它、预览着的也是它，那些状态就留在了内存里：
+        // 下次点开另一条草稿，编辑框里可能是上一个已删草稿的正文，保存下去会写回谁都不对。
+        cleanupDraftViewState(id);
         saveMeta();
         log(`已丢弃待选事件「${event.name}」`);
         return true;
+    }
+
+    /**
+     * 清掉属于某条草稿的编辑态与预览态。
+     * 草稿被丢弃、被挤掉、被采用之后都要调一次，否则那些状态会挂在一个已经不存在的事件上。
+     */
+    function cleanupDraftViewState(id) {
+        const key = String(id);
+        if (S.editingDraftId != null && String(S.editingDraftId) === key) {
+            discardPendingEdit();
+        }
+        if (S.previewDraftIds && S.previewDraftIds.delete && S.previewDraftIds.has(key)) {
+            S.previewDraftIds.delete(key);
+        }
     }
 
     /**
@@ -9826,12 +10316,20 @@
         return lines.join('\\n') + '\\n';
     }
 
-    async function runInventory() {
+    /**
+     * 盘点。owner 区分自动与手动（2026-11-10 批 3 第 18 项）：
+     * 自动盘点由消息事件触发、手动由按钮触发，两者抢同一把锁。
+     * 令牌不同，自动那次跑完就不会把手动那次的提示条收掉。
+     * 默认 giveup:true 让「放弃等待」按钮照旧可用。
+     */
+    async function runInventory(owner) {
         const event = getCurrentEvent();
         if (!event) throw new Error('当前没有进行中的事件');
         if (event.status !== 'active') throw new Error('该事件已结束');
+        const inventoryOwner = owner || 'inv';
 
-        setBusy(true, false, '正在盘点事件状态，请稍候…');
+
+        setBusy(true, false, '正在盘点事件状态，请稍候…', inventoryOwner);
         try {
             startProgress('正在盘点事件状态');
             step('准备提示词');
@@ -9934,10 +10432,13 @@
                 event,
             );
             if (String(event.entryUid) !== String(res.uid)) {
-                // 位置被纠正过，同步回事件卡，避免下次又按旧编号找
+                // 位置被纠正过，同步回事件卡，避免下次又按原编号找
                 event.entryUid = res.uid;
             }
-            record.committedToBook = true;
+            // 2026-11-10 修（评审 P1-9）：上面那条只在位置变了时才更新，
+            // 而盘点这条路的记录常常本来就是空的——书里明明有对应条目，扩展却始终不知道它是自己的。
+            // 这里补一句无条件记回来，保证写入成功后一定有账。
+            if (res && res.uid != null) event.entryUid = res.uid;
             // 盘点成功即把计数基线挪到当前楼层，下一轮从零开始累计。
             // 基线要连模式一起记，否则用户切换转述后这个基线就按错口径算了
             event.floorBase = countFloors();
@@ -9951,32 +10452,80 @@
             failProgress(e && e.message || String(e));
             throw e;
         } finally {
-            setBusy(false, true);
+            setBusy(false, true, null, inventoryOwner);
         }
+    }
+
+    /**
+     * 收尾时清理指向已删除条目的旧记录（2026-11-10，批 1 遗留问题二）。
+     *
+     * 背景：uid 607 同时被三个事件记着——废弃旧链时只废弃了第三个节点，
+     * 前两个还是 active、entryUid 都写 607，而那个编号已经写进新链第一个节点的内容。
+     * 现在虽然「认不出来就按新增」不会覆盖别人，但脏记录留着迟早误导人，
+     * 也会让 healEntryUids 反复去校正一个本来就不该存在的指向。
+     *
+     * 清理范围只收窄到有把握的那部分，宁可漏清也不误清：
+     *   - 同一本书、同一对话下，同一条链的兄弟节点；以及状态已不是 draft/active 的历史卡片；
+     *   - 且它们的 entryUid 与刚被删掉的那个编号相同（deletedUid 传 null 时只清链上未知归属的记录）。
+     * 别的链、别的对话一概不碰。
+     */
+    function clearSiblingEntryRefs(meta, closedEvent, deletedUid) {
+        if (!meta || !meta.events || !closedEvent) return 0;
+        const hasUid = deletedUid != null;
+        const chainId = closedEvent.chain && closedEvent.chain.id ? String(closedEvent.chain.id) : '';
+        let cleared = 0;
+        for (const ev of Object.values(meta.events)) {
+            if (!ev || ev === closedEvent) continue;
+            if (ev.entryUid == null) continue;
+            if (hasUid && String(ev.entryUid) !== String(deletedUid)) continue;
+            if (String(ev.worldBook || '') !== String(closedEvent.worldBook || '')) continue;
+            if (String(ev.chatId || '') !== String(closedEvent.chatId || '')) continue;
+            const sameChain = chainId && ev.chain && ev.chain.id && String(ev.chain.id) === chainId;
+            const isHistorical = ev.status !== 'draft' && ev.status !== 'active';
+            if (!sameChain && !isHistorical) continue;
+            warn(`清掉事件「${ev.name}」指向 uid=${ev.entryUid} 的旧记录（${sameChain ? '同一链' : '历史卡片'}，该条目已不属于它）`);
+            ev.entryUid = null;
+            cleared++;
+        }
+        return cleared;
     }
 
     async function closeEvent(abandoned) {
         const event = getCurrentEvent();
         if (!event) throw new Error('当前没有事件');
         // 废弃/完结是纯本地操作：删世界书条目、改状态、清历史，不碰模型
-        setBusy(true, false, abandoned ? '正在废弃事件并清理世界书条目…' : '正在完结事件并清理世界书条目…');
+        setBusy(true, false, abandoned ? '正在废弃事件并清理世界书条目…' : '正在完结事件并清理世界书条目…', 'close');
         try {
+            let deletedUid = null;
             if (event.entryUid != null || event.worldBook) {
                 // 位置现查，不用 event.entryUid —— 世界书可能被重排过
                 const book = event.worldBook || getCharacterBookName();
-                if (book) await deleteEventEntryForEvent(book, event);
+                if (book) {
+                    // 真正被删掉的是 findEventEntryUid 现查到的那个编号，不一定等于 event.entryUid
+                    const before = findEventEntryUid(await readWorldBook(book), event);
+                    const res = await deleteEventEntryForEvent(book, event);
+                    if (res && res.deleted) deletedUid = before != null ? before : event.entryUid;
+                }
                 event.entryUid = null;
             }
             event.status = abandoned ? 'abandoned' : 'completed';
             event.closedAt = new Date().toISOString();
             const meta = getMeta();
             meta.currentEventId = null;
+            // 2026-11-10 修（批 1 遗留问题二：uid 607 三个事件都声称属于自己）：
+            // 废弃/完结只清掉当前这一个事件的 entryUid，链上其它还挂着同一个编号的兄弟节点没动，
+            // 那个编号后来被新链第一个节点写进去了，旧节点就指着一个已经属于别人的条目。
+            // 今天靠「认不出来就按新增」不覆盖，但脏记录悬着迟早出事。
+            // 所以收尾时把世界书里所有它的残留一并清掉：同一本书、同一对话、同一链的兄弟节点，
+            // 以及状态已不是 draft/active 的历史卡片。
+            const cleared = clearSiblingEntryRefs(meta, event, deletedUid);
+            if (cleared) log(`收尾时清掉 ${cleared} 条指向已删除条目的旧记录（同一链或同书同对话的历史卡片）`);
             await applyRetention(meta);
             saveMeta();
             log(`事件「${event.name}」已${abandoned ? '废弃' : '完结'}，世界书条目已清理，事件卡转历史`);
             return event;
         } finally {
-            setBusy(false);
+            setBusy(false, null, null, 'close');
         }
     }
 
@@ -11383,7 +11932,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         btnCheck.addEventListener('click', () => {
             const r = checkEditedRaw(wrapCodeFence(keysToEnglish(buf.text, buf.backMap), buf.fenced));
             S.draftEditIssues = r.issues.length ? r.issues : null;
-            renderPanel();
+            repaintPage();
             if (!r.ok) log('格式检查未通过：' + r.fatal.join('；'));
             else if (!r.issues.length) log('格式检查通过，没有发现问题');
             else log('格式检查通过，但有 ' + r.issues.length + ' 条提醒');
@@ -11398,7 +11947,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             buf.backMap = rebuilt.backMap;
             buf.original = rebuilt.text;
             S.pendingDraftEditDirty = false;
-            renderPanel();
+            repaintPage();
             log('已按结构重建编辑框内容');
         });
 
@@ -11440,12 +11989,12 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     S.draftEditIssues = res.issues && res.issues.length ? res.issues : null;
                     discardPendingEdit();
                     S.previewDraftIds.add(d.id);
-                    renderPanel();
+                    repaintPage();
                 } catch (e) {
                     // 格式硬错：不保存、不退出编辑，把原文留在框里让人接着改
                     error('保存草稿编辑失败：', e);
                     S.draftEditIssues = [String(e && e.message || e)];
-                    renderPanel();
+                    repaintPage();
                 }
             });
             btnRow.appendChild(btnSave);
@@ -11455,7 +12004,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             btnCancel.addEventListener('click', async () => {
                 if (buf.text !== buf.original && !(await askConfirm('放弃这次编辑？改动不会保存。'))) return;
                 discardPendingEdit();
-                renderPanel();
+                repaintPage();
             });
             btnRow.appendChild(btnCancel);
 
@@ -11466,7 +12015,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 btnDone.type = 'button';
                 btnDone.addEventListener('click', () => {
                     discardPendingEdit();
-                    renderPanel();
+                    repaintPage();
                 });
                 btnRow.appendChild(btnDone);
             }
@@ -11556,7 +12105,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         // 只能刷新页面。改成走 setBusy 重建整块（文字 + 按钮），
         // 它本来就是造这块内容的唯一入口，不该在别处按半套逻辑拼一遍。
         // 第二个参数给 true：这次只恢复显示，不要顺带清掉进度列表。
-        if (S.busy) setBusy(true, true);
+        // 2026-11-10 批 3：重建时沿用原来的持有者，不另立新令牌——否则一重建就易主了
+        if (S.busy) setBusy(true, true, null, S.busyOwner || null);
 
         const context = ctx();
         if (!context) {
@@ -11694,7 +12244,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             if (!(await askConfirm('这份草稿还有没保存的改动，关掉就丢了。继续？'))) return;
         }
         discardPendingEdit();
-        renderPanel();
+        repaintPage();
     }
 
     /**
@@ -11822,7 +12372,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             btnRaw.type = 'button';
             btnRaw.addEventListener('click', () => {
                 d.rawOpen = !d.rawOpen;
-                renderPanel();
+                repaintPage();
             });
             rawRow.appendChild(btnRaw);
             box.appendChild(rawRow);
@@ -11994,7 +12544,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             btnGen.disabled = true;
             await startChainRun(d);
             btnGen.disabled = false;
-            renderPanel();
+            repaintPage();
         });
         btnRow.appendChild(btnGen);
 
@@ -12009,7 +12559,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 if (!(await askConfirm('会把已经生成的 ' + d.generated.length
                     + ' 个节点事件全部丢掉重做（链骨架不动）。继续？'))) return;
                 await regenChainNodes(d);
-                renderPanel();
+                repaintPage();
             });
             btnRow.appendChild(btnRedo);
         }
@@ -12020,7 +12570,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             S.chainDraft = null;
             // 存着的骨架也一起删掉，否则刷新一下它又冒出来
             clearChainDraft();
-            renderPanel();
+            repaintPage();
         });
 
         btnRow.appendChild(btnDrop);
@@ -12071,7 +12621,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             ? d.generated[d.generated.length - 1].exitState
             : null;
 
-        setBusy(true, false, '正在逐条生成事件');
+        setBusy(true, false, '正在逐条生成事件', 'gen-chain');
         try {
             startProgress('正在生成事件链');
             const made = await runChain(chain, d.chainId, prefs, mode, {
@@ -12079,7 +12629,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     d.generated.push(ev);
                     S.previewDraftIds.add(ev.id);
                     log(`链节点 ${ev.chain.pos}/${total} 生成完成：${ev.name}`);
-                    renderPanel();
+                    repaintPage();
                 },
                 waitNext: async (nextPos, total) => {
                     // 手动模式：等用户点「下一个」。
@@ -12109,7 +12659,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             toast('生成事件链失败：' + (e && e.message || e));
         } finally {
             d.running = false;
-            setBusy(false);
+            setBusy(false, null, null, 'gen-chain');
             resetProgress();
         }
     }
@@ -12139,20 +12689,31 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         // 根因是这里只数 status === 'draft'，把链节点也算进去了——
         // 3 条链各 2 个节点，6 个节点事件被当成 6 个单事件报出来。
         // 链节点在列表里归组显示在各自链下面，不该混进「待选事件」这个说法里。
-        const allDrafts = Object.values(getMeta().events).filter(e => e && e.status === 'draft');
+        const allDrafts = Object.values((getMeta() || {}).events || {}).filter(e => e && e.status === 'draft');
         const singleN = allDrafts.filter(e => !(e.chain && e.chain.id)).length;
         const chainN = new Set(allDrafts.filter(e => e.chain && e.chain.id)
             .map(e => e.chain.id)).size;
         const draftN = singleN + chainN;
+        // 2026-11-10 批 3 第 17 项：标出当前事件来自哪个对话。
+        // 存档在 chatMetadata 里、跟着对话走，换对话不会串，但面板不写出处时，
+        // 从别的对话切回来或同时开两个窗口就看不出手里这个事件是哪段聊天里开的。
+        const tag = currentChatTag();
+        // 事件记下的 chatId 与当前对话不一致 = 这条记录不是在这里开的（老存档/被手工改过）。
+        // 这时要说出来，而不是照样显示得像本地事件。
+        const fromElsewhere = ev && ev.chatId != null && tag.id && String(ev.chatId) !== tag.id;
+        const chatLine = ev
+            ? `\n来自对话：${tag.label}` + (fromElsewhere ? `（注意：该事件记录在对话 ${String(ev.chatId).slice(-6)}，不是当前对话）` : '')
+            : '';
         statusBox.textContent = ev
             ? `进行中：${ev.name}\n开始于 ${String(ev.createdAt || '').slice(0, 19)}\n世界书：${ev.worldBook}　条目已同步`
+                + chatLine
                 + (draftN ? `\n另有 ${draftN} 个待选等你决定` : '')
             : (draftN
-                ? `当前没有进行中的事件。上方有 ${draftN} 个待选`
+                ? `当前没有进行中的事件（对话：${tag.label}）。上方有 ${draftN} 个待选`
                     + '（' + [singleN ? `${singleN} 个单事件` : '', chainN ? `${chainN} 条事件链` : '']
                         .filter(Boolean).join('、') + '）'
                     + '，点「采用」即可开始；也可以继续生成新的来比较。'
-                : '当前没有进行中的事件。填好下面的事件名和偏好即可开始。生成后先进待选，满意再采用。');
+                : `当前没有进行中的事件（对话：${tag.label}）。填好下面的事件名和偏好即可开始。生成后先进待选，满意再采用。`);
         page.appendChild(statusBox);
 
     }
@@ -12285,7 +12846,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     btnDrop.addEventListener('click', async () => {
                         if (!(await askConfirm(`丢弃待选事件「${d.name}」？它还没写进世界书，丢弃不会留下任何东西。`))) return;
                         discardDraft(d.id);
-                        renderPanel();
+                        repaintPage();
                     });
                     useActs.appendChild(btnDrop);
                 }
@@ -12309,7 +12870,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                         btnRaw.addEventListener('click', () => {
                             if (rawOn) S.previewRawDraftIds.delete(d.id);
                             else S.previewRawDraftIds.add(d.id);
-                            renderPanel();
+                            repaintPage();
                         });
                     }
                     lookActs.appendChild(btnRaw);
@@ -12332,7 +12893,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     } else {
                         S.previewDraftIds.add(d.id);
                     }
-                    renderPanel();
+                    repaintPage();
                 });
                 lookActs.appendChild(btnLook);
 
@@ -12353,7 +12914,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                         S.draftEditIssues = null;
                         S.previewDraftIds.add(d.id);
                     }
-                    renderPanel();
+                    repaintPage();
                 });
                 lookActs.appendChild(btnEdit);
                 item.appendChild(acts);
@@ -12435,7 +12996,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     await closeEvent(false);
                     opOut.className = 'eo-ok';
                     opOut.textContent = '已完结。';
-                    renderPanel();
+                    repaintPage();
                 } catch (e) {
                     opOut.className = 'eo-bad';
                     opOut.textContent = '失败：' + (e && e.message || e);
@@ -12453,7 +13014,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     await closeEvent(true);
                     opOut.className = 'eo-ok';
                     opOut.textContent = '已废弃。';
-                    renderPanel();
+                    repaintPage();
                 } catch (e) {
                     opOut.className = 'eo-bad';
                     opOut.textContent = '失败：' + (e && e.message || e);
@@ -12471,7 +13032,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 btnOutline.type = 'button';
                 btnOutline.addEventListener('click', () => {
                     S.currentShowOutline = !S.currentShowOutline;
-                    renderPanel();
+                    repaintPage();
                 });
                 row.appendChild(btnOutline);
             }
@@ -12481,7 +13042,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 btnRaw.type = 'button';
                 btnRaw.addEventListener('click', () => {
                     S.currentShowRaw = !S.currentShowRaw;
-                    renderPanel();
+                    repaintPage();
                 });
                 row.appendChild(btnRaw);
             }
@@ -12523,7 +13084,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         // 这样反复重生成不会来回写删世界书条目。
         // 2026-11-04 起挪到当前事件下面：先看正在跑的，再看攒着的候补。
         // 2026-11-10：按生成模式过滤，单事件只列待选事件、链只列待选事件链。
-        const drafts = Object.values(getMeta().events)
+        const drafts = Object.values((getMeta() || {}).events || {})
             .filter(e => e && e.status === 'draft')
             .filter(e => (e && e.chain && e.chain.id ? wantChain : !wantChain))
             .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
@@ -12590,7 +13151,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     if (!(await askConfirm(`采用整条链「${head.name || '未命名'}」的 ${list.length} 个节点？`
                         + '\n会依次写世界书条目。'))) return;
                     await useChainDrafts(list);
-                    renderPanel();
+                    repaintPage();
                 });
                 headActs.appendChild(btnUseChain);
 
@@ -12601,7 +13162,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     if (!(await askConfirm(`丢掉整条链「${head.name || '未命名'}」的 ${list.length} 个节点？\n丢掉就找不回来了。`))) return;
                     for (const dd of list) discardDraft(dd.id);
                     log(`丢弃整条链「${head.name || '未命名'}」，共 ${list.length} 个节点`);
-                    renderPanel();
+                    repaintPage();
                 });
                 headActs.appendChild(btnDropChain);
                 // 2026-11-10：这两个按钮在 summary 里，点按钮会顺带触发折叠/展开。
@@ -13060,7 +13621,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 if ((prefs.__genMode || 'single') === mk) return;
                 prefs.__genMode = mk;
                 persistGenForm();
-                renderPanel();
+                repaintPage();
             });
             btns[mk] = b;
             row.appendChild(b);
@@ -13134,7 +13695,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             (v) => {
                 prefs.__chainNodes = chainNodeCountOf(v);
                 persistGenForm();
-                renderPanel();
+                repaintPage();
             },
             '这条链由几个事件串成。默认 3 个。太长的话世界书条目会变多，模型也容易在后面跑偏。');
         page.appendChild(nRow);
@@ -13173,7 +13734,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         const list = el('div', 'eo-chainnodes');
         for (let i = 0; i < n; i++) {
-            list.appendChild(renderChainNodeEditor(prefs, i, () => renderPanel()));
+            list.appendChild(renderChainNodeEditor(prefs, i, () => repaintPage()));
         }
         page.appendChild(list);
 
@@ -13377,7 +13938,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             persistGenForm();
             paintSum();
             // 类型一变，参数区要整个换掉（不同主类型参数不同）
-            renderPanel();
+            repaintPage();
         });
         tyRow.appendChild(sel);
         body.appendChild(tyRow);
@@ -13885,11 +14446,11 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             opOut.className = 'eo-hint';
             opOut.textContent = '正在盘点…';
             try {
-                const r = await runInventory();
+                const r = await runInventory('inv-manual');
                 log(`第 ${r.record.round} 次盘点完成，世界书条目已更新（uid=${r.event.entryUid}）`);
                 opOut.className = 'eo-ok';
                 opOut.textContent = `第 ${r.record.round} 次盘点完成，世界书已更新`;
-                renderPanel();
+                repaintPage();
             } catch (e) {
                 error('盘点失败：', e);
                 opOut.className = 'eo-bad';
@@ -14309,7 +14870,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         page.appendChild(entryDet);
 
         const btn = el('button', 'eo-btn', '刷新');
-        btn.addEventListener('click', () => renderPanel());
+        btn.addEventListener('click', () => repaintPage());
         const r = el('div', 'eo-row');
         r.appendChild(btn);
         page.appendChild(r);
@@ -14333,18 +14894,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
     const openProfiles = new Set();
 
     function renderSetPage(page) {
-        // 只重画设置页用的入口（2026-11-02）：切换当前配置、改配置方式这两件事
-        // 只需要把设置页重画一遍。以前调 renderPanel() 会把整个面板连同滚动位置一起重建，
-        // 在手机上改一个下拉就跳回顶部。
-        const repaint = () => {
-            if (!page.isConnected) { renderPanel(); return; }
-            const host = page.parentNode;
-            const top = page.getBoundingClientRect().top;
-            page.innerHTML = '';
-            renderSetPage(page);
-            const dy = page.getBoundingClientRect().top - top;
-            if (dy && host && host.scrollTop != null) host.scrollTop += dy;
-        };
+        // 2026-11-13：原来这里有一个局部闭包做设置页局部重绘。它只在 renderSetModel 里被引用过，
+        // 而那是另一个函数、取不到它，等于摆着一个随时会被复制回去的陷阱，已删除。
+        // 设置页要重画就调 repaintPage()——它在页签为设置时分派到本函数，效果等价，且带滚动补偿。
         // 各段单独兜底（2026-11-02）：某一段抛出异常时，以前整页从那里断掉，
         // 下面全是空白，用户完全不知道发生了什么。现在把错误画进页面并写日志，其余段照画
         // 注意：分段以后各段是独立函数，看不到本函数的局部变量，所以 s 要显式传进去
@@ -14495,7 +15047,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             saveSettings();
             const p = (getSettings().apiProfiles || []).find(x => x.id === apiSel.value);
             log(`模型 API 已切换为「${p ? p.name : apiSel.value}」`);
-            repaint();
+            // 2026-11-13 修：这里原来调的是 renderSetPage 的局部闭包，那个名字在 renderSetModel 里
+            // 根本取不到，运行时抛 ReferenceError（设置已保存、页面不重绘）。改走模块作用域的整页重绘入口。
+            repaintPage();
         });
         apiRow.appendChild(apiSel);
         page.appendChild(apiRow);
@@ -14751,7 +15305,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     if (!nm) { nameIn.value = p.name; return; }
                     updateProfile(p.id, t => { t.name = nm; });
                     log(`模型配置「${p.name}」已更名为「${nm}」`);
-                    renderPanel();
+                    repaintPage();
                 });
                 actRow.appendChild(btnSave);
 
@@ -14800,7 +15354,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                         openProfiles.delete(p.id);
                         saveSettings();
                         log(`已删除模型配置「${p.name}」`);
-                        renderPanel();
+                        repaintPage();
                     });
                     delRow.appendChild(btnDel);
                     body.appendChild(delRow);
@@ -14834,7 +15388,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             // 新建即展开，用户点完就能直接填，不用再点一下
             openProfiles.add(id);
             log(`新建了模型配置「自定义配置 ${n}」，请填写地址、密钥和模型名`);
-            renderPanel();
+            repaintPage();
         });
         addRow.appendChild(btnAdd);
         page.appendChild(addRow);
@@ -14978,24 +15532,28 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         page.appendChild(wbBox);
 
         // 世界书字数上限：超了会截断后面的条目，用户必须能自己调
+        // 2026-11-10 修（评审原第 16 条）：这一项和下面「设定字数上限」绑的是同一个字段 maxChars，
+        // 但两处的口径原来相反——这里下限 1000、空值回落 30000，0 会被抬成 1000；
+        // 那里写着「0 = 不限」。设成 0 的人在这里一保存就变回 1000，看起来像设置没生效。
+        // 统一成 0 = 不限：两处都允许 0，都按 0 表示不截断。
         const wcRow = el('div', 'eo-row');
         wcRow.appendChild(el('label', null, '世界书字数上限'));
         const wcIn = el('input', 'eo-input');
         markKey(wcIn, 'set.worldbookChars');
         wcIn.type = 'number';
-        wcIn.min = '1000';
+        wcIn.min = '0';
         wcIn.step = '1000';
-        wcIn.value = String((s.worldbook && s.worldbook.maxChars) || 30000);
+        wcIn.value = String((s.worldbook && s.worldbook.maxChars) || 0);
         wcIn.style.flex = '0 0 110px';
         wcIn.addEventListener('change', () => {
-            const n = Math.max(1000, Number(wcIn.value) || 30000);
+            const n = Math.max(0, Number(wcIn.value) || 0);
             getSettings().worldbook.maxChars = n;
             wcIn.value = String(n);
             saveSettings();
-            log(`世界书字数上限已设为 ${n} 字`);
+            log(n === 0 ? '世界书字数上限已设为不限' : `世界书字数上限已设为 ${n} 字`);
         });
         wcRow.appendChild(wcIn);
-        wcRow.appendChild(el('span', 'eo-hint', '字。超出会截断后面的条目'));
+        wcRow.appendChild(el('span', 'eo-hint', '字，0 = 不限。超出会截断后面的条目'));
         page.appendChild(wcRow);
 
         const wbBook = getCharacterBookName();
@@ -15116,7 +15674,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             afIn.value = String(v);
             getSettings().tracker.autoEveryFloors = v;
             saveSettings();
-            renderPanel();
+            repaintPage();
         });
         afRow.appendChild(afIn);
         afRow.appendChild(el('span', 'eo-hint', '层楼自动盘点一次'));
@@ -15162,7 +15720,7 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 afBtn.disabled = true;
                 afBtn.textContent = '盘点中…';
                 await runInventory();
-                renderPanel();
+                repaintPage();
             } catch (e) {
                 afBtn.disabled = false;
                 afBtn.textContent = '现在盘点一次';
@@ -15840,12 +16398,20 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
     async function checkAutoInventory() {
         if (S.autoRunning) return;
+        // 2026-11-10 批 3 第 18 项：自动盘点与手动操作互斥。
+        // 原来只挡自己重入（autoRunning），手动生成/采用/盘点正跑着的时候
+        // 自动盘点照样会插进来抢世界书写锁，还会把对方那句 busy 提示覆盖掉。
+        // 这里看一眼令牌：锁被别的流程占着就跳过这一轮，等下次消息触发再说。
+        if (S.busy && S.busyOwner && S.busyOwner !== 'inv-auto') {
+            log(`自动盘点跳过：${ownerLabel(S.busyOwner)}正在进行`);
+            return;
+        }
         const hit = shouldAutoInventory();
         if (!hit) return;
         S.autoRunning = true;
         try {
             log(`自动盘点触发：距上次盘点已过 ${hit.since} 层（阈值 ${hit.every} 层）`);
-            await runInventory();
+            await runInventory('inv-auto');
             log('自动盘点完成');
             if (S.panelEl && S.panelEl.classList.contains('eo-open')) renderPanel();
         } catch (e) {

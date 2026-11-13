@@ -46,11 +46,16 @@
     function getMeta() {
         const context = ctx();
         if (!context) return null;
-        if (!context.chatMetadata[MODULE]) {
-            context.chatMetadata[MODULE] = { version: 1, currentEventId: null, events: {} };
-        }
-        const m = context.chatMetadata[MODULE];
-        m.events = m.events || {};
+        // 2026-11-10 修（评审原第 19 条）：存档里的这一块是外部数据，可能被手工改坏或来自老版本，
+        // 原来是「没有就建」，但存着 null、字符串、数组时会把那个值原样返回，
+        // 调用方接着 `.events` 就抛「Cannot read properties of null」——整个面板直接崩。
+        // 这里只认对象，别的类型一律重建。
+        const holder = context.chatMetadata;
+        if (!holder || typeof holder !== 'object') return null;
+        let m = holder[MODULE];
+        if (!m || typeof m !== 'object' || Array.isArray(m)) m = { version: 1, currentEventId: null, events: {} };
+        holder[MODULE] = m;
+        if (!m.events || typeof m.events !== 'object' || Array.isArray(m.events)) m.events = {};
         return m;
     }
     function saveMeta() {
@@ -141,9 +146,39 @@
         if (event.outline) event.parseQuality = checkOutlineQuality(event.outline);
         if (!event.outlineRaw) return event;
         const o = event.outline || {};
-        // 2026-11-05 M2 评审：M2 之后 nodes 在 structure 里，还按顶层读会恒判「坏了」，
-        // 于是每次加载都要白跑一遍重解析，而且重解析读的也是同一个空结果。
-        const looksBroken = innerNodesOf(o).length === 0;
+        // 2026-11-05 M2 评审：M2 之后 nodes 在 structure 里，还按顶层读会恒判「坏了」。
+        //
+        // 2026-11-10 修（评审 P1-10）：原来只认 nodes，战斗、探险这些本来就没有 nodes 的类型
+        // 每次加载都被判「坏了」，白跑一遍重解析，重解析读出来的当然还是没有 nodes，于是下次继续重跑。
+        // 现在按这个类型自己的 spec 判：它要求的那些内层键里，只要有一个真的解析出了东西，
+        // 就算这卡没坏。类型认不出来时退回看有没有任何内层键，别一律判坏。
+        const looksBroken = (() => {
+            const mainType = String((o.event_type && o.event_type.primary)
+                || event.mainType || '').trim();
+            const spec = innerKeysOf(mainType);
+            const keys = spec.known && spec.required.length ? spec.required : null;
+            const inner = outlineInner(o) || {};
+            if (keys) {
+                return keys.every((k) => {
+                    const v = inner[k];
+                    if (v === undefined || v === null) return true;
+                    if (Array.isArray(v)) return v.length === 0;
+                    if (typeof v === 'string') return v.trim() === '';
+                    if (typeof v === 'object') return Object.keys(v).length === 0;
+                    return false;
+                });
+            }
+            // 类型认不出来：只要有任何一个内层键解析出了内容，就当它没坏
+            const anyFilled = Object.keys(inner).some((k) => {
+                const v = inner[k];
+                if (v === undefined || v === null) return false;
+                if (Array.isArray(v)) return v.length > 0;
+                if (typeof v === 'string') return v.trim() !== '';
+                if (typeof v === 'object') return Object.keys(v).length > 0;
+                return true;
+            });
+            return !anyFilled;
+        })();
         if (!looksBroken) return event;
         try {
             const re = parseOutline(event.outlineRaw).parsed;

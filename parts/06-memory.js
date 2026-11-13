@@ -16,43 +16,38 @@
         for (let i = chat.length - 1; i >= 0; i--) {
             const msg = chat[i];
             if (!msg) continue;
+
             const iso = msg.TavernDB_ACU_IsolatedData;
-            if (!iso || typeof iso !== 'object') continue;
+            const hasIso = !!iso && typeof iso === 'object';
 
-            for (const key of Object.keys(iso)) {
-                const container = iso[key];
-                if (!container || typeof container !== 'object') continue;
+            if (hasIso) {
+                for (const key of Object.keys(iso)) {
+                    const container = iso[key];
+                    if (!container || typeof container !== 'object') continue;
 
-                // v2: storageFrame.logEntries
-                const entries = container.storageFrame && container.storageFrame.logEntries;
-                if (Array.isArray(entries)) {
-                    const sorted = entries.slice().sort((a, b) => (a.seq || 0) - (b.seq || 0));
-                    for (const e of sorted) {
-                        for (const op of (e.operations || [])) {
-                            if (op && op.sheetKey && op.sheet && op.sheet.content) {
-                                // 楼层是从新到旧遍历的，第一次遇到即最新快照；
-                                // 后面更旧的楼层会带同一张表的旧版本，不能覆盖
-                                if (!result.has(op.sheetKey)) result.set(op.sheetKey, op.sheet);
+                    // v2: storageFrame.logEntries
+                    const entries = container.storageFrame && container.storageFrame.logEntries;
+                    if (Array.isArray(entries)) {
+                        // 2026-11-10 修（评审原第 17 条）：楼内按 seq 降序，让同一楼里最后一次操作胜出。
+                        // 原先是升序 +「第一次命中就留」，留下来的反而是 seq 最小、最早的那一版；
+                        // 而一个回合内「先追加、再改单元格」是 shujuku 的常见批量行为，
+                        // 本楼的修正全被丢掉，跟楼层之间「新的赢」正好相反。
+                        const sorted = entries.slice().sort((a, b) => (b.seq || 0) - (a.seq || 0));
+                        for (const e of sorted) {
+                            for (const op of (e.operations || [])) {
+                                if (op && op.sheetKey && op.sheet && op.sheet.content) {
+                                    // 楼层是从新到旧遍历的，第一次遇到即最新快照；
+                                    // 后面更旧的楼层会带同一张表的旧版本，不能覆盖
+                                    if (!result.has(op.sheetKey)) result.set(op.sheetKey, op.sheet);
+                                }
                             }
                         }
                     }
-                }
 
-                // legacy: independentData / 直接 sheet_
-                const legacy = container.independentData || container;
-                if (legacy && typeof legacy === 'object') {
-                    for (const [k, v] of Object.entries(legacy)) {
-                        if (k.startsWith('sheet_') && v && typeof v === 'object' && v.content) {
-                            if (!result.has(k)) result.set(k, v);
-                        }
-                    }
-                }
-
-                // 老字段兜底：TavernDB_ACU_Data / SummaryData / IndependentData
-                for (const legacyKey of ['TavernDB_ACU_IndependentData', 'TavernDB_ACU_Data', 'TavernDB_ACU_SummaryData']) {
-                    const box = msg[legacyKey];
-                    if (box && typeof box === 'object') {
-                        for (const [k, v] of Object.entries(box)) {
+                    // legacy: independentData / 直接 sheet_
+                    const legacy = container.independentData || container;
+                    if (legacy && typeof legacy === 'object') {
+                        for (const [k, v] of Object.entries(legacy)) {
                             if (k.startsWith('sheet_') && v && typeof v === 'object' && v.content) {
                                 if (!result.has(k)) result.set(k, v);
                             }
@@ -60,8 +55,32 @@
                     }
                 }
             }
+
+            // 2026-11-10 修（评审原第 18 条）：老字段兜底原来写在 iso 的 key 循环里，
+            // 而循环前面有一句「没有 IsolatedData 就 continue」——正需要这段兜底的旧存档
+            // 一条都扫不到，iso 是空对象时循环体也一次都不进。现在提到 iso 判断之外，每条消息只跑一次。
+            //
+            // 位置必须在 v2 之后：同一条消息里 v2 是这一楼的正式数据，老字段是历史残留，
+            // 先跑老字段会让它的旧版本把本楼的新数据挤掉（result.has 命中就不再覆盖）。
+            collectLegacySheets(msg, result);
         }
         return result;
+    }
+
+    /**
+     * 老字段兜底：TavernDB_ACU_IndependentData / Data / SummaryData。
+     * 抽出来是因为它原来被困在 IsolatedData 的循环里，没 IsolatedData 的旧楼层永远扫不到。
+     */
+    function collectLegacySheets(msg, result) {
+        for (const legacyKey of ['TavernDB_ACU_IndependentData', 'TavernDB_ACU_Data', 'TavernDB_ACU_SummaryData']) {
+            const box = msg[legacyKey];
+            if (!box || typeof box !== 'object') continue;
+            for (const [k, v] of Object.entries(box)) {
+                if (k.startsWith('sheet_') && v && typeof v === 'object' && v.content) {
+                    if (!result.has(k)) result.set(k, v);
+                }
+            }
+        }
     }
 
     /** 按名字找纪要表（不按 key，见设计 §4.3） */

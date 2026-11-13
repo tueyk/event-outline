@@ -1,6 +1,24 @@
     // ==================== 10. 事件流程 ====================
 
     let busy = S.busy; // 引用指向 S，值统一存 S
+    /**
+     * 令牌 → 人话（2026-11-10 批 3 第 18 项）。
+     * 忙碌时用户看到「正在生成大纲」是够的，但多条流程互相避让时要能说清是谁占着，
+     * 日志里写「inventoryOwner」这种东西没人看得懂。
+     */
+    const BUSY_OWNER_LABEL = {
+        'gen': '生成大纲',
+        'gen-chain': '逐条生成事件',
+        'adopt': '采用事件',
+        'inv': '盘点',
+        'inv-auto': '自动盘点',
+        'inv-manual': '手动盘点',
+        'close': '废弃/完结',
+    };
+    function ownerLabel(owner) {
+        return BUSY_OWNER_LABEL[owner] || String(owner || '另一个操作');
+    }
+
     // 忙碌提示文案随操作变：废弃/完结是本地操作，不该显示「正在请求模型」
     let busyText = S.busyText; // 引用指向 S，值统一存 S
 
@@ -9,9 +27,22 @@
      * @param on 是否忙碌
      * @param keepProgress 结束时是否保留进度列表（生成/盘点用）
      * @param text 忙碌提示文案。不传就沿用上一次的，避免文案互相覆盖
+     * @param owner 占用者标识（2026-11-10 批 3 第 18 项）。
+     *        解锁时只有持有者放得开：别人调 setBusy(false) 会被忽略，
+     *        免得自动盘点跑完把手动盘点的提示条收掉。不传 owner 的老调用一律当作持有者，
+     *        行为与改前一致，不会因为漏传就把锁死住。
      */
-    function setBusy(on, keepProgress, text) {
+    function setBusy(on, keepProgress, text, owner) {
+        const who = owner || null;
+        if (!on && S.busy) {
+            // 解锁时认持有者：记着别人名字的不放
+            if (S.busyOwner && who && S.busyOwner !== who) {
+                debug(`忽略 ${who} 的解锁：当前忙碌由 ${S.busyOwner} 占着`);
+                return;
+            }
+        }
         S.busy = on;
+        S.busyOwner = on ? (who || S.busyOwner) : null;
         if (text) S.busyText = text;
         if (S.panelEl) {
             const b = S.panelEl.querySelector('#eo_busy');
@@ -1021,12 +1052,17 @@
             + `-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
     }
 
-    /** 把事件卡状态压成世界书条目内容（800-1500 字） */
-    function buildEntryContent(event, round) {
+    /**
+     * 把事件卡状态压成世界书条目内容（800-1500 字）。
+     * statusOverride：采用时正文要写「进行中」，而那时 event.status 还是 draft
+     * （状态在写入成功后才改），直接读 event.status 会把 draft 写进世界书正文，
+     * 用户在世界书面板看到 draft 会以为没采用成功。见 2026-11-10 批 2 遗留问题一。
+     */
+    function buildEntryContent(event, round, statusOverride) {
         const context = ctx();
         const lines = [];
         lines.push(`〔事件大纲｜chatId=${context.chatId || ''}｜v${event.entryVersion || 1}｜更新于 ${new Date().toLocaleString('zh-CN')}〕`);
-        lines.push(buildStateCard(event));
+        lines.push(buildStateCard(event, statusOverride));
         if (round) lines.push(`盘点轮次：${round}`);
         const o = event.outline || {};
         // forbidden 在外层，直接读；characters 属于内层（2026-11-05 M2 评审 4.3）：
@@ -1350,7 +1386,7 @@
         const book = getCharacterBookName();
         if (!book) throw new Error('当前角色未绑定世界书');
 
-        setBusy(true, false, '正在生成大纲，请稍候…');
+        setBusy(true, false, '正在生成大纲，请稍候…', 'gen');
         try {
             startProgress('正在生成事件大纲');
             step('准备提示词');
@@ -1446,7 +1482,7 @@
             failProgress(e && e.message || String(e));
             throw e;
         } finally {
-            setBusy(false, true);
+            setBusy(false, true, null, 'gen');
         }
     }
 
@@ -1474,11 +1510,12 @@
                 throw new Error(`「${cur.name}」还在进行中，请先完结或废弃它，再采用新的待选事件`);
             }
         }
-        setBusy(true, false, '正在采用事件并写入世界书…');
+        setBusy(true, false, '正在采用事件并写入世界书…', 'adopt');
         try {
             const book = event.worldBook || getCharacterBookName();
             if (!book) throw new Error('当前角色未绑定世界书');
-            const content = buildEntryContent(event, 0);
+            // 正文按「采用后的状态」写：此时 event.status 还是 draft，不传这个就会把 draft 写进世界书
+            const content = buildEntryContent(event, 0, 'active');
             const res = await upsertEventEntry(
                 book,
                 content,
@@ -1502,10 +1539,23 @@
             toast('已写入世界书。要查看或手动编辑世界书，请先刷新页面（F5），否则改的是旧数据，会把这批内容盖掉', { ms: 9000 });
             return event;
         } catch (e) {
+            // 2026-11-10 修（评审 P1-9）：内容已经写进世界书、只是校验没过时，错误上带着 uid。
+            // 这里必须记账——不记的话，书里那条属于本事件的条目从此没人认领，
+            // 下次采用会在旁边再写一条，同一件事在书里出现两遍。
+            // 状态也推进到进行中：条目确实已经在世界里了，装成没发生反而更乱。
+            if (e && e.written && e.uid != null) {
+                event.entryUid = e.uid;
+                event.status = 'active';
+                event.floorBase = countFloors();
+                event.floorBaseNarration = !!getSettings().memory.narrationMode;
+                meta.currentEventId = id;
+                try { saveMeta(); } catch (e2) { /* 存盘失败不该盖住原始错误 */ }
+                warn(`事件「${event.name}」的条目已写入（uid=${e.uid}）但校验未通过，已记账避免重复写入`);
+            }
             failProgress(e && e.message || String(e));
             throw e;
         } finally {
-            setBusy(false, true);
+            setBusy(false, true, null, 'adopt');
         }
     }
 
@@ -1552,6 +1602,7 @@
         while (singles.length >= draftCap('single')) {
             const drop = singles.shift();
             delete meta.events[drop.id];
+            cleanupDraftViewState(drop.id);
             log(`待选事件已有 ${draftCap('single')} 个，挤掉最早的「${drop.name}」`);
         }
 
@@ -1579,10 +1630,24 @@
         }).sort((a, b) => a.at.localeCompare(b.at));
 
         // 严格大于才挤：允许恰好 MAX_CHAIN_DRAFTS 条并存
-        while (born.length > draftCap('chain')) {
+        //
+        // 2026-11-10 修（评审第 14 条，设计债 F）：上面统计的是 all，而 all 排除了 newId。
+        // 新链的第一个节点正在写入时，它自己不在 all 里，于是「已有链数」只数到旧链，
+        // 判停看起来没超，可新链一进来就变成上限加一。差一就差在这里。
+        // 现在把 newId 自己那条链先补进计数再判——它马上就要占一个名额。
+        const capChain = draftCap('chain');
+        const metaNew = meta.events[newId];
+        let extraNewChain = 0;
+        if (metaNew && metaNew.status === 'draft' && metaNew.chain && metaNew.chain.id
+            && !byChain[metaNew.chain.id]) {
+            extraNewChain = 1;
+        }
+        while (born.length + extraNewChain > capChain) {
+            // 没有旧链可挤时不能死循环：新链自己必须留下，超出的额度只能由旧的让出来
+            if (!born.length) break;
             const drop = born.shift();
-            for (const e of drop.evs) delete meta.events[e.id];
-            log(`待选链超过 ${draftCap('chain')} 条，挤掉最早的「${drop.name || drop.id}」`);
+            for (const e of drop.evs) { delete meta.events[e.id]; cleanupDraftViewState(e.id); }
+            log(`待选链超过 ${capChain} 条，挤掉最早的「${drop.name || drop.id}」`);
         }
     }
 
@@ -1591,9 +1656,27 @@
         const event = meta.events[id];
         if (!event || event.status !== 'draft') return false;
         delete meta.events[id];
+        // 2026-11-10 修（评审 P1-14）：草稿没了，跟着它走的内存状态也要清。
+        // 原来这里只删事件，正在编辑的是它、预览着的也是它，那些状态就留在了内存里：
+        // 下次点开另一条草稿，编辑框里可能是上一个已删草稿的正文，保存下去会写回谁都不对。
+        cleanupDraftViewState(id);
         saveMeta();
         log(`已丢弃待选事件「${event.name}」`);
         return true;
+    }
+
+    /**
+     * 清掉属于某条草稿的编辑态与预览态。
+     * 草稿被丢弃、被挤掉、被采用之后都要调一次，否则那些状态会挂在一个已经不存在的事件上。
+     */
+    function cleanupDraftViewState(id) {
+        const key = String(id);
+        if (S.editingDraftId != null && String(S.editingDraftId) === key) {
+            discardPendingEdit();
+        }
+        if (S.previewDraftIds && S.previewDraftIds.delete && S.previewDraftIds.has(key)) {
+            S.previewDraftIds.delete(key);
+        }
     }
 
     /**
@@ -1859,12 +1942,20 @@
         return lines.join('\\n') + '\\n';
     }
 
-    async function runInventory() {
+    /**
+     * 盘点。owner 区分自动与手动（2026-11-10 批 3 第 18 项）：
+     * 自动盘点由消息事件触发、手动由按钮触发，两者抢同一把锁。
+     * 令牌不同，自动那次跑完就不会把手动那次的提示条收掉。
+     * 默认 giveup:true 让「放弃等待」按钮照旧可用。
+     */
+    async function runInventory(owner) {
         const event = getCurrentEvent();
         if (!event) throw new Error('当前没有进行中的事件');
         if (event.status !== 'active') throw new Error('该事件已结束');
+        const inventoryOwner = owner || 'inv';
 
-        setBusy(true, false, '正在盘点事件状态，请稍候…');
+
+        setBusy(true, false, '正在盘点事件状态，请稍候…', inventoryOwner);
         try {
             startProgress('正在盘点事件状态');
             step('准备提示词');
@@ -1967,10 +2058,13 @@
                 event,
             );
             if (String(event.entryUid) !== String(res.uid)) {
-                // 位置被纠正过，同步回事件卡，避免下次又按旧编号找
+                // 位置被纠正过，同步回事件卡，避免下次又按原编号找
                 event.entryUid = res.uid;
             }
-            record.committedToBook = true;
+            // 2026-11-10 修（评审 P1-9）：上面那条只在位置变了时才更新，
+            // 而盘点这条路的记录常常本来就是空的——书里明明有对应条目，扩展却始终不知道它是自己的。
+            // 这里补一句无条件记回来，保证写入成功后一定有账。
+            if (res && res.uid != null) event.entryUid = res.uid;
             // 盘点成功即把计数基线挪到当前楼层，下一轮从零开始累计。
             // 基线要连模式一起记，否则用户切换转述后这个基线就按错口径算了
             event.floorBase = countFloors();
@@ -1984,32 +2078,80 @@
             failProgress(e && e.message || String(e));
             throw e;
         } finally {
-            setBusy(false, true);
+            setBusy(false, true, null, inventoryOwner);
         }
+    }
+
+    /**
+     * 收尾时清理指向已删除条目的旧记录（2026-11-10，批 1 遗留问题二）。
+     *
+     * 背景：uid 607 同时被三个事件记着——废弃旧链时只废弃了第三个节点，
+     * 前两个还是 active、entryUid 都写 607，而那个编号已经写进新链第一个节点的内容。
+     * 现在虽然「认不出来就按新增」不会覆盖别人，但脏记录留着迟早误导人，
+     * 也会让 healEntryUids 反复去校正一个本来就不该存在的指向。
+     *
+     * 清理范围只收窄到有把握的那部分，宁可漏清也不误清：
+     *   - 同一本书、同一对话下，同一条链的兄弟节点；以及状态已不是 draft/active 的历史卡片；
+     *   - 且它们的 entryUid 与刚被删掉的那个编号相同（deletedUid 传 null 时只清链上未知归属的记录）。
+     * 别的链、别的对话一概不碰。
+     */
+    function clearSiblingEntryRefs(meta, closedEvent, deletedUid) {
+        if (!meta || !meta.events || !closedEvent) return 0;
+        const hasUid = deletedUid != null;
+        const chainId = closedEvent.chain && closedEvent.chain.id ? String(closedEvent.chain.id) : '';
+        let cleared = 0;
+        for (const ev of Object.values(meta.events)) {
+            if (!ev || ev === closedEvent) continue;
+            if (ev.entryUid == null) continue;
+            if (hasUid && String(ev.entryUid) !== String(deletedUid)) continue;
+            if (String(ev.worldBook || '') !== String(closedEvent.worldBook || '')) continue;
+            if (String(ev.chatId || '') !== String(closedEvent.chatId || '')) continue;
+            const sameChain = chainId && ev.chain && ev.chain.id && String(ev.chain.id) === chainId;
+            const isHistorical = ev.status !== 'draft' && ev.status !== 'active';
+            if (!sameChain && !isHistorical) continue;
+            warn(`清掉事件「${ev.name}」指向 uid=${ev.entryUid} 的旧记录（${sameChain ? '同一链' : '历史卡片'}，该条目已不属于它）`);
+            ev.entryUid = null;
+            cleared++;
+        }
+        return cleared;
     }
 
     async function closeEvent(abandoned) {
         const event = getCurrentEvent();
         if (!event) throw new Error('当前没有事件');
         // 废弃/完结是纯本地操作：删世界书条目、改状态、清历史，不碰模型
-        setBusy(true, false, abandoned ? '正在废弃事件并清理世界书条目…' : '正在完结事件并清理世界书条目…');
+        setBusy(true, false, abandoned ? '正在废弃事件并清理世界书条目…' : '正在完结事件并清理世界书条目…', 'close');
         try {
+            let deletedUid = null;
             if (event.entryUid != null || event.worldBook) {
                 // 位置现查，不用 event.entryUid —— 世界书可能被重排过
                 const book = event.worldBook || getCharacterBookName();
-                if (book) await deleteEventEntryForEvent(book, event);
+                if (book) {
+                    // 真正被删掉的是 findEventEntryUid 现查到的那个编号，不一定等于 event.entryUid
+                    const before = findEventEntryUid(await readWorldBook(book), event);
+                    const res = await deleteEventEntryForEvent(book, event);
+                    if (res && res.deleted) deletedUid = before != null ? before : event.entryUid;
+                }
                 event.entryUid = null;
             }
             event.status = abandoned ? 'abandoned' : 'completed';
             event.closedAt = new Date().toISOString();
             const meta = getMeta();
             meta.currentEventId = null;
+            // 2026-11-10 修（批 1 遗留问题二：uid 607 三个事件都声称属于自己）：
+            // 废弃/完结只清掉当前这一个事件的 entryUid，链上其它还挂着同一个编号的兄弟节点没动，
+            // 那个编号后来被新链第一个节点写进去了，旧节点就指着一个已经属于别人的条目。
+            // 今天靠「认不出来就按新增」不覆盖，但脏记录悬着迟早出事。
+            // 所以收尾时把世界书里所有它的残留一并清掉：同一本书、同一对话、同一链的兄弟节点，
+            // 以及状态已不是 draft/active 的历史卡片。
+            const cleared = clearSiblingEntryRefs(meta, event, deletedUid);
+            if (cleared) log(`收尾时清掉 ${cleared} 条指向已删除条目的旧记录（同一链或同书同对话的历史卡片）`);
             await applyRetention(meta);
             saveMeta();
             log(`事件「${event.name}」已${abandoned ? '废弃' : '完结'}，世界书条目已清理，事件卡转历史`);
             return event;
         } finally {
-            setBusy(false);
+            setBusy(false, null, null, 'close');
         }
     }
 

@@ -75,12 +75,20 @@
 
     async function checkAutoInventory() {
         if (S.autoRunning) return;
+        // 2026-11-10 批 3 第 18 项：自动盘点与手动操作互斥。
+        // 原来只挡自己重入（autoRunning），手动生成/采用/盘点正跑着的时候
+        // 自动盘点照样会插进来抢世界书写锁，还会把对方那句 busy 提示覆盖掉。
+        // 这里看一眼令牌：锁被别的流程占着就跳过这一轮，等下次消息触发再说。
+        if (S.busy && S.busyOwner && S.busyOwner !== 'inv-auto') {
+            log(`自动盘点跳过：${ownerLabel(S.busyOwner)}正在进行`);
+            return;
+        }
         const hit = shouldAutoInventory();
         if (!hit) return;
         S.autoRunning = true;
         try {
             log(`自动盘点触发：距上次盘点已过 ${hit.since} 层（阈值 ${hit.every} 层）`);
-            await runInventory();
+            await runInventory('inv-auto');
             log('自动盘点完成');
             if (S.panelEl && S.panelEl.classList.contains('eo-open')) renderPanel();
         } catch (e) {
