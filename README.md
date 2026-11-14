@@ -97,6 +97,6 @@ SillyTavern/public/scripts/extensions/third-party/third-party-event-outline/
 
 ## 版本
 
-当前 0.1.7，开发中，接口与设置项还会变化。
+当前 0.1.8，开发中，接口与设置项还会变化。
 
 已知不足：向量 / 交火模式的专项召回、世界书快照的还原入口还没做。
