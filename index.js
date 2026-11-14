@@ -1436,6 +1436,461 @@
         'forbidden',       // 模型不得提前透露的内容
         'structure',       // 内层，按主类型换
     ];
+    // ---- 三期 M17（2026-11-13）：追捕搜索 ----
+    // 两套只差一处：main 是常规围捕（目标还在跑），alt 是目标已经被惊动、警戒拉满。
+    const OUTLINE_SKELETON_PURSUE = [
+        'event_name: 北岭的伤人獾',
+        'event_brief: 一头咬伤三人的老獾退进北岭，必须在它下山进村前把它堵住。',
+        'event_type:',
+        '  primary: 追捕搜索',
+        '  secondary:',
+        '    - 追捕',
+        '    - 守护',
+        'time_pressure:',
+        '  countdown: 天亮之前',
+        '  duration: 一夜',
+        '  timeout_result: 它趁夜摸进村，再伤一人',
+        '  delay_cost: 猎户等不及走了，只剩玩家自己搜',
+        'danger:',
+        '  lethality: 中',
+        '  failure: 有人被咬伤，村里从此不许外人进山',
+        '  tolerance: 两次',
+        '  threat_source: 那头獾，以及夜里跟着起哄的村民',
+        'forbidden:',
+        '  - 不得让獾凭空出现或凭空消失',
+        '  - 不得让玩家不搜山就直接找到窝',
+        'structure:',
+        '  target:',
+        '    move_rule: 昼伏夜出，受了惊就往坡上跑，不往平地走',
+        '    speed: 比人快，但转向笨，绕到上坡能截住',
+        '    route: 沿溪水一带往北，间或回到磨坊旁的旧沟',
+        '    resting_place: 天亮前它会回磨坊后的石缝，那是唯一能堵住它的地方',
+        '  search_grid:',
+        '    - id: 1',
+        '      area: 磨坊一带与旧沟',
+        '      coverage: 沟坎、草垛、石堆，能盖住大半',
+        '      searched: false',
+        '      covered: 石缝太窄，白天看不出里面有东西',
+        '    - id: 2',
+        '      area: 溪湾到东坡林子',
+        '      coverage: 溪边泥地上有走过的痕迹，林子深处看不到',
+        '      searched: false',
+        '      covered: 林子密，进去容易跟丢',
+        '    - id: 3',
+        '      area: 村北的坡地',
+        '      coverage: 坡上只有碎石与荒草，能整片看过去',
+        '      searched: false',
+        '      covered: 看完也说明不了什么，它多半不在这儿',
+        '  alert: 1',
+        '  exposure: 3',
+        '  intercept:',
+        '    - point: 磨坊与旧沟之间的窄道',
+        '      window: 天将亮未亮那阵，它回去的路上都要过这里',
+        '    - point: 溪湾的木桥',
+        '      window: 只有在它被赶得急、不走坡路时才用得上',
+    ];
+
+    // 变体：目标已经惊动过一次，警戒拉满，搜过的地方它开始绕开。
+    const OUTLINE_SKELETON_PURSUE_WARY = [
+        'event_name: 惊了的那头獾',
+        'event_brief: 第一次围捕没堵住，它现在见人就绕，还学会了往人少的地方去。',
+        'event_type:',
+        '  primary: 追捕搜索',
+        '  secondary:',
+        '    - 追捕',
+        'time_pressure:',
+        '  countdown: 第二夜结束之前',
+        '  duration: 约八个时辰',
+        '  timeout_result: 它彻底走远，再也找不回来',
+        '  delay_cost: 参与者一个接一个放弃，人手越来越少',
+        'danger:',
+        '  lethality: 中',
+        '  failure: 它带走了伤口，也带走了村里最后一点耐心',
+        '  tolerance: 一次',
+        '  threat_source: 那头獾，与已经不信人的村民',
+        'forbidden:',
+        '  - 不得让它再次进入已经搜过的区域',
+        '  - 不得靠人数优势直接逼死它',
+        'structure:',
+        '  target:',
+        '    move_rule: 已经认得人的气味，闻到就往反方向退，不再回老路',
+        '    speed: 受伤后慢了些，但比追的人还是会绕',
+        '    route: 每日换一条，走没人的背坡与碎石沟',
+        '    resting_place: 只在正午前后停在向阳的岩窝，那时人在明处',
+        '  search_grid:',
+        '    - id: 1',
+        '      area: 旧沟与石缝',
+        '      coverage: 已知它不再回来，搜了也是空的',
+        '      searched: true',
+        '      covered: 这里已经被它放弃了',
+        '    - id: 2',
+        '      area: 南坡向阳的岩窝',
+        '      coverage: 岩窝朝南，白天能看见里面有动静',
+        '      searched: false',
+        '      covered: 从坡下摸上去要一个时辰，晚了它就走了',
+        '    - id: 3',
+        '      area: 西边废弃的炭窑',
+        '      coverage: 窑口窄，只看得到入口一段',
+        '      searched: false',
+        '      covered: 窑里黑，进去了反倒被它堵在里头',
+        '    - id: 4',
+        '      area: 后山碎石沟',
+        '      coverage: 沟长且岔路多，走完要大半天',
+        '      searched: false',
+        '      covered: 走完这沟，别的区域就没时间了',
+        '  alert: 3',
+        '  exposure: 6',
+        '  intercept:',
+        '    - point: 南坡岩窝下方那处转角的碎石地',
+        '      window: 只在正午前后它起身挪窝的那一刻',
+        '    - point: 炭窑口',
+        '      window: 若它天黑前回窑，才堵得住',
+    ];
+    // ---- 三期 M18（2026-11-13）：灾难事故 ----
+    // main 是塌方后的救援，alt 是火起之后的一波未平。
+    const OUTLINE_SKELETON_DISASTER = [
+        'event_name: 三号井塌了',
+        'event_brief: 矿道塌了半截，四个人困在里头，可用的时间只够救一部分。',
+        'event_type:',
+        '  primary: 灾难事故',
+        '  secondary:',
+        '    - 营救',
+        'time_pressure:',
+        '  countdown: 井里最后那点灯火灭掉之前',
+        '  duration: 约六个时辰',
+        '  timeout_result: 井下再无人声',
+        '  delay_cost: 每迟一刻，能进去的通道就窄一分',
+        'danger:',
+        '  lethality: 高',
+        '  failure: 井塌到底，连尸体都取不出来',
+        '  tolerance: 一次误判',
+        '  threat_source: 还在落的碎石与不明情况的井道',
+        'forbidden:',
+        '  - 不得让玩家一次救出所有人',
+        '  - 不得出现井里凭空多出来的通道',
+        'structure:',
+        '  trigger:',
+        '    when: 前一日暴雨后的清晨',
+        '    where: 三号井，第二段横巷的尽处',
+        '    omen: 出事前两日，井口的木架就往下沉了半寸，矿工提过，无人理会',
+        '  spread:',
+        '    range: 从横巷尽处塌到第二段竖井，波及两侧各一条支巷',
+        '    speed: 先是一次闷响，此后每隔一阵再落一层',
+        '    victims: 四个下井的人，其中两个还能应声，两个早已没了回音',
+        '  rescue_window:',
+        '    - id: 1',
+        '      timing: 塌方后最初的两个时辰，碎石还只是松落',
+        '      route: 从旧通风巷绕到底，路窄，只能一人侧身过',
+        '      tool: 需要撑木与一盏没灭的灯，两样都得从井口搬下去',
+        '    - id: 2',
+        '      timing: 第二段竖井被清开之后，大约再等两个时辰',
+        '      route: 走竖井直下，宽些，但落石最密',
+        '      tool: 需要井口那副滑索与至少三个人在上面拉',
+        '    - id: 3',
+        '      timing: 最后一个时辰，只在有人愿冒二次塌方时才成立',
+        '      route: 从支巷挖穿，全靠人挖，工具反而碍事',
+        '      tool: 不需要工具，需要的是有人愿意进去',
+        '  secondary:',
+        '    - what: 井口的木架彻底塌下，把出口堵掉一半',
+        '      when: 若第一批救出的人没有回头支撑井口',
+        '    - what: 支巷渗水，水线漫过腰之后再也进不去',
+        '      when: 若拖过了第三个时辰',
+        '  toll:',
+        '    people: 起初两人尚有回应，随阶段推进逐渐只剩一人、最后无声',
+        '    property: 三号井彻底报废，井口木架全毁，两条支巷塌到底',
+    ];
+
+    // 变体：救到一半起了火，一波未平一波又起。
+    const OUTLINE_SKELETON_DISASTER_FIRE = [
+        'event_name: 粮仓的烟',
+        'event_brief: 夜里粮仓起烟，火还没大，但仓里存着全村过冬的粮。',
+        'event_type:',
+        '  primary: 灾难事故',
+        '  secondary:',
+        '    - 营救',
+        '    - 瘟疫',
+        'time_pressure:',
+        '  countdown: 火烧到仓底之前',
+        '  duration: 约三个时辰',
+        '  timeout_result: 粮烧尽，村中过不去冬',
+        '  delay_cost: 烟越聚越浓，进去了也看不清',
+        'danger:',
+        '  lethality: 中',
+        '  failure: 人救出来一半，粮一粒没剩',
+        '  tolerance: 一次',
+        '  threat_source: 烟与随时可能塌下的仓梁',
+        'forbidden:',
+        '  - 不得让火凭空停住',
+        '  - 不得让粮食全部保住',
+        'structure:',
+        '  trigger:',
+        '    when: 入冬前第三个夜里的二更',
+        '    where: 村东的粮仓，靠西的那一间先起烟',
+        '    omen: 白日里看守就说过闻到一股油气，没人当回事',
+        '  spread:',
+        '    range: 西间先起，顺着茅草顶往中、往东爬',
+        '    speed: 初时只是烟，半个时辰后能见火头',
+        '    victims: 仓里还有两个看夜的，加上一个半夜来偷粮的',
+        '  rescue_window:',
+        '    - id: 1',
+        '      timing: 刚起烟的前半个时辰，浓烟还未下沉',
+        '      route: 从东门进，那一侧还干净',
+        '      tool: 需要湿布掩口，两三个人的水桶',
+        '    - id: 2',
+        '      timing: 火头爬到顶之后，只能从仓后破墙',
+        '      route: 仓后土墙，要砸开才能进',
+        '      tool: 需要镐与至少两个壮劳力',
+        '    - id: 3',
+        '      timing: 最后一刻，从气窗翻进去，只能带一个人',
+        '      route: 仓顶气窗，下去容易上来难',
+        '      tool: 需要一条结实的绳',
+        '  secondary:',
+        '    - what: 西间仓梁烧断，整面墙塌进粮堆',
+        '      when: 火头爬到顶之后还没人被救出',
+        '    - what: 起了风，火顺风往邻舍去',
+        '      when: 若未及时打湿周边的草顶',
+        '  toll:',
+        '    people: 起初三人还在里头，救出一个后剩两个，最后可能一个都出不来',
+        '    property: 西间粮全毁，中、东两间视救的情况半存或全存',
+    ];
+    // ---- 三期 M19（2026-11-13）：政治程序 ----
+    // main 是常规的推举程序，alt 是程序本身有瑕疵、有人要拿这件事做文章。
+    const OUTLINE_SKELETON_POLITICS = [
+        'event_name: 祠堂里的那把椅子',
+        'event_brief: 族长病重，三日之内要推一个代族人，三房各有各的算盘。',
+        'event_type:',
+        '  primary: 政治程序',
+        '  secondary:',
+        '    - 政治阴谋',
+        '    - 人情',
+        'time_pressure:',
+        '  countdown: 第三日午时开祠堂',
+        '  duration: 三日',
+        '  timeout_result: 三房各自推人，族里从此分成三家',
+        '  delay_cost: 每过一日，能拉的票就少一分',
+        'danger:',
+        '  lethality: 低',
+        '  failure: 推上去的人坐不稳，冬赈之事全盘搁下',
+        '  tolerance: 一次失言',
+        '  threat_source: 三房的明争，与祠堂外盯着的那群人',
+        'forbidden:',
+        '  - 不得让票数凭空增长',
+        '  - 不得跳过表决直达结果',
+        'structure:',
+        '  seats:',
+        '    votes: 眼下能稳妥拿到的是七票',
+        '    total: 祠堂议事共十九票，过半要十票',
+        '    mobilizable: 还能再动两三家，代价是许他们明年的水利银子',
+        '  stages:',
+        '    - id: 1',
+        '      name: 提案',
+        '      what: 由三房各自具名推人，具了名就不好再反口',
+        '      risk: 二房可能推个虚名的人出来占位',
+        '    - id: 2',
+        '      name: 辩论',
+        '      what: 当众把各家的短处摆到桌上，摆得住的才站得稳',
+        '      risk: 说重了伤人，说轻了没人信',
+        '    - id: 3',
+        '      name: 表决',
+        '      what: 一人一票，过半即定',
+        '      risk: 差一票时，谁都可能临时被许了东西',
+        '    - id: 4',
+        '      name: 签署',
+        '      what: 中选者当着族人画押，写下三件事的期限',
+        '      risk: 画了押不认账，族里再无人信祠堂',
+        '  legitimacy:',
+        '    defect: 二房手里有一张去年的委托书，本不该代票，若他用了，这一场就带着瑕疵',
+        '    opinion: 族人大多只想快点有个能管事的，对外姓人的说法将信将疑',
+        '  lobbying:',
+        '    - who: 西头那几家佃户',
+        '      cost: 许他们明年少交一成租',
+        '    - who: 二房的族老之一',
+        '      cost: 要拿他儿子在外头欠的那笔债做交换',
+        '  outcome: 通过',
+    ];
+
+    // 变体：程序本身带着瑕疵，有人要拿这件事把整场推翻。
+    const OUTLINE_SKELETON_POLITICS_FLAW = [
+        'event_name: 那张不该有的委托书',
+        'event_brief: 票已经过半，可二房拿出了一张去年的委托书，说这一场从头就是错的。',
+        'event_type:',
+        '  primary: 政治程序',
+        '  secondary:',
+        '    - 政治阴谋',
+        'time_pressure:',
+        '  countdown: 委托书的真伪核实之前',
+        '  duration: 两日',
+        '  timeout_result: 程序作废，祠堂重开，前功尽弃',
+        '  delay_cost: 每拖一刻，就有更多人开始信二房的话',
+        'danger:',
+        '  lethality: 低',
+        '  failure: 推上去的人还没坐稳就被赶下来',
+        '  tolerance: 无',
+        '  threat_source: 二房手里那张纸，与围在祠堂门外看热闹的人',
+        'forbidden:',
+        '  - 不得让委托书凭空消失',
+        '  - 不得让程序瑕疵自行抹平',
+        'structure:',
+        '  seats:',
+        '    votes: 已过半，十票在手，但其中一票来源存疑',
+        '    total: 十九票，过半十票',
+        '    mobilizable: 还能再拉一票，但那一票的人情太重，日后不好还',
+        '  stages:',
+        '    - id: 1',
+        '      name: 核证',
+        '      what: 把那张委托书拿到日头底下验，验的是画押与年月',
+        '      risk: 验的人里头有二房的人',
+        '    - id: 2',
+        '      name: 申辩',
+        '      what: 被指的那一票要当众说清自己为何代投',
+        '      risk: 说清了也是瑕疵，说糊了便是把柄',
+        '    - id: 3',
+        '      name: 复决',
+        '      what: 族人重新举一次手，这回每票都要当面认',
+        '      risk: 有人临阵退缩，票会掉',
+        '    - id: 4',
+        '      name: 落印',
+        '      what: 结果落印，瑕疵一并记进族谱的附注',
+        '      risk: 不记附注，此事日后还会被翻出来',
+        '  legitimacy:',
+        '    defect: 去年那张委托书确有其实，但代票的人今年早已换了主，这一票站不住',
+        '    opinion: 族里议论纷纷，多数人不愿重开，但也不愿担个错的名',
+        '  lobbying:',
+        '    - who: 代票的那一家',
+        '      cost: 认这一票无效，但要许他明年的一份差事',
+        '    - who: 那位迟迟不肯表态的老族老',
+        '      cost: 要他开口，须得有人替他把孙子的婚事办了',
+        '    - who: 二房自己',
+        '      cost: 给他留一个位置，换他收手',
+        '  outcome: 搁置',
+    ];
+    // ---- 三期 M20（2026-11-13）：经营周期 ----
+    // main 是开张头三季，alt 是熬过一冬之后的摊子。
+    const OUTLINE_SKELETON_BUSINESS = [
+        'event_name: 桥头那间豆腐坊',
+        'event_brief: 接手一间快关门的豆腐坊，要在三个集日之内把本钱赚回来。',
+        'event_type:',
+        '  primary: 经营周期',
+        '  secondary:',
+        '    - 人情',
+        'time_pressure:',
+        '  countdown: 第三个集日收摊之前',
+        '  duration: 半个多月',
+        '  timeout_result: 本钱赔尽，铺子退回原主',
+        '  delay_cost: 每空一个集日，老主顾就少一批',
+        'danger:',
+        '  lethality: 低',
+        '  failure: 欠下豆行的账，往后只能替人打短工',
+        '  tolerance: 亏一个集日',
+        '  threat_source: 街对面的老铺子，与收不上来的赊账',
+        'forbidden:',
+        '  - 不得让经营稳赚不赔',
+        '  - 不得让资金凭空出现',
+        'structure:',
+        '  cycle:',
+        '    - id: 1',
+        '      what: 头一个集日，先开张，靠豆花与现磨豆腐撑场面',
+        '      output: 卖出七八板豆腐，得钱不足二两，但把人留住了',
+        '      inputcost: 泡豆、磨豆、柴火，加上头一天请人帮手的工钱',
+        '    - id: 2',
+        '      what: 第二个集日，添上豆腐干与油豆腐，往回本上赶',
+        '      output: 豆腐干走得快，钱能回上一半，但油要花得多',
+        '      inputcost: 添一口油锅，再买两斤油',
+        '    - id: 3',
+        '      what: 第三个集日，把赊出去的账收一收',
+        '      output: 收得回来多少，全看前两个集日的面子',
+        '      inputcost: 催账要得罪人，往后可能少几家主顾',
+        '  upkeep:',
+        '    hands: 眼下只有自己与一个学徒，集日忙不过来，缺人时只能少做一半',
+        '    materials: 豆从街东豆行赊，一月一结，断了就只能停磨',
+        '    tax: 每个集日抽五十文，另有年节例钱，收的是保长',
+        '  upgrade:',
+        '    - what: 添一座石磨，出浆快一倍',
+        '      condition: 手头攒够三两银子，且铺子里放得下',
+        '      cost: 三两，另要请石匠来凿两天',
+        '      gain: 每集日能多做四五板，本钱回得更快',
+        '    - what: 添驴代磨',
+        '      condition: 与豆行结清头一月的赊账',
+        '      cost: 一头驴连鞍共五两，还要草料',
+        '      gain: 不必再雇人推磨，省一份工钱',
+        '  cashflow:',
+        '    gap: 头一个月最紧，豆行的账与税赶在同一旬，差约一两二钱',
+        '    turnover: 集日卖现钱，赊账要等下半月，约半月回一轮',
+        '  staffing:',
+        '    - post: 推磨的学徒',
+        '      skill: 会磨豆，还不会点卤',
+        '      loyalty: 心在铺子上，但家里要他去码头做工，工钱给不上就会走',
+        '    - post: 看摊的帮工',
+        '      skill: 会招呼客人，秤上有些不老实',
+        '      loyalty: 只认钱，谁给得多跟谁',
+    ];
+
+    // 变体：熬过了头一冬，摊子大了，难处也换了。
+    const OUTLINE_SKELETON_BUSINESS_SCALE = [
+        'event_name: 熬过冬的那间豆腐坊',
+        'event_brief: 铺子是活下来了，可添了驴、添了人，一冬的开销把利全吃了。',
+        'event_type:',
+        '  primary: 经营周期',
+        '  secondary:',
+        '    - 人情',
+        'time_pressure:',
+        '  countdown: 开春豆行结账之前',
+        '  duration: 约一个月',
+        '  timeout_result: 结不上账，驴与磨都被折价抵走',
+        '  delay_cost: 每拖一日，豆行就多算一分利钱',
+        'danger:',
+        '  lethality: 低',
+        '  failure: 铺子还在，人散了，只剩自己推磨',
+        '  tolerance: 一次断供',
+        '  threat_source: 豆行的账，与开始拿捏工钱的帮工',
+        'forbidden:',
+        '  - 不得让账目自行抹平',
+        '  - 不得让帮工无故回心转意',
+        'structure:',
+        '  cycle:',
+        '    - id: 1',
+        '      what: 开春第一个集日，把存下的豆干清出去换成现钱',
+        '      output: 存得虽多，春干卖不上价，换得的钱刚够还一半账',
+        '      inputcost: 取出存货，另要雇车送到集上',
+        '    - id: 2',
+        '      what: 第二个集日，靠驴多磨几轮，把现磨的量提上去',
+        '      output: 出浆快了一倍，能卖出八板，现钱进得快',
+        '      inputcost: 草料、驴的脚力钱，加驴夫一日三顿',
+        '    - id: 3',
+        '      what: 第三个集日，若账还不上，只能去与豆行谈',
+        '      output: 谈成分期，账是缓了，往后每一笔都带着利',
+        '      inputcost: 谈的条件里要搭上一份人情',
+        '  upkeep:',
+        '    hands: 添了一驴一人，忙时够了，闲时要白养',
+        '    materials: 豆行按月结，如今赊的是双份',
+        '    tax: 铺子大了，立的册也厚了，税抽到每个集日八十文，另加年节',
+        '  upgrade:',
+        '    - what: 再添一口锅，分出油豆腐一摊',
+        '      condition: 账结清一半，且手里还有两人可用',
+        '      cost: 二两，另要腾出一间房',
+        '      gain: 油豆腐利厚，能顶掉驴的草料钱',
+        '    - what: 盘下隔壁半间空铺',
+        '      condition: 与保长走动，且豆行肯松口',
+        '      cost: 四两押金，每月另加租',
+        '      gain: 有了存豆的地方，不再受豆行拿捏',
+        '  cashflow:',
+        '    gap: 开春最紧，豆行结账与驴的草料赶在一处，差约二两四钱',
+        '    turnover: 现钱靠集日、赊账靠人情，如今轮转比头一年慢，约二十日一轮',
+        '  staffing:',
+        '    - post: 驴夫',
+        '      skill: 会喂驴、会赶车，不认秤',
+        '      loyalty: 人老实，但家里添了孩子，工钱一少就要走',
+        '    - post: 帮工（原看摊那个）',
+        '      skill: 会招呼客人，如今还会算账',
+        '      loyalty: 眼里有了铺子的份，开始盘算自己要拿几成，给不够就带走主顾',
+        '    - post: 学徒',
+        '      skill: 学会了点卤，是铺子里唯一会这手的人',
+        '      loyalty: 心还在，但被帮工挑唆得有些动摇',
+    ];
+
+
+
+
 
     // 外层里真正必填的键（contract 是可选，不在此列）。
     // 定稿 §9：「外层硬校验。缺了判失败并重试」。
@@ -2263,7 +2718,7 @@
 
         // ---- 二期 M14.5（2026-11-09）：NSFW 专属骨架 ----
         // 危晓定：主类型 NSFW 做专属骨架，专做成人内容，靠阶段与进展推进。
-        // 与其余七类最大的不同是它吃事件参数（阶段数、同意开关），
+        // 与其余十二类最大的不同是它吃事件参数（阶段数、同意开关），
         // spec 本身只描述结构，具体段数与 consent 有无由生成器按参数决定。
         //
         // 进度来源用 phases：这类型的推进单位就是「走到第几段」。
@@ -2326,6 +2781,251 @@
                 'pacing.stop 不能空——不写什么时候停，内容就没有可读性',
                 '同意与边界开启时 consent 三个子项都要写；关掉时整块不出现',
                 '不得跳过阶段直接进入下一阶段；不得让任何一方无故改变主意',
+            ],
+        },
+
+        // ---- 三期 M17（2026-11-13）：追捕搜索 ----
+        // 进度来源用 search_grid：推进单位是「搜到第几个区域」，不是「第几个阶段」。
+        // alert / exposure 是全类型里第一次出现的数值型状态字段，模型必须写成数字，
+        // 写成「较高」「危险」这类程度词，追踪器就画不出条。
+        '追捕搜索': {
+            progress: { field: 'search_grid' },
+            order: ['target', 'search_grid', 'alert', 'exposure', 'intercept'],
+            required: {
+                target: {
+                    kind: 'map',
+                    note: '被追的那个东西——人、兽、还是别的什么',
+                    sub: {
+                        move_rule: { kind: 'text', required: true, note: '它怎么动：昼伏夜出、跟着水源走、受了惊就往山里钻' },
+                        speed: { kind: 'text', required: true, note: '快慢对比：比人快、与人相当、受了伤走不快' },
+                        route: { kind: 'text', required: true, note: '大致活动路线，以及会不会往返' },
+                        resting_place: { kind: 'text', required: true, note: '在哪儿停、停多久，这是追上它的关键窗口' },
+                    },
+                },
+                search_grid: {
+                    kind: 'list', min: 3, max: 8, refable: true,
+                    note: '搜索分区，追捕的推进就发生在这张表上',
+                    item: {
+                        id: { kind: 'int', seq: true },
+                        area: { kind: 'text', note: '哪一片：河湾、东坡林子、磨坊一带' },
+                        coverage: { kind: 'text', note: '这一片能盖住多少，写范围，不写算法' },
+                        searched: { kind: 'bool', note: '当下搜过没有，这是追踪器的勾选依据' },
+                        covered: { kind: 'text', note: '没搜的地方留下什么痕迹或空当' },
+                    },
+                },
+                alert: {
+                    kind: 'int', min: 0, max: 3,
+                    note: '警戒等级，整数 0 到 3：0 未察觉、1 起疑、2 警觉、3 已惊动',
+                },
+                exposure: {
+                    kind: 'int', min: 0, max: 10,
+                    note: '暴露度，整数 0 到 10，越高越容易被反过来发现',
+                },
+                intercept: {
+                    kind: 'list', min: 1,
+                    note: '能在哪儿截住它',
+                    item: {
+                        point: { kind: 'text', note: '拦截点在哪儿' },
+                        window: { kind: 'text', note: '什么时候能截，晚一步就没了' },
+                    },
+                },
+            },
+            rules: [
+                'search_grid.id 从 1 连续编号，至少三片，少于三片就没有搜索可言',
+                'alert 写成 0 到 3 的整数，exposure 写成 0 到 10 的整数，不得用「较高」「危险」这类程度词',
+                'alert 与 exposure 要能被推动——搜过一片、惊动一次，这两个数就该变',
+                'intercept 至少一条，每条都要有时间窗；没有时间窗的拦截点等于没有',
+                'target 的停留点是追上它的唯一窗口，不能写成「随时可能停留」',
+                '不得让玩家不经搜索直接找到目标；不得出现 search_grid 之外的区域',
+            ],
+        },
+
+        // ---- 三期 M18（2026-11-13）：灾难事故 ----
+        // 进度来源用 rescue_window：灾难的推进单位是「还剩几个救援窗口」。
+        // toll 是第一个「随阶段更新」的字段，但它不进进度：进度记的是救援进度，
+        // 不是伤亡数字——把伤亡当进度条会读成「死得越多越推进」。
+        '灾难事故': {
+            progress: { field: 'rescue_window' },
+            order: ['trigger', 'spread', 'rescue_window', 'secondary', 'toll'],
+            required: {
+                trigger: {
+                    kind: 'map',
+                    note: '怎么起的',
+                    sub: {
+                        when: { kind: 'text', required: true, note: '什么时候起的事，与倒计时对齐' },
+                        where: { kind: 'text', required: true, note: '在哪，这是救援的第一约束' },
+                        omen: { kind: 'text', required: true, note: '事前有什么前兆，给没给过机会' },
+                    },
+                },
+                spread: {
+                    kind: 'map',
+                    note: '怎么扩大的',
+                    sub: {
+                        range: { kind: 'text', required: true, note: '波及到哪儿，会不会再扩' },
+                        speed: { kind: 'text', required: true, note: '多快，写可感的参照而非数字' },
+                        victims: { kind: 'text', required: true, note: '谁在里面，是等着救的人还是挡路的人' },
+                    },
+                },
+                rescue_window: {
+                    kind: 'list', min: 2, refable: true,
+                    note: '救援窗口，灾难的推进就发生在这张表上',
+                    item: {
+                        id: { kind: 'int', seq: true },
+                        timing: { kind: 'text', note: '什么时候能用：塌方后的半个时辰、退潮那阵' },
+                        route: { kind: 'text', note: '从哪儿进得去' },
+                        tool: { kind: 'text', note: '需要什么工具、什么人，没有就进不去' },
+                    },
+                },
+                secondary: {
+                    kind: 'list', min: 1,
+                    note: '次生灾害，一波未平一波又起才是灾难',
+                    item: {
+                        what: { kind: 'text', note: '二次发生什么：起火、决堤、塌方、瘟疫' },
+                        when: { kind: 'text', note: '在什么条件下会跟着来' },
+                    },
+                },
+                toll: {
+                    kind: 'map',
+                    note: '伤亡与损失，随阶段更新',
+                    sub: {
+                        people: { kind: 'text', required: true, note: '人的伤亡，按阶段推进变化' },
+                        property: { kind: 'text', required: true, note: '财物与地方的损毁' },
+                    },
+                },
+            },
+            rules: [
+                'rescue_window.id 从 1 连续编号，至少两个窗口；只有一个窗口就没有取舍',
+                '每个窗口的 tool 要写具体——没有工具就进不去，这正是取舍的来源',
+                'secondary 至少一条，且要写清触发条件',
+                'toll 随阶段更新，不得一上来就写最终数字；结局确定后才写定数',
+                'trigger.omen 不能写成「毫无征兆」——给过机会才算灾难，没给过只是一次突袭',
+                '不得让玩家一次救下所有人；不得出现 rescue_window 之外的救援途径',
+            ],
+        },
+
+        // ---- 三期 M19（2026-11-13）：政治程序 ----
+        // 内层 stages 与外层阶段数组不再冲突：外层在 2026-11-07 已改名为 structure.phases，
+        // 所以这里可以放心用 stages 表达「程序阶段」这个语义。
+        // 进度来源用 stages：推进单位是「走完第几个程序环节」。
+        '政治程序': {
+            progress: { field: 'stages' },
+            order: ['seats', 'stages', 'legitimacy', 'lobbying', 'outcome'],
+            required: {
+                seats: {
+                    kind: 'map',
+                    note: '手里的牌有多少',
+                    sub: {
+                        votes: { kind: 'text', required: true, note: '现在能拿到的票' },
+                        total: { kind: 'text', required: true, note: '总共多少票，要过多少才够' },
+                        mobilizable: { kind: 'text', required: true, note: '还能再动员多少，以及代价' },
+                    },
+                },
+                stages: {
+                    kind: 'list', min: 2, max: 6, refable: true,
+                    note: '程序环节，政治程序的推进就在这张表上',
+                    item: {
+                        id: { kind: 'int', seq: true },
+                        name: { kind: 'text', note: '提案、辩论、表决、签署这类环节' },
+                        what: { kind: 'text', note: '这一环要办成什么才过得去' },
+                        risk: { kind: 'text', note: '这一环最容易翻车的地方' },
+                    },
+                },
+                legitimacy: {
+                    kind: 'map',
+                    note: '这程序站不站得住',
+                    sub: {
+                        defect: { kind: 'text', required: true, note: '程序瑕疵：哪个环节走了捷径、留了什么把柄' },
+                        opinion: { kind: 'text', required: true, note: '外面的舆论往哪边倒' },
+                    },
+                },
+                lobbying: {
+                    kind: 'list', min: 1,
+                    note: '能去拉的人',
+                    item: {
+                        who: { kind: 'text', note: '能争取谁' },
+                        cost: { kind: 'text', note: '要他倒过来，得给什么' },
+                    },
+                },
+                outcome: {
+                    kind: 'enum', values: ['通过', '否决', '搁置', '交易'],
+                    note: '最终落点，四选一',
+                },
+            },
+            rules: [
+                'stages.id 从 1 连续编号，至少两个环节；只有一个环节就不叫程序',
+                '每个环节的 what 要写「怎么算过」，不能只写环节名',
+                'seats 三个子项都要写，total 是门槛，votes 是当下的数',
+                'legitimacy.defect 不能一律写「无瑕疵」——程序若真无瑕疵，这类型就失去张力',
+                'lobbying 至少一个对象，每个都要写代价；没有代价的拉拢等于作弊',
+                'outcome 只能取四个值之一，不得自造第五种',
+                '不得让程序在没有表决的情况下直达 outcome；不得让票数凭空增长',
+            ],
+        },
+
+        // ---- 三期 M20（2026-11-13）：经营周期 ----
+        // 进度来源用 cycle：推进单位是「跑到第几个周期」。
+        // 数值口径按已落地类型的先例：能写成自然语言就写自然语言，不强行拉成纯数字。
+        // 生存危机的 threats 间隔就明确允许「每隔两小时」这类写法，这里同办——
+        // 经营里的「三十两」「两成利」本来就带着单位和语境，逼成纯数字反而要另造单位表。
+        '经营周期': {
+            progress: { field: 'cycle' },
+            order: ['cycle', 'upkeep', 'upgrade', 'cashflow', 'staffing'],
+            required: {
+                cycle: {
+                    kind: 'list', min: 2, refable: true,
+                    note: '经营周期，推进就在这张表上',
+                    item: {
+                        id: { kind: 'int', seq: true },
+                        what: { kind: 'text', note: '这一周期做什么：进货、开张、赶集、结账' },
+                        output: { kind: 'text', note: '这一周期产出什么，带数量或程度' },
+                        inputcost: { kind: 'text', note: '这一周期要投进去什么' },
+                    },
+                },
+                upkeep: {
+                    kind: 'map',
+                    note: '维持下去的开销',
+                    sub: {
+                        hands: { kind: 'text', required: true, note: '人手够不够，缺了会怎样' },
+                        materials: { kind: 'text', required: true, note: '料从哪来、断了怎么办' },
+                        tax: { kind: 'text', required: true, note: '税与抽成分多少，谁来收' },
+                    },
+                },
+                upgrade: {
+                    kind: 'list', min: 1,
+                    note: '能往上走的路',
+                    item: {
+                        what: { kind: 'text', note: '升级成什么样子' },
+                        condition: { kind: 'text', note: '什么条件才能升' },
+                        cost: { kind: 'text', note: '要花多少，钱还是别的' },
+                        gain: { kind: 'text', note: '升完得到什么' },
+                    },
+                },
+                cashflow: {
+                    kind: 'map',
+                    note: '钱转不转得开',
+                    sub: {
+                        gap: { kind: 'text', required: true, note: '缺口在哪个月、差多少' },
+                        turnover: { kind: 'text', required: true, note: '多久回本一次' },
+                    },
+                },
+                staffing: {
+                    kind: 'list', min: 1,
+                    note: '手里的人',
+                    item: {
+                        post: { kind: 'text', note: '什么岗位' },
+                        skill: { kind: 'text', note: '会什么、不会什么' },
+                        loyalty: { kind: 'text', note: '心在不在，什么情况下会走' },
+                    },
+                },
+            },
+            rules: [
+                'cycle.id 从 1 连续编号，至少两个周期；一个周期看不出经营',
+                '每周期都要有 inputcost 与 output，只写一头就不是经营而是命令',
+                'upkeep 三个子项都要写；税费不能省，省了就没有压力',
+                'cashflow 要写出「什么时候会断」，只写「资金充足」等于没写',
+                'upgrade 至少一条，且每条都要有 condition——什么条件都不限的升级不是升级',
+                '数值可写成自然语言（如「三十两」「两成利」），但要带单位，不得只写「较多」',
+                '不得让经营稳赚不赔；不得出现 cashflow 之外的资金来源',
             ],
         },
     };
@@ -2765,6 +3465,34 @@
             scenes: '写场景与推进顺序。每一场要有明确的开始与结束，不做无休止的流水账',
             exit: '写任意一方中止的条件。中止必须被尊重，不能写成「欲拒还迎」',
         },
+        '追捕搜索': {
+            target: '四子项都要写，尤其是停留点——那是唯一能追上的窗口',
+            search_grid: '每片给编 id（从 1 连续），至少三片。searched 记当下搜过没有，追踪器按它勾选',
+            alert: '写整数 0 到 3，不要写「较高」「危险」这类程度词',
+            exposure: '写整数 0 到 10。它与 alert 是两回事：一个是对面的警觉，一个是你自己的暴露',
+            intercept: '每条拦截点都要写时间窗，没有时间窗等于截不住',
+        },
+        '灾难事故': {
+            trigger: '三子项都要写。前兆这一项不能写「毫无征兆」，给过机会才算灾难',
+            spread: '写波及范围与速度。速度用可感的参照，不要求纯数字',
+            rescue_window: '每个窗口给编 id（从 1 连续），至少两个。窗口之间要互斥，能同时救就没有取舍',
+            secondary: '次生灾害要写触发条件，不能凭空冒出来',
+            toll: '随阶段更新，不要一上来就写最终数字',
+        },
+        '政治程序': {
+            seats: '三个子项都写。total 是门槛，votes 是当下的数',
+            stages: '程序环节，给编 id（从 1 连续），至少两个。每个都要写「怎么算过」',
+            legitimacy: '程序瑕疵不要一律写「无瑕疵」——真无瑕疵这类型就没有张力了',
+            lobbying: '每个可争取对象都要写代价，没有代价的拉拢等于作弊',
+            outcome: '只能写「通过」「否决」「搁置」「交易」四者之一',
+        },
+        '经营周期': {
+            cycle: '每周期给编 id（从 1 连续），至少两个。都要写明投什么、产出什么',
+            upkeep: '三项都写，尤其税费——省了就没有压力',
+            upgrade: '每条都要有 condition，什么条件都不限的升级不是升级',
+            cashflow: '要写出「什么时候会断」，只写「资金充足」等于没写',
+            staffing: '忠诚这一项要写清什么情况下会走',
+        },
         '其他': {
             goal: '这个事件最终要达成什么。一句话说清，不要写成流程说明',
             obstacles: '每条都要具体到「谁、因为什么、怎么挡」',
@@ -3145,7 +3873,7 @@
      * 取某个主类型的内层键清单。
      * 返回 { required, optional, known}：known=false 表示这个类型还没有骨架，
      * 调用方据此跳过内层校验（而不是回落到案件字段去套）。
-     * 「其他」有骨架（通用七字段），known 为 true。
+     * 「其他」有骨架（通用六字段），known 为 true。
      */
     function innerKeysOf(mainType) {
         // M7：自定义类型按映射取内层键。没配映射的解析成「其他」，
@@ -3273,6 +4001,7 @@
         pendingDraftEditDirty: false,
         logFilter: 'all',
         logKeyword: '',
+    logAtBottom: true,
         autoCheckTimer: null,
         autoRunning: false,
         progress: { steps: [], startedAt: 0, timer: null },
@@ -4228,7 +4957,21 @@
                         const sorted = entries.slice().sort((a, b) => (b.seq || 0) - (a.seq || 0));
                         for (const e of sorted) {
                             for (const op of (e.operations || [])) {
-                                if (op && op.sheetKey && op.sheet && op.sheet.content) {
+                                if (!op) continue;
+                                // 2026-11-14 危晓实测（兰开斯特堡·第二卷）：shujuku 有时不做逐表操作，
+                                // 而是丢一条 kind='data_replace' 的整份快照，八张表全塞在 op.data 里
+                                // （key 就是 sheet_xxx，值带 name/content，与逐表操作同一个形状）。
+                                // 旧代码只认 op.sheetKey + op.sheet，这种快照一条也读不到，
+                                // 于是明明有 234 行纪要，面板却说「未检测到纪要数据」。
+                                if (op.kind === 'data_replace' && op.data && typeof op.data === 'object') {
+                                    for (const [k, v] of Object.entries(op.data)) {
+                                        if (!k.startsWith('sheet_')) continue;
+                                        if (!v || typeof v !== 'object' || !v.content) continue;
+                                        if (!result.has(k)) result.set(k, v);
+                                    }
+                                    continue;
+                                }
+                                if (op.sheetKey && op.sheet && op.sheet.content) {
                                     // 楼层是从新到旧遍历的，第一次遇到即最新快照；
                                     // 后面更旧的楼层会带同一张表的旧版本，不能覆盖
                                     if (!result.has(op.sheetKey)) result.set(op.sheetKey, op.sheet);
@@ -5041,6 +5784,8 @@
         '案件推理', '谈判交涉', '探险探索', '生存危机',
         '社交博弈', '战斗冲突', '日常杂务', '禁忌秘辛',
         'NSFW',
+        // 三期 M17–M20（2026-11-13）：补齐定稿规划的十三类专用类型。
+        '追捕搜索', '灾难事故', '政治程序', '经营周期',
         // M6（2026-11-06）：第十四项「其他」，兜底用。定稿 1L/1U：
         // 不默认、不参与判定树自动匹配，只有十三个专用类型都不贴时由用户主动选。
         // 放在列表末尾是为了让下拉框的顺序稳定，不动前面十三个的位置。
@@ -5586,10 +6331,8 @@
      * 填了半天的偏好和框架提示白填。现在每填一格就写进扩展设置（服务端存盘），
      * 打开面板时读回来接着填。
      *
-     * 生命周期只有三个出口会清：
-     *   1. 点「重置为默认」；
-     *   2. 点「采用」待选事件（说明这一套已经用掉了）；
-     *   3. 生成成功后自动清掉（已有的既定行为，保持不动）。
+     * 生命周期只有一个出口会清：点「重置为默认」。
+     * 采用（2026-11-14 改）与生成成功都不清——采用走 clearGenFormOnAdopt 只丢草稿名。
      * 注意：这里只在存盘数据里保留，用户主动清空某个格子时按空值存，不做"空值即默认"的兜底。
      */
     function loadGenForm() {
@@ -5631,7 +6374,7 @@
         saveSettings();
     }
 
-    /** 清掉落盘的生成页表单（重置 / 采用时调） */
+    /** 清掉落盘的生成页表单。只有 resetDraftPrefs 会调它，也就是只在「重置为默认」时清。 */
     function clearGenForm() {
         const s = getSettings();
         s.genForm = null;
@@ -5678,7 +6421,8 @@
         return S.draftGroupModes;
     }
 
-    /** 生成成功后清掉草稿，下次进来是全新的一份 */
+    /** 回落草稿缓存到初始态。只有「重置为默认」按钮会调它（12-ui.js 里那一处）；
+     *  采用与生成成功都不调——2026-11-14 起采用也不再清，见 clearGenFormOnAdopt。 */
     function resetDraftPrefs() {
         S.draftPrefs = null;
         S.draftGroupModes = null;
@@ -5687,16 +6431,20 @@
     }
 
     /**
-     * 采用待选事件时清空生成页表单（2026-11-01 危晓要求）。
-     * 他给的规矩是：填好的配置只在两个动作后消失 —— 点「重置为默认」，或点「采用」。
-     * 采用说明这一套设置已经落地成事件，下次该重新想。
+     * 采用待选事件后的收尾。
+     *
+     * 2026-11-14 危晓反馈：事件链生成模式下，采用之后生成页的配置被清成默认了，要求不能清。
+     * 原先是 2026-11-01 定的规矩「填好的配置只在两个动作后消失：重置为默认、采用」，
+     * 那条规矩在单事件时说得通（一次一套），放到事件链上就不成立——
+     * 一条链有多个节点，采用第一个节点就把配置清空，第二个节点得从头再填一遍。
+     * 现在改为：采用不清配置。想回到默认只有「重置为默认」这一条路。
+     *
+     * 只丢掉草稿名的暂存（那是「这次叫什么」的一次性输入，采用后已经用掉了），
+     * 参数与分组粗细程度一律留着。
      */
     function clearGenFormOnAdopt() {
-        S.draftPrefs = null;
-        S.draftGroupModes = null;
         S.draftName = '';
-        clearGenForm();
-        log('待选事件已采用，生成页配置已清空');
+        log('待选事件已采用，生成页配置保留（要恢复默认请点「重置为默认」）');
     }
 
     function buildPrefsBlock(prefs) {
@@ -6229,11 +6977,10 @@
         return [
             '输出格式：只输出一个 YAML 代码块。所有类型都要有的外层键为 '
                 + OUTLINE_OUTER_KEYS.join(' / ') + '（其中 contract 可选，其余必填）。',
-            innerKeyNamesOf(mainTypeLabel).length
-                ? '外层键之后是 structure（内层），本次主类型「' + mainTypeLabel + '」的内层键为 '
-                    + innerKeyNamesOf(mainTypeLabel).join(' / ') + '。'
-                : '外层键之后是 structure（内层），本次主类型「' + mainTypeLabel + '」的内层骨架还没做，'
-                    + '请按这个类型自己的结构写：需要哪些字段就列哪些，但内层一律放在 structure 下面。',
+            // 这一句只说「内层键是什么」，不再给「需要哪些字段就列哪些」那种指引——
+            // 任何主类型现在都有字段清单（兜底「其他」也有六个），字段由上方清单给，不靠模型自由列。
+            '外层键之后是 structure（内层），本次主类型「' + mainTypeLabel + '」的内层键为 '
+                + innerKeyNamesOf(mainTypeLabel).join(' / ') + '。',
             // M6.4/M6.5（2026-11-07）：块状字段的子键说明。
             // spec 里写了 sub 的字段（时间窗口、账目这类）在这里逐条告诉模型该有哪些子键；
             // 没写 sub 的字段不会多出一个字。
@@ -6262,7 +7009,7 @@
             // 否则模型会照案件或战斗的样子硬凑，或者把自己另起的阶段塞进 structure。
             // 用条件展开而不是空字符串，免得 lines.join 出一个空行。
             ...(mainTypeLabel === '其他'
-                ? ['「其他」是兜底类型：按上面六个字段写，不要照搬案件或战斗的专属字段（没有核心真相、没有信息节点）。'
+                ? ['「其他」是兜底类型：按上面六个字段写，不要照搬别的类型的专属字段（没有核心真相、没有信息节点）。'
                     + '这个事件如果要分阶段，写在外层的 structure.phases 里（最多 3 段），不要在 structure 下另起一个同名字段。']
                 : []),
             '结构一律写在外层键之下、内层键放在 structure 里面，不要再平铺回顶层。',
@@ -6289,8 +7036,8 @@
             // 2026-11-05 M3：示例按主类型挑（案件 / 战斗，一期就这两套）。
             // 以前这里写死「示例的主类型是案件推理」，选了战斗的模型只能看着案件示例
             // 去猜战斗该长什么样——这正是「所有事件都生成成案件」那个病的残留。
-            // 没有骨架的类型（谈判、生存等，二期才做）不给示例，只给字段清单，
-            // 不拿案件或战斗的示例去硬套。
+            // 没有专属示例的类型（「其他」、以及未配映射的自定义类型）只给字段清单，
+            // 不拿别的类型的示例去硬套。2026-11-14 三期补齐后，只有兜底类型会走到这里。
             ...(skel
                 ? [
                     '【结构照抄】下面是一条填好的完整示例，结构照抄，内容全部按本次事件重写。',
@@ -6312,9 +7059,9 @@
                     skel.altNote,
                 ]
                 : [
-                    '本次主类型「' + mainTypeLabel + '」还没有现成骨架示例（一期只做了案件推理与战斗冲突两套）。',
-                    '本次没有示例可照抄，按该类型自己的结构写：需要哪些字段就列哪些，',
-                    '内层字段用英文小写下划线，全部放在 structure 下面，不要照搬案件或战斗的字段。',
+                    '本次主类型「' + mainTypeLabel + '」没有专属示例可照搬。',
+                    '字段就按上面列出的那几行写，键名逐字照用；内层字段用英文小写下划线，',
+                    '全部放在 structure 下面，不要照搬别的类型的字段。',
                 ]),
         ];
     }
@@ -6454,14 +7201,9 @@
         return (n && typeof n === 'object') ? String(n.primary || '').trim() : '';
     }
 
-    /**
-     * 按主类型挑示例（2026-11-05 M3）。
-     * 返回 { main, alt, mainLabel }：main 是常态示例，alt 是示范可选字段的第二条。
-     *
-     * 一期只有案件与战斗两套骨架（定稿 1C）。没有骨架的类型返回 null，
-     * 由调用方改成「没有示例，按字段清单写」——不能拿案件的示例硬套，
-     * 那正是「所有事件都生成成案件」这个病的来源。
-     */
+    // 说明：「按主类型挑示例」那段注释原本挂在这里，但 skeletonForType 早已挪到下面的
+    // 骨架生成器注册表之后，注释与函数脱了节、内容也停在「一期只有两套」。已删掉，
+    // 现状说明见 skeletonForType 前的注释。
     /**
      * 骨架生成器注册表（2026-11-09 二期 M14.5）。
      *
@@ -6475,7 +7217,7 @@
      *   每个类型一个生成器，签名统一 —— (args) => { main, alt } 两套骨架文本。
      *   args 是参数对象，可能为空；暂时不吃参数的类型忽略它即可。
      *
-     * 六类（案件、战斗、谈判、生存、探险、社交、杂务、秘辛）现在照原样返回常量，
+     * 十二个专用类型现在照原样返回常量，
      * 行为与改造前必须一字不差，验收标准就是十六套骨架全文比对零差异。
      * 真正吃参数的只有 NSFW。
      *
@@ -6483,7 +7225,7 @@
      * 形状不变，所以 prompt 拼装、草稿卡、类型下拉三处都不用改。
      */
 
-    /** 取一套或两套骨架文本，六类暂时直接返回常量 */
+    /** 取一套或两套骨架文本，十二个专用类型直接返回常量，NSFW 由生成器现算 */
     const SKELETON_BUILDERS = {
         案件推理: () => ({ main: OUTLINE_SKELETON, alt: OUTLINE_SKELETON_MISLEAD }),
         战斗冲突: () => ({ main: OUTLINE_SKELETON_COMBAT, alt: OUTLINE_SKELETON_COMBAT_PREP }),
@@ -6493,6 +7235,11 @@
         社交博弈: () => ({ main: OUTLINE_SKELETON_SOCIAL, alt: OUTLINE_SKELETON_SOCIAL_GOSSIP }),
         日常杂务: () => ({ main: OUTLINE_SKELETON_CHORE, alt: OUTLINE_SKELETON_CHORE_CHECK }),
         禁忌秘辛: () => ({ main: OUTLINE_SKELETON_TABOO, alt: OUTLINE_SKELETON_TABOO_HEAVY }),
+        // 三期 M17–M20（2026-11-13）：补上后四类骨架示例。
+        追捕搜索: () => ({ main: OUTLINE_SKELETON_PURSUE, alt: OUTLINE_SKELETON_PURSUE_WARY }),
+        灾难事故: () => ({ main: OUTLINE_SKELETON_DISASTER, alt: OUTLINE_SKELETON_DISASTER_FIRE }),
+        政治程序: () => ({ main: OUTLINE_SKELETON_POLITICS, alt: OUTLINE_SKELETON_POLITICS_FLAW }),
+        经营周期: () => ({ main: OUTLINE_SKELETON_BUSINESS, alt: OUTLINE_SKELETON_BUSINESS_SCALE }),
         // 唯一真正吃参数的：阶段数与同意开关（M14.5）
         NSFW: (args) => buildNsfwSkeleton(args || {}),
     };
@@ -6536,10 +7283,11 @@
 
     function skeletonForType(mainType, skelArgs) {
         // M7（2026-11-07）：自定义类型先解析成它映射到的内置类型，再取骨架。
-        // 注意：只有目标类型本身有骨架（案件、战斗）时，映射才真正拿到示例；
-        // 映射到其余七个类型仍返回 null，调用方给出「没有现成示例，按字段清单写」。
+        // 注意：只有目标类型本身有骨架时，映射才真正拿到示例。
+        // 2026-11-14 三期补齐后，十三个专用类型都有骨架，只有解析成「其他」才返回 null
+        // （「其他」走兜底六字段那条路，调用方给出「没有专属示例可照搬」）。
         // 没配映射的自定义类型解析成「其他」，同样返回 null——「其他」走的是字段清单那条路。
-        // 配了映射、且目标类型有骨架（案件/战斗）时，会拿到对应骨架，
+        // 配了映射、且目标类型有骨架时，会拿到对应骨架，
         // 但 mainLabel 仍是原类型名，模型写进 event_type 的也是用户起的名字。
         const origType = String(mainType || '').trim();
         const t = resolveSkeletonType(origType);
@@ -6661,6 +7409,56 @@
                     main: built.main, alt: built.alt, mainLabel: 'NSFW',
                     altTitle: built.altTitle, altTitle2: built.altTitle2,
                     altDiff: built.altDiff, altHow: built.altHow, altNote: built.altNote,
+                };
+            }
+            // 三期 M17–M20（2026-11-13）：后四类骨架的说明句。
+            // 这里原本漏了——生成器已在 SKELETON_BUILDERS 登记，但 skeletonForType 里没有
+            // 对应分支，函数一路走到末尾的 return null，下拉框就把这四类标成「骨架未完成」。
+            // 记住：登记生成器只是让 buildSkeleton 拿得到文本，能不能被认成「有骨架」
+            // 取决于本函数有没有分支，两处都必须加。
+            // 2026-11-14 危晓实测发现标签仍在，补上这四个分支。
+            // 两条的分界线是「目标有没有被惊动」。
+            if (t === '追捕搜索') {
+                return {
+                    main: built.main, alt: built.alt, mainLabel: '追捕搜索',
+                    altTitle: '【惊动过怎么写】上面一条是目标还没察觉，搜查照常进行。如果它已经被惊过一次，',
+                    altTitle2: '警戒拉满、会绕开搜过的地方，照下例把 alert 调高、把 search_grid 的覆盖写明：',
+                    altDiff: '两条示例的差别：第一条 alert 是 1、三片区域都还没搜过；第二条 alert 拉到 3，先搜过的那片要标出来。',
+                    altHow: '还没惊动就照第一条写；惊过了、它开始躲，照第二条把警戒与已搜区域写实。',
+                    altNote: '（alert 取 0-3、exposure 取 0-10 的整数，不写「较高」「危险」这类说法。）',
+                };
+            }
+            // 两条的分界线是「灾害是突发还是还在蔓延」。
+            if (t === '灾难事故') {
+                return {
+                    main: built.main, alt: built.alt, mainLabel: '灾难事故',
+                    altTitle: '【还在蔓延怎么写】上面一条是已经塌到底的废墟，要做的只是往外救人。',
+                    altTitle2: '如果灾害还在扩大（火没灭、水还在涨），照下例写 trigger 与 spread：',
+                    altDiff: '两条示例的差别：第一条是塌方已停、只计算救援窗口；第二条火还在烧，spread 要写清楚下一步会烧到哪。',
+                    altHow: '已经停下的灾照第一条写；还在扩大的照第二条，把蔓延方向与阻止它的代价写出来。',
+                    altNote: '（toll 记的是伤亡与损失，它不是推进刻度——别把它当成「死得越多越接近结束」。）',
+                };
+            }
+            // 两条的分界线是「程序顺不顺」。
+            if (t === '政治程序') {
+                return {
+                    main: built.main, alt: built.alt, mainLabel: '政治程序',
+                    altTitle: '【程序被打断怎么写】上面一条是按规矩走完的推举，三房各自拉票。',
+                    altTitle2: '如果中途有人质疑程序本身不合法（票数作废、要重来），照下例写 stages 里多出的那一轮：',
+                    altDiff: '两条示例的差别：第一条三日走完三轮定人；第二条半路冒出质疑，要多走一轮核实才作得数。',
+                    altHow: '顺顺当当推人的照第一条；有人掀桌子、说这场从头就不算数的照第二条。',
+                    altNote: '（legitimacy 要写清凭什么算数：席位、票数、旧例；光有「多数人同意」不够。）',
+                };
+            }
+            // 两条的分界线是「铺子还小还是已经养了人」。
+            if (t === '经营周期') {
+                return {
+                    main: built.main, alt: built.alt, mainLabel: '经营周期',
+                    altTitle: '【添了人怎么写】上面一条是一个人守着的铺子，开销只有本钱与房租。',
+                    altTitle2: '如果已经添了帮工、添了牲口，开销压过利钱，照下例把 upkeep 与 cashflow 写开：',
+                    altDiff: '两条示例的差别：第一条只用三个集日回本；第二条要熬过一个结算周期，upkeep 里多了工钱与草料。',
+                    altHow: '一个人干的照第一条；养着人、要按月结账的照第二条。',
+                    altNote: '（金额可以写带单位的口语数字，「三银盾」「半吊钱」都行，别为了整齐换算成铜板。）',
                 };
             }
             return null;
@@ -8165,8 +8963,9 @@
             // 类型压根没写出来。外层那条「event_type.primary 是空的」已经报了，
             // 这里不再追着内层说「骨架没做」，否则同一件事报两遍、还指向错的方向。
         } else if (!innerSpec.known) {
-            // 这个类型还没有内层骨架（一期只有案件推理有）。此时不查内层，
-            // 也不套用案件的字段——套了就是逼战斗事件写 core_truth，正是要治的病。
+            // 当前实现下这条分支不可达：任何非空主类型都会解析到内置类型或「其他」，
+            // 后者恒有内层键（innerKeysOf 对「其他」返回 known:true）。保留它仅作防御，
+            // 万一将来有类型缺 spec，这里报出来而不是拿别的类型字段硬套。
             warnings.push(`主类型「${mainType}」的内层骨架还没做，本次不校验内层结构`);
         } else {
             for (const k of innerSpec.required) {
@@ -8392,6 +9191,12 @@
     function ownerLabel(owner) {
         return BUSY_OWNER_LABEL[owner] || String(owner || '另一个操作');
     }
+    /**
+     * 纯本地操作的占用者：写/删世界书条目、改状态、清历史，全程不发模型请求。
+     * 这几步不该显示「放弃等待」——没有请求可打断，按钮点了什么也停不下来（2026-11-14 危晓反馈）。
+     * 新加的 owner 默认仍显示按钮，只有确实纯本地的才往这里加，别把它们混成一团。
+     */
+    const LOCAL_ONLY_OWNERS = new Set(['adopt', 'close']);
 
     // 忙碌提示文案随操作变：废弃/完结是本地操作，不该显示「正在请求模型」
     let busyText = S.busyText; // 引用指向 S，值统一存 S
@@ -8425,14 +9230,19 @@
                 // 以前只能刷新整个页面。按钮点了之后走 abortPendingRequest，busy 随之解除
                 b.innerHTML = '';
                 b.appendChild(document.createTextNode(text || S.busyText || '处理中…'));
-                if (on) {
+                // 2026-11-14 危晓反馈：采用和废弃时点「放弃等待」没有反应。
+                // 根因不是按钮坏了——那两步是纯本地操作（写/删世界书条目），根本不发模型请求，
+                // S.pendingRequest 是空的，点下去只能弹一句「没有可打断的请求」。
+                // 界面上给一个按了不会拦下任何东西的按钮本身就是错：它承诺了做不到的事。
+                // 所以本地操作干脆不显示这个按钮，而不是留着它骗人。
+                if (on && !LOCAL_ONLY_OWNERS.has(who || S.busyOwner || '')) {
                     const giveUp = el('span', 'eo-giveup', '放弃等待');
                     giveUp.addEventListener('click', (ev) => {
                         ev.preventDefault();
                         ev.stopPropagation();
                         if (!abortPendingRequest()) {
-                            // 没有正在等的请求（比如在写世界书），只提示不假装能打断
-                            toast('当前这一步没有可打断的请求，写完会自己结束');
+                            // 走到这里说明以为能打断却没有请求在等（比如恰好落在两次请求之间），只提示不假装
+                            toast('当前这一步没有可打断的请求，稍等片刻会自己结束');
                         } else {
                             log('已放弃等待模型返回');
                         }
@@ -9903,7 +10713,10 @@
             event.floorBaseNarration = !!getSettings().memory.narrationMode;
             meta.currentEventId = id;
             saveMeta();
-            // 采用即视为这套生成设置已经用掉，清空表单（危晓 2026-11-01 的规矩）
+            // 采用不再清空生成页配置（2026-11-14 危晓改口径）：
+            // 原来按 2026-11-01 的规矩「采用即用掉、清空表单」，放到事件链上就说不通——
+            // 一条链有多个节点，采用第一个就把配置清掉，第二个得从头再填。
+            // 现在只丢掉草稿名，参数与分组粗细留着，要恢复默认只能点「重置为默认」。
             clearGenFormOnAdopt();
             log(`已采用事件「${event.name}」，世界书条目 uid=${res.uid}`);
             // 2026-11-04 危晓反馈：采用后在世界书面板里搜不到条目，F5 一次才出现。
@@ -10907,7 +11720,7 @@
 #eo_panel .eo-body{flex:1 1 auto;min-height:0;max-width:1100px;width:100%;margin:0 auto;
   padding:0 20px 48px;overflow-y:auto;overflow-x:hidden;
   -webkit-overflow-scrolling:touch;overscroll-behavior:contain;}
-.eo-box{max-height:none;overflow:visible;}
+/* 原先是重置 .eo-box 的高度上限，2026-11-14 起内容框改自带限高自滚，这条不再需要，删掉免得与后面的定义互相矛盾 */
 /* 请求体三段（2026-11-02）：三块文本域上下排，别挤成一坨 */
 .eo-yaml-field{margin:8px 0 4px;}
 .eo-yaml-field>textarea{font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.5;
@@ -10961,10 +11774,15 @@
 /* 待选事件的操作按钮（采用/丢弃）：默认不高亮，只有按住的那一下亮，松开就灭。
    采用不再用 eo-primary 常亮——列表里好几个草稿时，常亮的按钮容易让人以为是当前选中 */
 .eo-btn.eo-press:active{background:var(--eo-accent-2);border-color:var(--eo-accent);font-weight:600;}
-/* 看大纲/编辑：开关类按钮，开着高亮、关掉回原样 */
+/* 看大纲/编辑：开关类按钮，开着高亮、关掉回原样。
+   2026-11-14 危晓改口径：以前定的是「整页只由窗口滚动，内容框一律不另设滚动条」，
+   那条现在废弃——一条几百行的日志或大纲会把整页拉得极长，找按钮要翻半天。
+   改成各框自己限高、自己滚，整页长度因此可控。52dvh 而不是 52vh：手机地址栏收放时 vh 不变，
+   用 vh 会让框比可视区高、底部被挡住。 */
 .eo-box{border:1px solid rgba(184,134,11,.32);border-radius:9px;padding:9px 10px;
   background:var(--eo-bg-soft);margin-bottom:9px;white-space:pre-wrap;word-break:break-word;
-  max-height:none;overflow:visible;line-height:1.55;}
+  max-height:52dvh;overflow-y:auto;overflow-x:auto;
+  overscroll-behavior:contain;-webkit-overflow-scrolling:touch;line-height:1.55;}
 .eo-hint{color:var(--eo-text-3);font-size:12px;line-height:1.5;}
 /* 骨架映射表（M7 2026-11-07）：一行一条「自定义名 → 内置名」，右侧带删除 */
 .eo-map-list{margin:4px 0 6px;}
@@ -11073,7 +11891,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-extra-keys summary{font-size:11px;color:var(--eo-text-4);cursor:pointer;margin:4px 0;}
 /* YAML 编辑框用等宽字，行号对齐、编号一眼能看出跳没跳 */
 .eo-draft-yaml{font-family:ui-monospace,Consolas,"Courier New",monospace;font-size:12px;
-  white-space:pre;overflow:visible;line-height:1.5;min-height:160px;}
+  white-space:pre;overflow-y:auto;overflow-x:auto;max-height:52dvh;
+  overscroll-behavior:contain;-webkit-overflow-scrolling:touch;line-height:1.5;min-height:160px;}
 .eo-draft-edit label,.eo-draft-edit .eo-label{font-size:12px;color:var(--eo-text-5);white-space:nowrap;}
 .eo-draft-edit .eo-sec-inline{margin-top:6px;}
 .eo-sec{border-top:1px dashed var(--eo-line);margin:10px 0 6px;padding-top:8px;
@@ -11106,7 +11925,11 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-details>summary::before{content:"▸ ";color:var(--eo-accent);}
 .eo-details[open]>summary::before{content:"▾ ";}
 .eo-details[open]>summary{border-bottom:1px dashed rgba(184,134,11,.3);margin-bottom:8px;}
-.eo-details .eo-box{max-height:none;}
+/* 折叠块里的框：外面已经收了一层，可以放宽一点，但仍是有限值。
+   2026-11-14 危晓要求核对小屏：原来写 70dvh，手机上一个参数组展开就吃掉大半个屏幕，
+   框内滚动和页面滚动叠在一起，反而更难滑。现在按常见的窄屏可视高度重估：
+   46dvh 大约留出上下各四分之一给标题和按钮，同时给 180px 下限防止横屏时框太矮。 */
+.eo-details .eo-box{max-height:46dvh;min-height:180px;}
 .eo-subsec{margin:12px 0 4px;color:#8a6a1e;font-weight:600;font-size:12px;}
 
 /* 输入 */
@@ -11124,7 +11947,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
   padding:10px 12px;margin-bottom:6px;
   font-family:ui-monospace,Consolas,"Courier New",monospace;
   font-size:12.5px;line-height:1.65;
-  white-space:pre;overflow:visible;tab-size:2;min-height:320px;
+  white-space:pre;overflow-y:auto;overflow-x:auto;max-height:58dvh;
+  overscroll-behavior:contain;-webkit-overflow-scrolling:touch;tab-size:2;min-height:320px;
 }
 .eo-outline-editor:focus{outline:2px solid rgba(184,134,11,.28);outline-offset:0;
   border-color:rgba(184,134,11,.6);}
@@ -11139,8 +11963,16 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-suggest{display:flex;align-items:center;gap:8px;padding:3px 4px;border-bottom:1px dashed #e6d7b0;}
 .eo-suggest span{flex:1;}
 
-/* 运行日志框：自己滚动，进来就停在最新一条 */
-.eo-logbox{max-height:none;overflow:visible;}
+/* 运行日志框：自己滚动，进来就停在最新一条（2026-11-14 危晓反馈：日志页排版不像样）
+   上一版这两行写的是 max-height:none;overflow:visible —— 与这条注释正好相反，
+   于是日志框跟着整页一起变长，靠外层的 .eo-body 滚，renderLogPage 里那几行
+   scrollTop = scrollHeight 落在一个根本不会滚的元素上，全是空转。
+   现在定死高度上限、自己滚，用的是 dvh 而不是 vh：手机浏览器地址栏收放时 vh 不会变，
+   用 vh 会出现「框比可视区还高，底部被地址栏挡掉」。 */
+.eo-logbox{max-height:52dvh;min-height:120px;overflow-y:auto;overflow-x:auto;
+  overscroll-behavior:contain;-webkit-overflow-scrolling:touch;
+  font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.55;
+  white-space:pre-wrap;word-break:break-word;}
 
 /* 日志级别筛选按钮 */
 .eo-logfilter{display:flex;flex-wrap:wrap;gap:6px;padding:2px 0 4px;}
@@ -11201,6 +12033,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-chaintri{margin:6px 0;}
 /* 2026-11-09：节点配置里的衔接条件区 */
 .eo-nodetrig{margin:8px 0 4px;padding:6px 8px;border:1px solid #e8dbb3;border-radius:8px;background:#fdfaf0;}
+.eo-nodetrig{margin:8px 0 4px;padding:6px 8px;border:1px solid #e8dbb3;border-radius:8px;background:#fdfaf0;}
+/* 2026-11-14：整块改成可折叠，summary 去掉默认三角、换成和别处一致的样式 */
+.eo-nodetrig>summary{cursor:pointer;font-size:12px;color:var(--eo-text-3);list-style:none;}
+.eo-nodetrig>summary::-webkit-details-marker{display:none;}
+.eo-nodetrig>summary::before{content:"▸ ";color:var(--eo-accent);}
+.eo-nodetrig[open]>summary::before{content:"▾ ";}
+.eo-nodetrig[open]>summary{margin-bottom:6px;color:var(--eo-text-2);}
 .eo-nodetrig-list{margin:4px 0;}
 .eo-nodetrig-row{margin:6px 0;padding-bottom:6px;border-bottom:1px dashed #e8dbb3;}
 .eo-nodetrig-row:last-child{border-bottom:none;padding-bottom:0;}
@@ -12152,11 +12991,14 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         else if (S.activeTab === 'inv') renderPageSafe(page, '盘点', () => renderInvPage(page));
         else if (S.activeTab === 'log') {
             renderPageSafe(page, '日志', () => renderLogPage(page));
-            // 切到日志页时再滚一次：此时元素已经挂到文档上，scrollHeight 才是真值
-            requestAnimationFrame(() => {
-                const lb = page.querySelector('.eo-logbox');
-                if (lb) lb.scrollTop = lb.scrollHeight;
-            });
+            // 切到日志页时再滚一次：此时元素已经挂到文档上，scrollHeight 才是真值。
+            // 同样只在「用户正停在底部」时才滚——翻着看报错时切走再切回来，不该把他弹回底部
+            if (S.logAtBottom) {
+                requestAnimationFrame(() => {
+                    const lb = page.querySelector('.eo-logbox');
+                    if (lb) lb.scrollTop = lb.scrollHeight;
+                });
+            }
         }
         else renderPageSafe(page, '设置', () => renderSetPage(page));
 
@@ -12211,6 +13053,22 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         });
         host.appendChild(h);
         return h;
+    }
+
+    /**
+     * 节标题 + 问号（2026-11-14 危晓）。
+     * 原来「事件目的」「框架提示」下面挂着两三行常驻说明，把这一屏挤得很满。
+     * 收进问号之后与「事件参数」「参与者规模」的交互一致，冷下来也更好看。
+     * 问号必须紧跟标题文字，所以标题用 flex 排版——直接往 div 里塞 span 会换行。
+     */
+    function makeSectionLabel(text, helpText) {
+        const row = el('div', 'eo-sec eo-sec-inline');
+        row.appendChild(document.createTextNode(text));
+        if (helpText) attachHelp(row, helpText, true);
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.gap = '4px';
+        return row;
     }
 
     // ---------- 页：生成事件 ----------
@@ -12788,7 +13646,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                 if (d.autoNamed) meta.push('自动命名');
                 head.appendChild(el('span', 'eo-draft-meta', meta.join('　')));
                 // 2026-11-06 M4.1：没有骨架的类型，字段结构是模型自己发挥的，
-                // 与案件/战斗那两套固定骨架对不上。标记出来，采用前提醒一次。
+                // 与固定骨架对不上。标记出来，采用前提醒一次。
+                // 2026-11-14 三期补齐后十三个专用类型都有骨架，只有「其他」会命中这条。
                 const draftMain = mainTypeOfOutline(d.outline);
                 const isTempStruct = !!(draftMain && !skeletonForType(draftMain));
                 if (isTempStruct) {
@@ -13290,6 +14149,24 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         row.appendChild(inputWrap);
         return row;
     }
+    /**
+     * 「额外要求」单独一行（2026-11-14 危晓要求挪到事件参数上面）。
+     * 原来它长在 renderPrefsBlock 的末尾，被埋在「危险程度」「时间压力」等折叠块下面，
+     * 想提一句额外要求得先翻过整片参数区。挪开之后归「想要什么」那一组，
+     * 和事件目的、框架提示摆在一起，顺序才对。
+     * 调用方：单事件页、链节点编辑器，都在渲染参数区之前调它。
+     */
+    function renderExtraRow(prefs) {
+        const extraRow = el('div', 'eo-row');
+        extraRow.appendChild(el('label', null, '额外要求'));
+        const extraInput = elAuto(null, prefs.extra || '无', '不填就写「无」');
+        extraInput.addEventListener('input', () => { prefs.extra = extraInput.value; persistGenForm(); });
+        extraInput.addEventListener('change', persistGenForm);
+        extraInput.style.flex = '1';
+        extraRow.appendChild(extraInput);
+        return extraRow;
+    }
+
 
     function renderPrefsBlock(page, prefs, opts) {
         opts = opts || {};
@@ -13413,8 +14290,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     const packMainType = prefs && prefs.eventMainType;
                     const compat = compatiblePacksOf(packMainType);
                     if (compat.length) {
-                        const box = el('div', 'eo-prefgroup eo-packbox');
-                        const sum = el('div', 'eo-prefgroup-sum');
+                        // 2026-11-14 危晓报：结构包这块点不动，别的组都能折，就它不能。
+                        // 根因是这里造的是 div，而下面普通分组造的是 details。
+                        // 改成 details 后 CSS 里那套「▸/▾」三角和开合规则才生效。
+                        // sum 仍是 eo-prefgroup-sum，paintPack 改写它的文字照常工作。
+                        const box = el('details', 'eo-prefgroup eo-packbox');
+                        box.open = false;
+                        const sum = el('summary', 'eo-prefgroup-sum');
                         box.appendChild(sum);
         
                         // 默认不挂（2026-11-09 危晓定）。空串 = 不挂，不再回退到第一个。
@@ -13437,7 +14319,11 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                                 + (asTags.length ? '；作为标签 ' + asTags.join('、') : '');
                         };
                         paintPack();
-        
+
+                        // 内容套一层 body，和下面普通分组一致，才有正常内边距
+                        const packBody = el('div', 'eo-prefgroup-body');
+                        box.appendChild(packBody);
+
                         const row = el('div', 'eo-row');
                         makeSelect(row, '挂哪个',
                             [{ value: '', label: '不挂' }]
@@ -13451,11 +14337,11 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                             },
                             '同时兼容多个包时只挂一个，按这里的顺序取第一个。'
                             + '换一个就等于换掉这次追加的字段，上面主类型的字段不受影响。');
-                        box.appendChild(row);
-        
+                        packBody.appendChild(row);
+
                         // 选中包的说明：告诉用户这个包会追加哪几个字段
                         const hintBox = el('div', 'eo-hint');
-                        box.appendChild(hintBox);
+                        packBody.appendChild(hintBox);
                         const paintPackHint = () => {
                             const mounted = (prefs.__packPicked && compat.includes(prefs.__packPicked))
                                 ? prefs.__packPicked
@@ -13553,14 +14439,9 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
                     }
                 }
         
-                const extraRow = el('div', 'eo-row');
-                extraRow.appendChild(el('label', null, '额外要求'));
-                const extraInput = elAuto(null, prefs.extra || '无', '');
-                extraInput.addEventListener('input', () => { prefs.extra = extraInput.value; persistGenForm(); });
-                extraInput.addEventListener('change', persistGenForm);
-                extraInput.style.flex = '1';
-                extraRow.appendChild(extraInput);
-                page.appendChild(extraRow);
+                // 额外要求原本在这里（参数区最末尾）。
+                // 2026-11-14 危晓要求挪到「事件参数」上面，与事件目的、框架提示归到一处，
+                // 现在由 renderExtraRow(prefs) 渲染，调用方在参数区之前调它。
         
                 // 重置按钮：把上面这一整套选项拨回默认，不动待选区
                 // 问号放在按钮外面（2026-11-01 危晓要求）：按钮的点击区只负责重置，
@@ -13819,13 +14700,20 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         const others = [];
         for (let k = 1; k <= n; k++) if (k !== from) others.push(k);
 
-        const box = el('div', 'eo-nodetrig');
-        box.appendChild(el('div', 'eo-hint', '衔接条件：这一环结束、满足什么条件时，走去哪个节点'));
+        // 2026-11-14 危晓：整块默认收起。
+        // 原来这一块常驻展开，占掉一大片高度，而大多数节点是不填衔接条件的，
+        // 白白挤掉下面的内容。收成一行，填过几条在标题里就能看见。
+        const box = el('details', 'eo-nodetrig');
+        const hasAny = cur.triggers.some(t => t && String(t.condition || '').trim());
+        const sum = el('summary', 'eo-nodetrig-sum',
+            '衔接条件' + (hasAny ? `（已填 ${cur.triggers.length} 条）` : '（不填就由模型来定）'));
+        box.appendChild(sum);
 
         if (!others.length) {
             box.appendChild(el('div', 'eo-hint', '只有一个节点，没有可以去的地方。'));
             return box;
         }
+        box.appendChild(el('div', 'eo-hint', '这一环结束、满足什么条件时，走去哪个节点。'));
 
         const listBox = el('div', 'eo-nodetrig-list');
         const paint = () => {
@@ -13944,9 +14832,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         body.appendChild(tyRow);
 
         // 概要
+        // 2026-11-14 危晓：这一项和下面「事件目的」看着重复。根因是占位符说的是
+        // 「这一环要做什么」，而目的那一格的例子反而更具体，两边都在讲"做什么"。
+        // 现在把边界写死：这里只写动作本身（去哪儿、干什么），一句话、当目录用；
+        // 结果意图归「事件目的」，过程走法归「框架提示」。
         const brRow = el('div', 'eo-row');
-        brRow.appendChild(el('span', null, '要做的事'));
-        const bi = elAuto(null, cur.brief, '一句话说清这一环要做什么（可留空）');
+        brRow.appendChild(el('span', null, '做什么'));
+        const bi = elAuto(null, cur.brief, '一句话＋动作：进桦木沟找那头翻篱的兽崽');
         bi.style.flex = '1';
         bi.addEventListener('input', () => {
             cur.brief = bi.value;
@@ -13976,11 +14868,20 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             // 链节点正是调它渲染参数区的，再加一个就会出现两个一模一样的框（真机上撞到过）。
             // 这里只补它没有的两项：事件目的、框架提示。
 
-            const goalLab = el('div', 'eo-hint', '事件目的（这一环最终要达成什么，填了会成为硬约束）');
+            // 2026-11-14 危晓：三项分工写进标签本身，不靠用户猜。
+            // 「做什么」＝动作（去哪儿、干什么）；
+            // 「事件目的」＝这一环最终要达成什么（结果，硬约束）；
+            // 「框架提示」＝怎么走（过程，软建议）。
+            // 说明收进问号，与单事件页同一交互；留空说法统一成「不填就由模型来定」。
+            const goalLab = makeSectionLabel('事件目的 · 这一环最终要达成什么',
+                '写「到这一环结束时，局面该变成什么样」。'
+                + '结果约束：填了会严格执行，大纲围绕它展开，但不直白写进正文让玩家一眼看穿。'
+                + '不填就由模型按当前剧情自行判断。');
+            goalLab.classList.add('eo-hint');
             body.appendChild(goalLab);
             const goalIn = el('textarea', 'eo-input eo-textarea');
             goalIn.rows = 2;
-            goalIn.placeholder = '例如：让玩家在踏查中发现兽崽不是普通野兽，而是被谁放出来的';
+            goalIn.placeholder = '到这一环结束时，玩家已确认兽崽是被人放出来的，但还不知道是谁';
             goalIn.value = cur.prefs.goal || '';
             goalIn.addEventListener('input', () => {
                 cur.prefs.goal = goalIn.value;
@@ -13988,11 +14889,15 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             });
             body.appendChild(goalIn);
 
-            const hintLab = el('div', 'eo-hint', '框架提示（你自己构思的大致框架或想要的桥段）');
+            const hintLab = makeSectionLabel('框架提示 · 想怎么走',
+                '写顺序、桥段或细节。'
+                + '过程建议：能融就融，与结构完整性冲突时让位于结构。'
+                + '不填就完全由模型设计。');
+            hintLab.classList.add('eo-hint');
             body.appendChild(hintLab);
             const hintIn = el('textarea', 'eo-input eo-textarea');
             hintIn.rows = 2;
-            hintIn.placeholder = '例如：先看羊圈，再顺着足迹进林子，中途被扑一次';
+            hintIn.placeholder = '先看羊圈，再顺着足迹进林子，中途被扑一次';
             hintIn.value = cur.prefs.promptHint || '';
             hintIn.addEventListener('input', () => {
                 cur.prefs.promptHint = hintIn.value;
@@ -14000,6 +14905,12 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             });
             body.appendChild(hintIn);
         }
+
+        // 额外要求挪到事件参数之上（2026-11-14 危晓要求）：
+        // 和事件目的、框架提示同属「想让模型额外照办的事」，摆在一起；
+        // 原来它长在参数区最末尾，翻过折叠块才看得到。
+        // 注意：参数区 renderPrefsBlock 已经不再画这一行，这里补上不会重复。
+        if (cur.prefs) body.appendChild(renderExtraRow(cur.prefs));
 
         // 衔接条件（2026-11-09 危晓）：在「各节点」这里填，不用跑去骨架预览里改。
         // 放到这里的原因是节点数在这一屏就能定，填条件时已经知道有几个节点可以指向。
@@ -14119,8 +15030,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
         }
         for (const t of getMainTypes()) {
             // 2026-11-06 M4.1：没有骨架的类型在后面标出来。
-            // 九个主类型里只有案件和战斗有骨架，剩下七个选下去界面毫无反应，
-            // 用户要等到拿到生成结果才发现「只有字段清单、没有示例」。
+            // 2026-11-14 三期补齐后，十三个专用类型都有骨架了，目前只有解析成「其他」才没有示例；
+            // 这条标注机制留着，将来新增类型若忘了配骨架，界面能立刻看出来。
             //
             // M6（2026-11-06）：「其他」是个特例——它有骨架（通用六字段），
             // 但没有专属示例（示例是给具体类型看的）。所以它不该被标成「骨架未完成」，
@@ -14261,28 +15172,41 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 
         // 事件目的与框架提示放在事件参数之前：这两个是「想要什么」，
         // 偏好是「多难多险」，先想清楚要什么再调强度，顺序才对
-        page.appendChild(el('div', 'eo-sec eo-sec-inline', '事件目的'));
-        page.appendChild(el('div', 'eo-hint',
-            '你想让这个事件最终达成什么。留空则由模型按当前剧情自行判断。填了会成为硬约束，大纲会围绕它展开。'));
+        // 2026-11-14 危晓：标题要和链节点那边一致，否则同一功能在两个页面叫两个名字。
+        // 说明文字收进问号（与「事件参数」「参与者规模」同一交互），
+        // 原来两三行常驻说明把这一屏撑得很挤。
+        const goalSec = makeSectionLabel('事件目的 · 最终要达成什么',
+            '写「事件结束时局面该变成什么样」。'
+            + '结果约束：填了会严格执行，大纲围绕它展开，但不直白写进正文让玩家一眼看穿。'
+            + '不填就由模型按当前剧情自行判断。');
+        page.appendChild(goalSec);
         const goalInput = el('textarea', 'eo-input eo-textarea');
         goalInput.rows = 3;
-        goalInput.placeholder = '例如：让玩家在最终揭开前，逐步发现车上的乘客都与同一桩旧案有关，并理解他们为何共同动手';
+        goalInput.placeholder = '让玩家在揭开前逐步发现车上乘客都与同一桩旧案有关，并理解他们为何共同动手';
         goalInput.value = prefs.goal || '';
         goalInput.addEventListener('input', () => { prefs.goal = goalInput.value; persistGenForm(); });
         goalInput.addEventListener('change', persistGenForm);
         page.appendChild(goalInput);
 
-        page.appendChild(el('div', 'eo-sec eo-sec-inline', '事件框架提示'));
-        page.appendChild(el('div', 'eo-hint',
-            '你自己构思的大致框架、想要的桥段或细节。留空则完全由模型设计。填了会尽量采纳。'));
+        const hintSec = makeSectionLabel('框架提示 · 想怎么走',
+            '写顺序、桥段或细节。'
+            + '过程建议：能融就融，与结构完整性冲突时让位于结构。'
+            + '不填就完全由模型设计。');
+        page.appendChild(hintSec);
         const hintInput = el('textarea', 'eo-input eo-textarea');
         hintInput.rows = 4;
-        hintInput.placeholder = '例如：开场列车遭遇暴雪被困，死者身中十二刀；中途每个乘客的证词都互相印证却彼此矛盾；结尾靠一枚被烧焦的信纸残片把所有人的旧案串起来';
+        hintInput.placeholder = '开场列车遭遇暴雪被困，死者身中十二刀；每个乘客的证词互相印证却彼此矛盾；结尾靠一枚烧焦的信纸残片把所有人的旧案串起来';
         hintInput.value = prefs.promptHint || '';
         hintInput.addEventListener('input', () => { prefs.promptHint = hintInput.value; persistGenForm(); });
         hintInput.addEventListener('change', persistGenForm);
         page.appendChild(hintInput);
 
+
+
+        // 额外要求挪到事件参数之上（2026-11-14 危晓要求）：
+        // 它和事件目的、框架提示一样是「想让模型额外照办的事」，
+        // 原来埋在参数区最末尾，翻过两片折叠块才看得到。
+        page.appendChild(renderExtraRow(prefs));
 
         // 难度等级挪到事件参数之上（2026-11-04 危晓要求）：
         // 它定的是整件事的强度档，下面那些子项里写「根据难度等级自行设定」的都按它推导，
@@ -14739,11 +15663,20 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
             `${l.at} ${LOG_LEVEL_LABEL[l.level] || l.level}｜${l.text}`
         ).join(String.fromCharCode(10));
         page.appendChild(box);
-        // 日志按时间正序排，最新一条在最下面：渲染完直接滚到底，一进来就看到最新的
+        // 日志按时间正序排，最新一条在最下面（2026-11-14 危晓要求：自动展示最新的）。
+        // 但不能无脑拽到底：用户往上翻着看报错时，重绘又把他弹回底部，那就没法读了。
+        // 所以记住「他是不是正停在底部」——在底部就跟着新日志走，翻上去了就原地不动。
         const toBottom = () => { box.scrollTop = box.scrollHeight; };
-        toBottom();
-        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(toBottom);
-        setTimeout(toBottom, 60);
+        box.addEventListener('scroll', () => {
+            // 留 4 像素容差：不同浏览器的 scrollTop 会差一两像素，写死等号会把「在底部」误判成没在
+            S.logAtBottom = box.scrollHeight - box.scrollTop - box.clientHeight <= 4;
+        });
+        if (S.logAtBottom) {
+            toBottom();
+            // 元素刚挂上时 scrollHeight 还是旧值，等一帧和一次微延时各滚一次才稳
+            if (typeof requestAnimationFrame === 'function') requestAnimationFrame(toBottom);
+            setTimeout(toBottom, 60);
+        }
         // 日志页按钮区（2026-11-02 整理）：先建行，再逐个建按钮，最后统一挂到页面上
         const r = el('div', 'eo-row');
 

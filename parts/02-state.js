@@ -34,6 +34,7 @@
         pendingDraftEditDirty: false,
         logFilter: 'all',
         logKeyword: '',
+    logAtBottom: true,
         autoCheckTimer: null,
         autoRunning: false,
         progress: { steps: [], startedAt: 0, timer: null },

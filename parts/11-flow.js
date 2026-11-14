@@ -18,6 +18,12 @@
     function ownerLabel(owner) {
         return BUSY_OWNER_LABEL[owner] || String(owner || '另一个操作');
     }
+    /**
+     * 纯本地操作的占用者：写/删世界书条目、改状态、清历史，全程不发模型请求。
+     * 这几步不该显示「放弃等待」——没有请求可打断，按钮点了什么也停不下来（2026-11-14 危晓反馈）。
+     * 新加的 owner 默认仍显示按钮，只有确实纯本地的才往这里加，别把它们混成一团。
+     */
+    const LOCAL_ONLY_OWNERS = new Set(['adopt', 'close']);
 
     // 忙碌提示文案随操作变：废弃/完结是本地操作，不该显示「正在请求模型」
     let busyText = S.busyText; // 引用指向 S，值统一存 S
@@ -51,14 +57,19 @@
                 // 以前只能刷新整个页面。按钮点了之后走 abortPendingRequest，busy 随之解除
                 b.innerHTML = '';
                 b.appendChild(document.createTextNode(text || S.busyText || '处理中…'));
-                if (on) {
+                // 2026-11-14 危晓反馈：采用和废弃时点「放弃等待」没有反应。
+                // 根因不是按钮坏了——那两步是纯本地操作（写/删世界书条目），根本不发模型请求，
+                // S.pendingRequest 是空的，点下去只能弹一句「没有可打断的请求」。
+                // 界面上给一个按了不会拦下任何东西的按钮本身就是错：它承诺了做不到的事。
+                // 所以本地操作干脆不显示这个按钮，而不是留着它骗人。
+                if (on && !LOCAL_ONLY_OWNERS.has(who || S.busyOwner || '')) {
                     const giveUp = el('span', 'eo-giveup', '放弃等待');
                     giveUp.addEventListener('click', (ev) => {
                         ev.preventDefault();
                         ev.stopPropagation();
                         if (!abortPendingRequest()) {
-                            // 没有正在等的请求（比如在写世界书），只提示不假装能打断
-                            toast('当前这一步没有可打断的请求，写完会自己结束');
+                            // 走到这里说明以为能打断却没有请求在等（比如恰好落在两次请求之间），只提示不假装
+                            toast('当前这一步没有可打断的请求，稍等片刻会自己结束');
                         } else {
                             log('已放弃等待模型返回');
                         }
@@ -1529,7 +1540,10 @@
             event.floorBaseNarration = !!getSettings().memory.narrationMode;
             meta.currentEventId = id;
             saveMeta();
-            // 采用即视为这套生成设置已经用掉，清空表单（危晓 2026-11-01 的规矩）
+            // 采用不再清空生成页配置（2026-11-14 危晓改口径）：
+            // 原来按 2026-11-01 的规矩「采用即用掉、清空表单」，放到事件链上就说不通——
+            // 一条链有多个节点，采用第一个就把配置清掉，第二个得从头再填。
+            // 现在只丢掉草稿名，参数与分组粗细留着，要恢复默认只能点「重置为默认」。
             clearGenFormOnAdopt();
             log(`已采用事件「${event.name}」，世界书条目 uid=${res.uid}`);
             // 2026-11-04 危晓反馈：采用后在世界书面板里搜不到条目，F5 一次才出现。
@@ -2533,7 +2547,7 @@
 #eo_panel .eo-body{flex:1 1 auto;min-height:0;max-width:1100px;width:100%;margin:0 auto;
   padding:0 20px 48px;overflow-y:auto;overflow-x:hidden;
   -webkit-overflow-scrolling:touch;overscroll-behavior:contain;}
-.eo-box{max-height:none;overflow:visible;}
+/* 原先是重置 .eo-box 的高度上限，2026-11-14 起内容框改自带限高自滚，这条不再需要，删掉免得与后面的定义互相矛盾 */
 /* 请求体三段（2026-11-02）：三块文本域上下排，别挤成一坨 */
 .eo-yaml-field{margin:8px 0 4px;}
 .eo-yaml-field>textarea{font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.5;
@@ -2587,10 +2601,15 @@
 /* 待选事件的操作按钮（采用/丢弃）：默认不高亮，只有按住的那一下亮，松开就灭。
    采用不再用 eo-primary 常亮——列表里好几个草稿时，常亮的按钮容易让人以为是当前选中 */
 .eo-btn.eo-press:active{background:var(--eo-accent-2);border-color:var(--eo-accent);font-weight:600;}
-/* 看大纲/编辑：开关类按钮，开着高亮、关掉回原样 */
+/* 看大纲/编辑：开关类按钮，开着高亮、关掉回原样。
+   2026-11-14 危晓改口径：以前定的是「整页只由窗口滚动，内容框一律不另设滚动条」，
+   那条现在废弃——一条几百行的日志或大纲会把整页拉得极长，找按钮要翻半天。
+   改成各框自己限高、自己滚，整页长度因此可控。52dvh 而不是 52vh：手机地址栏收放时 vh 不变，
+   用 vh 会让框比可视区高、底部被挡住。 */
 .eo-box{border:1px solid rgba(184,134,11,.32);border-radius:9px;padding:9px 10px;
   background:var(--eo-bg-soft);margin-bottom:9px;white-space:pre-wrap;word-break:break-word;
-  max-height:none;overflow:visible;line-height:1.55;}
+  max-height:52dvh;overflow-y:auto;overflow-x:auto;
+  overscroll-behavior:contain;-webkit-overflow-scrolling:touch;line-height:1.55;}
 .eo-hint{color:var(--eo-text-3);font-size:12px;line-height:1.5;}
 /* 骨架映射表（M7 2026-11-07）：一行一条「自定义名 → 内置名」，右侧带删除 */
 .eo-map-list{margin:4px 0 6px;}
@@ -2699,7 +2718,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-extra-keys summary{font-size:11px;color:var(--eo-text-4);cursor:pointer;margin:4px 0;}
 /* YAML 编辑框用等宽字，行号对齐、编号一眼能看出跳没跳 */
 .eo-draft-yaml{font-family:ui-monospace,Consolas,"Courier New",monospace;font-size:12px;
-  white-space:pre;overflow:visible;line-height:1.5;min-height:160px;}
+  white-space:pre;overflow-y:auto;overflow-x:auto;max-height:52dvh;
+  overscroll-behavior:contain;-webkit-overflow-scrolling:touch;line-height:1.5;min-height:160px;}
 .eo-draft-edit label,.eo-draft-edit .eo-label{font-size:12px;color:var(--eo-text-5);white-space:nowrap;}
 .eo-draft-edit .eo-sec-inline{margin-top:6px;}
 .eo-sec{border-top:1px dashed var(--eo-line);margin:10px 0 6px;padding-top:8px;
@@ -2732,7 +2752,11 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-details>summary::before{content:"▸ ";color:var(--eo-accent);}
 .eo-details[open]>summary::before{content:"▾ ";}
 .eo-details[open]>summary{border-bottom:1px dashed rgba(184,134,11,.3);margin-bottom:8px;}
-.eo-details .eo-box{max-height:none;}
+/* 折叠块里的框：外面已经收了一层，可以放宽一点，但仍是有限值。
+   2026-11-14 危晓要求核对小屏：原来写 70dvh，手机上一个参数组展开就吃掉大半个屏幕，
+   框内滚动和页面滚动叠在一起，反而更难滑。现在按常见的窄屏可视高度重估：
+   46dvh 大约留出上下各四分之一给标题和按钮，同时给 180px 下限防止横屏时框太矮。 */
+.eo-details .eo-box{max-height:46dvh;min-height:180px;}
 .eo-subsec{margin:12px 0 4px;color:#8a6a1e;font-weight:600;font-size:12px;}
 
 /* 输入 */
@@ -2750,7 +2774,8 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
   padding:10px 12px;margin-bottom:6px;
   font-family:ui-monospace,Consolas,"Courier New",monospace;
   font-size:12.5px;line-height:1.65;
-  white-space:pre;overflow:visible;tab-size:2;min-height:320px;
+  white-space:pre;overflow-y:auto;overflow-x:auto;max-height:58dvh;
+  overscroll-behavior:contain;-webkit-overflow-scrolling:touch;tab-size:2;min-height:320px;
 }
 .eo-outline-editor:focus{outline:2px solid rgba(184,134,11,.28);outline-offset:0;
   border-color:rgba(184,134,11,.6);}
@@ -2765,8 +2790,16 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-suggest{display:flex;align-items:center;gap:8px;padding:3px 4px;border-bottom:1px dashed #e6d7b0;}
 .eo-suggest span{flex:1;}
 
-/* 运行日志框：自己滚动，进来就停在最新一条 */
-.eo-logbox{max-height:none;overflow:visible;}
+/* 运行日志框：自己滚动，进来就停在最新一条（2026-11-14 危晓反馈：日志页排版不像样）
+   上一版这两行写的是 max-height:none;overflow:visible —— 与这条注释正好相反，
+   于是日志框跟着整页一起变长，靠外层的 .eo-body 滚，renderLogPage 里那几行
+   scrollTop = scrollHeight 落在一个根本不会滚的元素上，全是空转。
+   现在定死高度上限、自己滚，用的是 dvh 而不是 vh：手机浏览器地址栏收放时 vh 不会变，
+   用 vh 会出现「框比可视区还高，底部被地址栏挡掉」。 */
+.eo-logbox{max-height:52dvh;min-height:120px;overflow-y:auto;overflow-x:auto;
+  overscroll-behavior:contain;-webkit-overflow-scrolling:touch;
+  font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.55;
+  white-space:pre-wrap;word-break:break-word;}
 
 /* 日志级别筛选按钮 */
 .eo-logfilter{display:flex;flex-wrap:wrap;gap:6px;padding:2px 0 4px;}
@@ -2827,6 +2860,13 @@ select.eo-sel{padding:4px 8px;border-radius:7px;border:1px solid rgba(184,134,11
 .eo-chaintri{margin:6px 0;}
 /* 2026-11-09：节点配置里的衔接条件区 */
 .eo-nodetrig{margin:8px 0 4px;padding:6px 8px;border:1px solid #e8dbb3;border-radius:8px;background:#fdfaf0;}
+.eo-nodetrig{margin:8px 0 4px;padding:6px 8px;border:1px solid #e8dbb3;border-radius:8px;background:#fdfaf0;}
+/* 2026-11-14：整块改成可折叠，summary 去掉默认三角、换成和别处一致的样式 */
+.eo-nodetrig>summary{cursor:pointer;font-size:12px;color:var(--eo-text-3);list-style:none;}
+.eo-nodetrig>summary::-webkit-details-marker{display:none;}
+.eo-nodetrig>summary::before{content:"▸ ";color:var(--eo-accent);}
+.eo-nodetrig[open]>summary::before{content:"▾ ";}
+.eo-nodetrig[open]>summary{margin-bottom:6px;color:var(--eo-text-2);}
 .eo-nodetrig-list{margin:4px 0;}
 .eo-nodetrig-row{margin:6px 0;padding-bottom:6px;border-bottom:1px dashed #e8dbb3;}
 .eo-nodetrig-row:last-child{border-bottom:none;padding-bottom:0;}

@@ -482,11 +482,14 @@
         else if (S.activeTab === 'inv') renderPageSafe(page, '盘点', () => renderInvPage(page));
         else if (S.activeTab === 'log') {
             renderPageSafe(page, '日志', () => renderLogPage(page));
-            // 切到日志页时再滚一次：此时元素已经挂到文档上，scrollHeight 才是真值
-            requestAnimationFrame(() => {
-                const lb = page.querySelector('.eo-logbox');
-                if (lb) lb.scrollTop = lb.scrollHeight;
-            });
+            // 切到日志页时再滚一次：此时元素已经挂到文档上，scrollHeight 才是真值。
+            // 同样只在「用户正停在底部」时才滚——翻着看报错时切走再切回来，不该把他弹回底部
+            if (S.logAtBottom) {
+                requestAnimationFrame(() => {
+                    const lb = page.querySelector('.eo-logbox');
+                    if (lb) lb.scrollTop = lb.scrollHeight;
+                });
+            }
         }
         else renderPageSafe(page, '设置', () => renderSetPage(page));
 
@@ -541,6 +544,22 @@
         });
         host.appendChild(h);
         return h;
+    }
+
+    /**
+     * 节标题 + 问号（2026-11-14 危晓）。
+     * 原来「事件目的」「框架提示」下面挂着两三行常驻说明，把这一屏挤得很满。
+     * 收进问号之后与「事件参数」「参与者规模」的交互一致，冷下来也更好看。
+     * 问号必须紧跟标题文字，所以标题用 flex 排版——直接往 div 里塞 span 会换行。
+     */
+    function makeSectionLabel(text, helpText) {
+        const row = el('div', 'eo-sec eo-sec-inline');
+        row.appendChild(document.createTextNode(text));
+        if (helpText) attachHelp(row, helpText, true);
+        row.style.display = 'flex';
+        row.style.alignItems = 'center';
+        row.style.gap = '4px';
+        return row;
     }
 
     // ---------- 页：生成事件 ----------
@@ -1118,7 +1137,8 @@
                 if (d.autoNamed) meta.push('自动命名');
                 head.appendChild(el('span', 'eo-draft-meta', meta.join('　')));
                 // 2026-11-06 M4.1：没有骨架的类型，字段结构是模型自己发挥的，
-                // 与案件/战斗那两套固定骨架对不上。标记出来，采用前提醒一次。
+                // 与固定骨架对不上。标记出来，采用前提醒一次。
+                // 2026-11-14 三期补齐后十三个专用类型都有骨架，只有「其他」会命中这条。
                 const draftMain = mainTypeOfOutline(d.outline);
                 const isTempStruct = !!(draftMain && !skeletonForType(draftMain));
                 if (isTempStruct) {
@@ -1620,6 +1640,24 @@
         row.appendChild(inputWrap);
         return row;
     }
+    /**
+     * 「额外要求」单独一行（2026-11-14 危晓要求挪到事件参数上面）。
+     * 原来它长在 renderPrefsBlock 的末尾，被埋在「危险程度」「时间压力」等折叠块下面，
+     * 想提一句额外要求得先翻过整片参数区。挪开之后归「想要什么」那一组，
+     * 和事件目的、框架提示摆在一起，顺序才对。
+     * 调用方：单事件页、链节点编辑器，都在渲染参数区之前调它。
+     */
+    function renderExtraRow(prefs) {
+        const extraRow = el('div', 'eo-row');
+        extraRow.appendChild(el('label', null, '额外要求'));
+        const extraInput = elAuto(null, prefs.extra || '无', '不填就写「无」');
+        extraInput.addEventListener('input', () => { prefs.extra = extraInput.value; persistGenForm(); });
+        extraInput.addEventListener('change', persistGenForm);
+        extraInput.style.flex = '1';
+        extraRow.appendChild(extraInput);
+        return extraRow;
+    }
+
 
     function renderPrefsBlock(page, prefs, opts) {
         opts = opts || {};
@@ -1743,8 +1781,13 @@
                     const packMainType = prefs && prefs.eventMainType;
                     const compat = compatiblePacksOf(packMainType);
                     if (compat.length) {
-                        const box = el('div', 'eo-prefgroup eo-packbox');
-                        const sum = el('div', 'eo-prefgroup-sum');
+                        // 2026-11-14 危晓报：结构包这块点不动，别的组都能折，就它不能。
+                        // 根因是这里造的是 div，而下面普通分组造的是 details。
+                        // 改成 details 后 CSS 里那套「▸/▾」三角和开合规则才生效。
+                        // sum 仍是 eo-prefgroup-sum，paintPack 改写它的文字照常工作。
+                        const box = el('details', 'eo-prefgroup eo-packbox');
+                        box.open = false;
+                        const sum = el('summary', 'eo-prefgroup-sum');
                         box.appendChild(sum);
         
                         // 默认不挂（2026-11-09 危晓定）。空串 = 不挂，不再回退到第一个。
@@ -1767,7 +1810,11 @@
                                 + (asTags.length ? '；作为标签 ' + asTags.join('、') : '');
                         };
                         paintPack();
-        
+
+                        // 内容套一层 body，和下面普通分组一致，才有正常内边距
+                        const packBody = el('div', 'eo-prefgroup-body');
+                        box.appendChild(packBody);
+
                         const row = el('div', 'eo-row');
                         makeSelect(row, '挂哪个',
                             [{ value: '', label: '不挂' }]
@@ -1781,11 +1828,11 @@
                             },
                             '同时兼容多个包时只挂一个，按这里的顺序取第一个。'
                             + '换一个就等于换掉这次追加的字段，上面主类型的字段不受影响。');
-                        box.appendChild(row);
-        
+                        packBody.appendChild(row);
+
                         // 选中包的说明：告诉用户这个包会追加哪几个字段
                         const hintBox = el('div', 'eo-hint');
-                        box.appendChild(hintBox);
+                        packBody.appendChild(hintBox);
                         const paintPackHint = () => {
                             const mounted = (prefs.__packPicked && compat.includes(prefs.__packPicked))
                                 ? prefs.__packPicked
@@ -1883,14 +1930,9 @@
                     }
                 }
         
-                const extraRow = el('div', 'eo-row');
-                extraRow.appendChild(el('label', null, '额外要求'));
-                const extraInput = elAuto(null, prefs.extra || '无', '');
-                extraInput.addEventListener('input', () => { prefs.extra = extraInput.value; persistGenForm(); });
-                extraInput.addEventListener('change', persistGenForm);
-                extraInput.style.flex = '1';
-                extraRow.appendChild(extraInput);
-                page.appendChild(extraRow);
+                // 额外要求原本在这里（参数区最末尾）。
+                // 2026-11-14 危晓要求挪到「事件参数」上面，与事件目的、框架提示归到一处，
+                // 现在由 renderExtraRow(prefs) 渲染，调用方在参数区之前调它。
         
                 // 重置按钮：把上面这一整套选项拨回默认，不动待选区
                 // 问号放在按钮外面（2026-11-01 危晓要求）：按钮的点击区只负责重置，
@@ -2149,13 +2191,20 @@
         const others = [];
         for (let k = 1; k <= n; k++) if (k !== from) others.push(k);
 
-        const box = el('div', 'eo-nodetrig');
-        box.appendChild(el('div', 'eo-hint', '衔接条件：这一环结束、满足什么条件时，走去哪个节点'));
+        // 2026-11-14 危晓：整块默认收起。
+        // 原来这一块常驻展开，占掉一大片高度，而大多数节点是不填衔接条件的，
+        // 白白挤掉下面的内容。收成一行，填过几条在标题里就能看见。
+        const box = el('details', 'eo-nodetrig');
+        const hasAny = cur.triggers.some(t => t && String(t.condition || '').trim());
+        const sum = el('summary', 'eo-nodetrig-sum',
+            '衔接条件' + (hasAny ? `（已填 ${cur.triggers.length} 条）` : '（不填就由模型来定）'));
+        box.appendChild(sum);
 
         if (!others.length) {
             box.appendChild(el('div', 'eo-hint', '只有一个节点，没有可以去的地方。'));
             return box;
         }
+        box.appendChild(el('div', 'eo-hint', '这一环结束、满足什么条件时，走去哪个节点。'));
 
         const listBox = el('div', 'eo-nodetrig-list');
         const paint = () => {
@@ -2274,9 +2323,13 @@
         body.appendChild(tyRow);
 
         // 概要
+        // 2026-11-14 危晓：这一项和下面「事件目的」看着重复。根因是占位符说的是
+        // 「这一环要做什么」，而目的那一格的例子反而更具体，两边都在讲"做什么"。
+        // 现在把边界写死：这里只写动作本身（去哪儿、干什么），一句话、当目录用；
+        // 结果意图归「事件目的」，过程走法归「框架提示」。
         const brRow = el('div', 'eo-row');
-        brRow.appendChild(el('span', null, '要做的事'));
-        const bi = elAuto(null, cur.brief, '一句话说清这一环要做什么（可留空）');
+        brRow.appendChild(el('span', null, '做什么'));
+        const bi = elAuto(null, cur.brief, '一句话＋动作：进桦木沟找那头翻篱的兽崽');
         bi.style.flex = '1';
         bi.addEventListener('input', () => {
             cur.brief = bi.value;
@@ -2306,11 +2359,20 @@
             // 链节点正是调它渲染参数区的，再加一个就会出现两个一模一样的框（真机上撞到过）。
             // 这里只补它没有的两项：事件目的、框架提示。
 
-            const goalLab = el('div', 'eo-hint', '事件目的（这一环最终要达成什么，填了会成为硬约束）');
+            // 2026-11-14 危晓：三项分工写进标签本身，不靠用户猜。
+            // 「做什么」＝动作（去哪儿、干什么）；
+            // 「事件目的」＝这一环最终要达成什么（结果，硬约束）；
+            // 「框架提示」＝怎么走（过程，软建议）。
+            // 说明收进问号，与单事件页同一交互；留空说法统一成「不填就由模型来定」。
+            const goalLab = makeSectionLabel('事件目的 · 这一环最终要达成什么',
+                '写「到这一环结束时，局面该变成什么样」。'
+                + '结果约束：填了会严格执行，大纲围绕它展开，但不直白写进正文让玩家一眼看穿。'
+                + '不填就由模型按当前剧情自行判断。');
+            goalLab.classList.add('eo-hint');
             body.appendChild(goalLab);
             const goalIn = el('textarea', 'eo-input eo-textarea');
             goalIn.rows = 2;
-            goalIn.placeholder = '例如：让玩家在踏查中发现兽崽不是普通野兽，而是被谁放出来的';
+            goalIn.placeholder = '到这一环结束时，玩家已确认兽崽是被人放出来的，但还不知道是谁';
             goalIn.value = cur.prefs.goal || '';
             goalIn.addEventListener('input', () => {
                 cur.prefs.goal = goalIn.value;
@@ -2318,11 +2380,15 @@
             });
             body.appendChild(goalIn);
 
-            const hintLab = el('div', 'eo-hint', '框架提示（你自己构思的大致框架或想要的桥段）');
+            const hintLab = makeSectionLabel('框架提示 · 想怎么走',
+                '写顺序、桥段或细节。'
+                + '过程建议：能融就融，与结构完整性冲突时让位于结构。'
+                + '不填就完全由模型设计。');
+            hintLab.classList.add('eo-hint');
             body.appendChild(hintLab);
             const hintIn = el('textarea', 'eo-input eo-textarea');
             hintIn.rows = 2;
-            hintIn.placeholder = '例如：先看羊圈，再顺着足迹进林子，中途被扑一次';
+            hintIn.placeholder = '先看羊圈，再顺着足迹进林子，中途被扑一次';
             hintIn.value = cur.prefs.promptHint || '';
             hintIn.addEventListener('input', () => {
                 cur.prefs.promptHint = hintIn.value;
@@ -2330,6 +2396,12 @@
             });
             body.appendChild(hintIn);
         }
+
+        // 额外要求挪到事件参数之上（2026-11-14 危晓要求）：
+        // 和事件目的、框架提示同属「想让模型额外照办的事」，摆在一起；
+        // 原来它长在参数区最末尾，翻过折叠块才看得到。
+        // 注意：参数区 renderPrefsBlock 已经不再画这一行，这里补上不会重复。
+        if (cur.prefs) body.appendChild(renderExtraRow(cur.prefs));
 
         // 衔接条件（2026-11-09 危晓）：在「各节点」这里填，不用跑去骨架预览里改。
         // 放到这里的原因是节点数在这一屏就能定，填条件时已经知道有几个节点可以指向。
@@ -2449,8 +2521,8 @@
         }
         for (const t of getMainTypes()) {
             // 2026-11-06 M4.1：没有骨架的类型在后面标出来。
-            // 九个主类型里只有案件和战斗有骨架，剩下七个选下去界面毫无反应，
-            // 用户要等到拿到生成结果才发现「只有字段清单、没有示例」。
+            // 2026-11-14 三期补齐后，十三个专用类型都有骨架了，目前只有解析成「其他」才没有示例；
+            // 这条标注机制留着，将来新增类型若忘了配骨架，界面能立刻看出来。
             //
             // M6（2026-11-06）：「其他」是个特例——它有骨架（通用六字段），
             // 但没有专属示例（示例是给具体类型看的）。所以它不该被标成「骨架未完成」，
@@ -2591,28 +2663,41 @@
 
         // 事件目的与框架提示放在事件参数之前：这两个是「想要什么」，
         // 偏好是「多难多险」，先想清楚要什么再调强度，顺序才对
-        page.appendChild(el('div', 'eo-sec eo-sec-inline', '事件目的'));
-        page.appendChild(el('div', 'eo-hint',
-            '你想让这个事件最终达成什么。留空则由模型按当前剧情自行判断。填了会成为硬约束，大纲会围绕它展开。'));
+        // 2026-11-14 危晓：标题要和链节点那边一致，否则同一功能在两个页面叫两个名字。
+        // 说明文字收进问号（与「事件参数」「参与者规模」同一交互），
+        // 原来两三行常驻说明把这一屏撑得很挤。
+        const goalSec = makeSectionLabel('事件目的 · 最终要达成什么',
+            '写「事件结束时局面该变成什么样」。'
+            + '结果约束：填了会严格执行，大纲围绕它展开，但不直白写进正文让玩家一眼看穿。'
+            + '不填就由模型按当前剧情自行判断。');
+        page.appendChild(goalSec);
         const goalInput = el('textarea', 'eo-input eo-textarea');
         goalInput.rows = 3;
-        goalInput.placeholder = '例如：让玩家在最终揭开前，逐步发现车上的乘客都与同一桩旧案有关，并理解他们为何共同动手';
+        goalInput.placeholder = '让玩家在揭开前逐步发现车上乘客都与同一桩旧案有关，并理解他们为何共同动手';
         goalInput.value = prefs.goal || '';
         goalInput.addEventListener('input', () => { prefs.goal = goalInput.value; persistGenForm(); });
         goalInput.addEventListener('change', persistGenForm);
         page.appendChild(goalInput);
 
-        page.appendChild(el('div', 'eo-sec eo-sec-inline', '事件框架提示'));
-        page.appendChild(el('div', 'eo-hint',
-            '你自己构思的大致框架、想要的桥段或细节。留空则完全由模型设计。填了会尽量采纳。'));
+        const hintSec = makeSectionLabel('框架提示 · 想怎么走',
+            '写顺序、桥段或细节。'
+            + '过程建议：能融就融，与结构完整性冲突时让位于结构。'
+            + '不填就完全由模型设计。');
+        page.appendChild(hintSec);
         const hintInput = el('textarea', 'eo-input eo-textarea');
         hintInput.rows = 4;
-        hintInput.placeholder = '例如：开场列车遭遇暴雪被困，死者身中十二刀；中途每个乘客的证词都互相印证却彼此矛盾；结尾靠一枚被烧焦的信纸残片把所有人的旧案串起来';
+        hintInput.placeholder = '开场列车遭遇暴雪被困，死者身中十二刀；每个乘客的证词互相印证却彼此矛盾；结尾靠一枚烧焦的信纸残片把所有人的旧案串起来';
         hintInput.value = prefs.promptHint || '';
         hintInput.addEventListener('input', () => { prefs.promptHint = hintInput.value; persistGenForm(); });
         hintInput.addEventListener('change', persistGenForm);
         page.appendChild(hintInput);
 
+
+
+        // 额外要求挪到事件参数之上（2026-11-14 危晓要求）：
+        // 它和事件目的、框架提示一样是「想让模型额外照办的事」，
+        // 原来埋在参数区最末尾，翻过两片折叠块才看得到。
+        page.appendChild(renderExtraRow(prefs));
 
         // 难度等级挪到事件参数之上（2026-11-04 危晓要求）：
         // 它定的是整件事的强度档，下面那些子项里写「根据难度等级自行设定」的都按它推导，
@@ -3069,11 +3154,20 @@
             `${l.at} ${LOG_LEVEL_LABEL[l.level] || l.level}｜${l.text}`
         ).join(String.fromCharCode(10));
         page.appendChild(box);
-        // 日志按时间正序排，最新一条在最下面：渲染完直接滚到底，一进来就看到最新的
+        // 日志按时间正序排，最新一条在最下面（2026-11-14 危晓要求：自动展示最新的）。
+        // 但不能无脑拽到底：用户往上翻着看报错时，重绘又把他弹回底部，那就没法读了。
+        // 所以记住「他是不是正停在底部」——在底部就跟着新日志走，翻上去了就原地不动。
         const toBottom = () => { box.scrollTop = box.scrollHeight; };
-        toBottom();
-        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(toBottom);
-        setTimeout(toBottom, 60);
+        box.addEventListener('scroll', () => {
+            // 留 4 像素容差：不同浏览器的 scrollTop 会差一两像素，写死等号会把「在底部」误判成没在
+            S.logAtBottom = box.scrollHeight - box.scrollTop - box.clientHeight <= 4;
+        });
+        if (S.logAtBottom) {
+            toBottom();
+            // 元素刚挂上时 scrollHeight 还是旧值，等一帧和一次微延时各滚一次才稳
+            if (typeof requestAnimationFrame === 'function') requestAnimationFrame(toBottom);
+            setTimeout(toBottom, 60);
+        }
         // 日志页按钮区（2026-11-02 整理）：先建行，再逐个建按钮，最后统一挂到页面上
         const r = el('div', 'eo-row');
 

@@ -35,7 +35,21 @@
                         const sorted = entries.slice().sort((a, b) => (b.seq || 0) - (a.seq || 0));
                         for (const e of sorted) {
                             for (const op of (e.operations || [])) {
-                                if (op && op.sheetKey && op.sheet && op.sheet.content) {
+                                if (!op) continue;
+                                // 2026-11-14 危晓实测（兰开斯特堡·第二卷）：shujuku 有时不做逐表操作，
+                                // 而是丢一条 kind='data_replace' 的整份快照，八张表全塞在 op.data 里
+                                // （key 就是 sheet_xxx，值带 name/content，与逐表操作同一个形状）。
+                                // 旧代码只认 op.sheetKey + op.sheet，这种快照一条也读不到，
+                                // 于是明明有 234 行纪要，面板却说「未检测到纪要数据」。
+                                if (op.kind === 'data_replace' && op.data && typeof op.data === 'object') {
+                                    for (const [k, v] of Object.entries(op.data)) {
+                                        if (!k.startsWith('sheet_')) continue;
+                                        if (!v || typeof v !== 'object' || !v.content) continue;
+                                        if (!result.has(k)) result.set(k, v);
+                                    }
+                                    continue;
+                                }
+                                if (op.sheetKey && op.sheet && op.sheet.content) {
                                     // 楼层是从新到旧遍历的，第一次遇到即最新快照；
                                     // 后面更旧的楼层会带同一张表的旧版本，不能覆盖
                                     if (!result.has(op.sheetKey)) result.set(op.sheetKey, op.sheet);
