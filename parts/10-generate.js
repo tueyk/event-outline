@@ -692,9 +692,32 @@
         return { obj: out, renamed, lost };
     }
 
+    /**
+     * 清掉零宽字符与方向控制字符（2026-11-15 真机）。
+     *
+     * 模型输出过 `"primary": "N​S​F​W"`——三个字母之间夹了 U+200B，
+     * 肉眼看不出，字符串比较必然不等：类型匹配不到「NSFW」表、
+     * 世界书标签也跟着带脏字符。这类字符一律在解析层清掉，
+     * 不指望提示词去约束（提示词管不住模型怎么打字）。
+     */
+    function stripZeroWidth(v) {
+        if (typeof v === 'string') {
+            return v.replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]/g, '');
+        }
+        if (Array.isArray(v)) return v.map(stripZeroWidth);
+        if (v && typeof v === 'object') {
+            const o = {};
+            for (const k of Object.keys(v)) o[k] = stripZeroWidth(v[k]);
+            return o;
+        }
+        return v;
+    }
+
     /** 规范化整份大纲：中文键转英文，冲突的记日志 */
     function normalizeOutline(parsed) {
         if (!parsed || typeof parsed !== 'object') return parsed;
+        // 2026-11-15：先清零宽字符，再做键名规范化——否则类型字符串带着看不见的字符
+        parsed = stripZeroWidth(parsed);
         // 角色立场那几个键下面是数组，数组元素各自规范化
         const r = normalizeKeys(parsed, null);
         if (r.renamed || r.lost.length) {
@@ -943,9 +966,19 @@
         if (quality.missing.length) {
             warn(`大纲结构缺失：${quality.missing.join('；')}。这通常意味着模型没按格式输出，或解析器不认识某种写法`);
         }
+        // 2026-11-16（赫尔墨斯审查 P3）：十四类里只有案件推理用 nodes，
+        // 其余类型 nodeCount 恒为 0，原来每次都打一条 error，日志里全是噪音，
+        // 真出问题时反而看不见。改成：该类型本来就没有 nodes 的，降级成 debug；
+        // 只有「这一类型应该有节点却一个都没有」才算错。
         if (!nodeCount) {
-            error('大纲里没有解析出任何信息节点，这次生成的事件卡将无法跟踪进度。'
-                + `原始输出前 200 字：${String(raw || '').slice(0, 200)}`);
+            const mt = String((parsed && parsed.event_type && parsed.event_type.primary) || '').trim();
+            const nodesType = !mt || /案件|推理/.test(mt);
+            if (nodesType) {
+                error('大纲里没有解析出任何信息节点，这次生成的事件卡将无法跟踪进度。'
+                    + `原始输出前 200 字：${String(raw || '').slice(0, 200)}`);
+            } else {
+                debug(`本类型（${mt}）不使用信息节点，进度按该类型自己的字段走，nodeCount=0 属正常`);
+            }
         }
         if (quality.ok) {
             log(`大纲完整性检查通过：${quality.summary}`);
@@ -1033,7 +1066,56 @@
         return { warnings, count };
     }
 
-    function checkOutlineQualityFor(parsed, mainTypeHint) {
+    /**
+     * 2026-11-16：某类型某字段的 spec 是否标了 mayBeEmpty。
+     * 标了的字段允许为空——参数取「无」「一个人守」时骨架里那张表就是空的，
+     * 空是按要求来的，必需性检查与条目数下限都不该再挑它的毛病。
+     */
+    function specFieldMayBeEmpty(mainType, field) {
+        const spec = OUTLINE_SPEC_BY_TYPE[resolveSkeletonType(String(mainType || '').trim())];
+        const meta = spec && spec.required && spec.required[field];
+        return !!(meta && meta.mayBeEmpty);
+    }
+    /**
+     * 2026-11-16：必需性检查里「哪些 required 字段算缺失」这一段，抽成纯判定。
+     *
+     * 为什么抽出来：这段有三条放行规则（参数指定为空、spec 标了 mayBeEmpty、
+     * 以及常规的空值判断），混在 checkOutlineQualityFor 的循环里时，测试要么
+     * 把整个检查器的十几个依赖搬进沙箱，要么就只能靠字符串匹配消息——后者消息
+     * 一改就假绿。抽成无副作用的纯函数后，正反两条断言零依赖即可覆盖。
+     *
+     * 放行规则：
+     *   1. spec 标了 mayBeEmpty —— 参数取「无」「一个人守」时这张表本来就是空的；
+     *   2. 本次参数把它定成「没有」—— emptyByParam 里点名了；
+     *   3. 有值 —— 不缺失。
+     * 其余情况才算缺失。
+     *
+     * @param {string} mainType      主类型名（决定读哪张 spec）
+     * @param {object} outline       解析出来的大纲对象
+     * @param {Set|null} emptyByParam 本次参数指定为空的字段名集合，可省略
+     * @returns {string[]}           缺失的字段名
+     */
+    function missingInnerFields(mainType, outline, emptyByParam) {
+        const keys = (innerKeysOf(mainType) || {}).required || [];
+        // 空值判断在这里自己写一份，不借用 checkOutlineQualityFor 里的局部 isEmpty——
+        // 这个函数要能独立被调用（测试直接抽它就够），不能依赖调用方的闭包。
+        const blank = v => v == null || v === '' || (Array.isArray(v) && !v.length);
+        const out = [];
+        for (const k of keys) {
+            if (specFieldMayBeEmpty(mainType, k)) continue;
+            if (emptyByParam && emptyByParam.has && emptyByParam.has(k)) continue;
+            if (blank(innerField(outline, k))) out.push(k);
+        }
+        return out;
+    }
+
+    /**
+     * 2026-11-16：硬约束参数取「无/最低档」时骨架里那张表会被清空，
+     * 但这些字段多在 spec 的 required 里，必需性检查会报「缺失或为空」，
+     * 用户按参数选「无」反倒被自家检查挑毛病。
+     * emptyByParam 是「本次参数指定为空的字段名」集合，命中就跳过那条告警。
+     */
+    function checkOutlineQualityFor(parsed, mainTypeHint, emptyByParam) {
         const o = parsed || {};
         const missing = [];    // 外层：硬校验，缺了就失败
         const warnings = [];   // 内层：软校验，缺了只提示
@@ -1086,10 +1168,8 @@
             // 万一将来有类型缺 spec，这里报出来而不是拿别的类型字段硬套。
             warnings.push(`主类型「${mainType}」的内层骨架还没做，本次不校验内层结构`);
         } else {
-            for (const k of innerSpec.required) {
-                if (isEmpty(innerVal(k))) {
-                    warnings.push(`内层字段 ${k} 缺失或为空（主类型「${mainType}」该有）`);
-                }
+            for (const k of missingInnerFields(mainType, o, emptyByParam)) {
+                warnings.push(`内层字段 ${k} 缺失或为空（主类型「${mainType}」该有）`);
             }
 
             // M6.2（2026-11-07）：必需性之外，再按 spec 声明的 kind 查取值。
@@ -1112,8 +1192,16 @@
                             v.forEach((el, i) => {
                                 if (!el || typeof el !== 'object') return;
                                 for (const [ik, im] of Object.entries(meta.item)) {
-                                    if (el[ik] == null || el[ik] === '') continue;
-                                    for (const p of kindValueProblems(im, el[ik], `第 ${i + 1} 条的 ${ik}`)) {
+                                    const iv = el[ik];
+                                    const absent = iv == null || (typeof iv === 'string' && !iv.trim());
+                                    if (absent) {
+                                        // 2026-11-15（第零步）：条目上标了 required 的字段缺失要报。
+                                        // 以前列表条目只查「有值的形态对不对」，缺字段一声不响，
+                                        // NSFW 每段的 dialogue 就这样被模型静默跳过。
+                                        if (im && im.required) warnings.push(`第 ${i + 1} 条缺 ${ik}`);
+                                        continue;
+                                    }
+                                    for (const p of kindValueProblems(im, iv, `第 ${i + 1} 条的 ${ik}`)) {
                                         warnings.push(p);
                                     }
                                 }

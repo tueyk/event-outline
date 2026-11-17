@@ -382,11 +382,20 @@
         if (!parsed || typeof parsed !== 'object' || !Object.keys(parsed).length) {
             return { ok: false, fatal: ['解析不出任何字段，这份内容不是合法的 YAML'], issues: [] };
         }
-        // 与 saveDraftEdit 同一口径：没有信息节点也算硬错，否则存下去是空壳
-        // （2026-11-05 M2 评审：nodes 在 structure 里，按顶层读会把每份新草稿都判成空壳）
-        const n = innerNodesOf(parsed).length;
-        if (!n) {
-            return { ok: false, fatal: ['一个信息节点都没有解析出来，多半是 nodes 下面的缩进或破折号被改坏了'], issues: [] };
+        // 与 saveDraftEdit 同一口径（2026-11-16 赫尔墨斯审查 P2 修）：
+        // 原来这里只看 nodes，而十四类里只有案件推理有 nodes，其余类型内容完整也一律被判红，
+        // 与保存路径口径不一致——同一个文件，保存放行、检查格式却说有问题。
+        // 改成：外层必备键齐全，或该类型声明的进度字段有内容，满足任一就放行。
+        const shapeRaw = checkOutlineShape(parsed);
+        const outerOkRaw = !!(shapeRaw && shapeRaw.ok);
+        let hasProgressRaw = false;
+        try { hasProgressRaw = progressItemsOf(parsed).items.length > 0; } catch (e) { hasProgressRaw = false; }
+        if (!outerOkRaw && !hasProgressRaw) {
+            return {
+                ok: false,
+                fatal: ['内容结构不完整，多半是缩进、冒号或破折号被改坏了'],
+                issues: [],
+            };
         }
         return { ok: true, fatal: [], issues: checkOutlineRefs(parsed) };
     }
@@ -1596,7 +1605,8 @@
         const custom = customValueOf(pfs, key);
         // 当前值不在选项里 = 用户手打过一句，下拉要选中「自定义…」并把那句话回填进输入框
         // 设置页预存的那些手写取值也拼进来，排在「＋ 自定义…」之前，选了就等于选了一句原话
-        const preset = getPrefPresetExtra(key).filter(x => !options.some(o => o.value === x));
+        const preset = getPrefPresetExtra(key, (pfs && pfs.eventMainType) || '')
+            .filter(x => !options.some(o => o.value === x));
         const base = options.map(o => ({ value: o.value, label: o.label }))
             .concat(preset.map(x => ({ value: x, label: '倍 · ' + x })));
         const selOpts = base.concat([{ value: PREF_CUSTOM_OPTION, label: '＋ 自定义…' }]);
@@ -1637,6 +1647,15 @@
         });
         inputWrap.appendChild(el('span', 'eo-hint', '↳'));
         inputWrap.appendChild(inp);
+        // 2026-11-16：硬约束项（威胁波次这类）的取值决定骨架里写几条。
+        // 手打的内容若不在档位上，行数就由模型按原话判断——这一点必须当场说清。
+        // 真机踩过一次：用户填「无」，那一档当时不存在，行数约束被静默跳过，模型写了 3 波。
+        const hardHint = isHardRowKey(key, (pfs && pfs.eventMainType) || '')
+            ? el('div', 'eo-hint',
+                '这一项决定骨架里写几条。手写的内容若不在上面的档位里，条数就由模型按你的原话判断；'
+                + '想要确定的条数，请从档位里选。')
+            : null;
+        if (hardHint) inputWrap.appendChild(hardHint);
         row.appendChild(inputWrap);
         return row;
     }
@@ -4328,63 +4347,140 @@
         const box = appendCollapsibleSection(page, 'prefOptions', '参数自定义项', '预存手写取值');
         box.appendChild(el('div', 'eo-hint',
             '这里填的是「以后经常要用到、想让它直接出现在下拉里」的说法。'
-            + '只是这一次想换个写法的话，不用来这儿——生成页每一项的下拉里都有「＋ 自定义…」，'
-            + '选中后当场打一句就行。'
-            + '一行一个，按写的顺序排在下拉里。'));
+            + '只是这一次想换个写法的话，不用来这儿——生成页每一项的下拉里都有「＋ 自定义…」。'
+            + '预存值按类型分开：在经营周期预存的说法不会出现在案件推理的下拉里。'));
 
-        const store = () => {
+        // 2026-11-15（需求-事件参数按类型归属 §7.4）：预存值改成按类型存。
+        // 老存档是扁平的 customOptions[key] = [...]，在这里一次性搬到
+        // 「用到该键的每个类型」名下，然后置 customOptionsByType，之后永不再读旧结构。
+        const storeRoot = () => {
             const st = getSettings();
-            if (!st.preset.customOptions) st.preset.customOptions = {};
+            if (!st.preset || typeof st.preset !== 'object') st.preset = {};
+            if (!st.preset.customOptions || typeof st.preset.customOptions !== 'object'
+                || Array.isArray(st.preset.customOptions)) {
+                st.preset.customOptions = {};
+            }
             return st.preset.customOptions;
         };
-
-        // 只列事件参数里的项。难度等级不在这里：它是独立的「难度等级」节，
-        // 档位本身就在那一节编，不该在事件参数里再出现一次（2026-11-04 危晓指出重复）
-        // 2026-11-06 M4.2：补上战斗五项，否则它们的预设手写值在这里编不了。
-        for (const g of PREF_GROUPS.concat(PREF_COMBAT_GROUPS)) {
-            const sub = el('div', 'eo-row eo-prefopt-row');
-            const lab = el('label', null, g.group ? `${g.group}·${g.label}` : g.label);
-            lab.style.minWidth = '130px';
-            sub.appendChild(lab);
-
-            const ta = el('textarea', 'eo-input eo-textarea');
-            ta.rows = 2;
-            ta.placeholder = '一行一条，例如：只留一处能要人命的地方';
-            const saved = store();
-            ta.value = (Array.isArray(saved[g.key]) ? saved[g.key] : []).join('\n');
-            ta.style.flex = '1';
-            sub.appendChild(ta);
-
-            const out = el('div', 'eo-hint');
-            let timer = null;
-            // 边打边存，但不每敲一个字就写一遍存储：停手 600ms 再落盘
-            const commit = () => {
-                const list = String(ta.value || '').split('\n').map(x => x.trim()).filter(Boolean);
-                const seen = new Set();
-                const clean = [];
-                for (const x of list) { if (!seen.has(x)) { seen.add(x); clean.push(x); } }
-                const all = store();
-                if (clean.length) all[g.key] = clean;
-                else delete all[g.key];
-                saveSettings();
-                out.textContent = clean.length ? `已存 ${clean.length} 条` : '已清空';
-                out.className = 'eo-hint';
-            };
-            ta.addEventListener('input', () => {
-                if (timer) clearTimeout(timer);
-                timer = setTimeout(commit, 600);
-            });
-
-            const btn = el('button', 'eo-btn', '清空');
-            btn.type = 'button';
-            btn.addEventListener('click', () => {
-                ta.value = '';
-                commit();
-            });
-            sub.appendChild(btn);
-            sub.appendChild(out);
-            box.appendChild(sub);
+        if (!s.customOptionsByType) {
+            const root = storeRoot();
+            const legacy = Object.keys(root).filter(k => Array.isArray(root[k]));
+            if (legacy.length) {
+                for (const t of EVENT_MAIN_TYPES) {
+                    const keys = prefsForType(t).map(g => g.key);
+                    for (const k of legacy) {
+                        if (!keys.includes(k)) continue;
+                        if (!root[t] || typeof root[t] !== 'object' || Array.isArray(root[t])) root[t] = {};
+                        if (!root[t][k]) root[t][k] = root[k].slice();
+                    }
+                }
+                for (const k of legacy) delete root[k];
+                log(`预存取值迁移到按类型存：${legacy.length} 个键（只做一次）`);
+            }
+            s.customOptionsByType = true;
+            saveSettings();
         }
+
+        let curType = String((s.preset && s.preset.lastCustomType) || '').trim();
+        if (!EVENT_MAIN_TYPES.includes(curType)) curType = EVENT_TYPE_DEFAULT;
+        const bucket = () => {
+            const root = storeRoot();
+            if (!root[curType] || typeof root[curType] !== 'object' || Array.isArray(root[curType])) root[curType] = {};
+            return root[curType];
+        };
+
+        const head = el('div', 'eo-row');
+        const body = el('div');
+        const countHint = el('span', 'eo-hint');
+
+        const paint = () => {
+            body.textContent = '';
+            const defs = prefsForType(curType);
+            const filled = defs.filter(g => {
+                const b = bucket();
+                return Array.isArray(b[g.key]) && b[g.key].length;
+            });
+            countHint.textContent = '已预存 ' + filled.length + ' 条';
+
+            if (!filled.length) {
+                body.appendChild(el('div', 'eo-hint',
+                    '这一类还没预存过说法。生成页每一项的下拉里也能当场打，这里只放以后要反复用的。'));
+            }
+
+            for (const g of filled) {
+                const sub = el('div', 'eo-row eo-prefopt-row');
+                // 用该类型定义里的 label：经营周期显示「经营节奏」，不是「节奏结构」
+                const lab = el('label', null, g.label);
+                lab.style.minWidth = '130px';
+                sub.appendChild(lab);
+
+                const ta = el('textarea', 'eo-input eo-textarea');
+                ta.rows = 2;
+                ta.placeholder = '一行一条，例如：只留一处能要人命的地方';
+                ta.value = (bucket()[g.key] || []).join('\n');
+                ta.style.flex = '1';
+                sub.appendChild(ta);
+
+                const commit = () => {
+                    const list = String(ta.value || '').split('\n').map(x => x.trim()).filter(Boolean);
+                    const seen = new Set();
+                    const clean = [];
+                    for (const x of list) { if (!seen.has(x)) { seen.add(x); clean.push(x); } }
+                    const b = bucket();
+                    if (clean.length) b[g.key] = clean;
+                    else delete b[g.key];
+                    saveSettings();
+                    countHint.textContent = '已预存 ' + prefsForType(curType).filter(x => {
+                        const bb = bucket();
+                        return Array.isArray(bb[x.key]) && bb[x.key].length;
+                    }).length + ' 条';
+                };
+                let timer = null;
+                ta.addEventListener('input', () => {
+                    if (timer) clearTimeout(timer);
+                    timer = setTimeout(commit, 600);
+                });
+
+                const btn = el('button', 'eo-btn', '清空');
+                btn.type = 'button';
+                btn.addEventListener('click', () => { ta.value = ''; commit(); paint(); });
+                sub.appendChild(btn);
+                body.appendChild(sub);
+            }
+
+            // 添加器：只列这一类里还没有预存值的参数
+            const b = bucket();
+            const rest = defs.filter(g => !(Array.isArray(b[g.key]) && b[g.key].length));
+            if (rest.length) {
+                const addRow = el('div', 'eo-row eo-prefopt-row');
+                addRow.appendChild(el('label', null, '加一条'));
+                for (const g of rest) {
+                    const b2 = el('button', 'eo-btn', '＋ ' + g.label);
+                    b2.type = 'button';
+                    b2.addEventListener('click', () => {
+                        const bb = bucket();
+                        bb[g.key] = [''];
+                        saveSettings();
+                        paint();
+                    });
+                    addRow.appendChild(b2);
+                }
+                body.appendChild(addRow);
+            }
+        };
+
+        makeSelect(head, '类型', EVENT_MAIN_TYPES.map(t => ({ value: t, label: t })), curType, (v) => {
+            curType = v;
+            const st = getSettings();
+            if (!st.preset) st.preset = {};
+            st.preset.lastCustomType = v;
+            saveSettings();
+            paint();
+        }, '预存值按类型分开，换类型只看这一类。');
+        head.appendChild(countHint);
+        box.appendChild(head);
+        box.appendChild(body);
+        paint();
     }
 
     /** 设置页：历史事件保留数量 */

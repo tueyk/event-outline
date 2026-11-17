@@ -642,7 +642,10 @@
                     return;
                 }
                 const stType = st.type ? `〔${st.type}〕` : '';
-                const stGoal = st.goal ? String(st.goal).trim() : `第 ${i + 1} 段`;
+                // 2026-11-15：通用阶段读 goal，NSFW 的阶段字段叫 name。
+                // 类型识别失败退到这里时，至少把名字显示出来，别只剩「第 N 段」。
+                const stGoal = String(st.goal || st.name || st['目标'] || st['名称'] || '').trim()
+                    || `第 ${i + 1} 段`;
                 const opt = (st.optional === true || String(st.optional).toLowerCase() === 'true'
                     || st.optional === '是' || st.optional === '可跳过');
                 lines.push(`  ${i + 1}. ${stType}${stGoal}${opt ? '（可跳过）' : ''}`);
@@ -797,7 +800,11 @@
             // 走 spec 通用分支会丢掉这些细节，所以案件仍走上面的专用渲染；
             // 其余类型一律按 spec 分派，没有 spec 的（尚无骨架）不渲染内层。
             const genericTypes = ['战斗冲突', '谈判交涉', '生存危机', '探险探索',
-                '社交博弈', '日常杂务', '禁忌秘辛', 'NSFW', '其他'];
+                '社交博弈', '日常杂务', '禁忌秘辛', 'NSFW', '其他',
+                // 2026-11-15 真机：三期这四类漏在白名单外，内层字段一个都没渲染，
+                // 「经营周期」的待选卡片只剩简介、时间压力、危险、禁止四项，
+                // cycle/upkeep/upgrade/cashflow/staffing 全被藏掉。
+                '追捕搜索', '灾难事故', '政治程序', '经营周期'];
             if (spec && genericTypes.includes(mainType)) {
                 // required 与 optional 都要渲染：optional 只是「可以不写」，
                 // 写了就要显示出来。2026-11-09 只取 required，战斗的援军/撤退/伤亡全丢了。

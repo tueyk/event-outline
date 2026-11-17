@@ -1245,6 +1245,185 @@
     }
 
     /**
+     * 露骨程度的四档说明（2026-11-15，需求 §5.3）。
+     * 档位不是「写多长」，是「写到哪一层」。四档是叠加关系：详尽包含直白的全部要求，
+     * 露骨再包含详尽的。这里给出 progress 与 state 两个字段按档位的写法。
+     */
+    function nsfwLevelText(args) {
+        const lv = String((args && args.nsfw_explicit) || '直白');
+        if (lv === '点到为止') {
+            return {
+                progress: '这一段的推进与关系变化，写程度即可；身体的接触只写结果',
+                state: '情绪与顾虑',
+            };
+        }
+        if (lv === '详尽') {
+            return {
+                progress: '这一段的推进，写清动作顺序、身体反应与感官细节（触感、温度、声音、气味）',
+                state: '情绪、身体反应、出声、还有没有话说',
+            };
+        }
+        if (lv === '露骨') {
+            return {
+                progress: '这一段的推进，写到生理层面的具体反应，不回避、不用隐喻替换',
+                state: '情绪、身体反应、出声，写得更满',
+            };
+        }
+        return {
+            progress: '这一段的推进，写清谁做了什么、身体上到了哪一步',
+            state: '情绪、身体反应、出声、还有没有话说',
+        };
+    }
+
+    /**
+     * 两套示例的段落内容（2026-11-15 重写，需求 §5.4 第四层）。
+     *
+     * 旧的两套写的是「话没说开」「第二天怎么打招呼」，模型照抄必然是情感戏。
+     * 现在主示例按**直白档**写：每段都落到「谁做了什么、身体上到了哪一步」，
+     * 每段都带一句出口的对白，不用「一夜过去」「不必细说」这类收束。
+     * 变体示例按**详尽档**写：在直白之上加动作顺序、触感、温度、声音与气味。
+     *
+     * 段数按事件参数取前 N 段（默认 4）；超出数组长度时沿用最后一段的写法。
+     */
+    const NSFW_MAIN_PHASES = [
+        {
+            name: '闩门',
+            scene: '客栈二楼，油灯只点了一盏，窗外的雨声一直没停',
+            state: '甲心里清楚今晚要发生什么，手一直在袖口打转；乙靠着门，没有走',
+            progress: '乙回手把门闩上，走过来替甲解开外衫的第一颗扣子，甲没有躲；两个人的身体第一次贴到一起',
+            dialogue: '乙：「门我闩了。你要是不想，现在说。」甲：「……别停。」',
+            end_mark: '外衫落在地上',
+        },
+        {
+            name: '到床上',
+            scene: '床沿，灯芯短了一截，光暗下去',
+            state: '乙先坐下来，甲站在他两腿之间；两个人的呼吸都乱了，谁都不说话',
+            progress: '乙的手从甲的腰一路摸到背，把里衣往上推；甲抓着他的肩，膝盖抵上床沿，两个人一起倒下去，衣料散了一地',
+            dialogue: '甲：「你手凉。」乙：「一会儿就热了。」',
+            end_mark: '两个人都躺平了',
+        },
+        {
+            name: '换他主动',
+            scene: '床上，被子被踢到了脚边',
+            state: '甲开始主动，乙有点意外；甲的额头抵着乙的锁骨',
+            progress: '甲把乙按下去，跨坐上去，自己动；动作从生涩到找到节奏，床板响了一声',
+            dialogue: '甲：「别看。」乙：「偏看。」',
+            end_mark: '甲的声音变了调',
+        },
+        {
+            name: '最后一程',
+            scene: '天快亮，窗纸发白',
+            state: '两个人都出了汗，甲趴着不动，乙的手还搭在他背上',
+            progress: '乙从背后把甲压下去，动作又快又沉；甲把脸埋进枕头里，抓着床单。完了两个人并排躺着，谁都没先起来',
+            dialogue: '乙：「还走吗？」甲：「雨停了再说。」',
+            end_mark: '窗纸完全发白',
+        },
+        {
+            name: '余下',
+            scene: '天亮之后，屋里只剩雨停后的潮气',
+            state: '两个人都不看对方，又都没穿衣服',
+            progress: '甲先坐起来，乙从后面把他搂回去，下巴搁在他肩上；这一次很慢，甲低着头看完整个过程',
+            dialogue: '甲：「该起了。」乙：「再一会儿。」',
+            end_mark: '楼下有人开始搬东西',
+        },
+    ];
+
+    const NSFW_ALT_PHASES = [
+        {
+            name: '柴房',
+            scene: '酒馆后巷的柴房，酒气混着湿木头味，门板上还留着水痕',
+            state: '甲的脸被酒意烘得发烫，手心出汗；乙把他按在门板上，两个人的呼吸撞在一起',
+            progress: '乙的手掌隔着衣料从甲的后腰往上推，指腹擦过脊背一节一节的骨头；里衣被汗贴在身上，被乙从下摆掀起来，凉气一激，两个人都抖了一下',
+            dialogue: '乙：「这么多年，你还是这样。」甲：「哪样？」乙：「一紧张就不说话。」',
+            end_mark: '里衣被扔到柴堆上',
+        },
+        {
+            name: '草垫',
+            scene: '柴房角落的草垫，头顶一盏没罩的灯，灯影在墙上晃',
+            state: '甲的耳朵红透，能闻见乙身上酒和汗混在一起的味道；乙的呼吸喷在他颈侧，一下一下',
+            progress: '乙含住甲的耳垂，牙齿轻轻磨；甲的喉咙里滚出一声闷响，手在乙的后背抓出几道印子。两个人的腰贴到一起，隔着裤子也感觉得到对方硬了',
+            dialogue: '甲：「别留印子。」乙：「那我轻点。」',
+            end_mark: '两个人都解开了腰带',
+        },
+        {
+            name: '他坐上去',
+            scene: '草垫上，灯芯噼啪响了一声',
+            state: '甲的指尖发麻，眼睛半闭；乙盯着他看，目光很沉',
+            progress: '甲翻身把乙推倒，自己坐上去；进去的那一下两个人都停住了，甲的手撑在乙胸口，指节发白。缓过来之后他才慢慢动起来，草垫发出细碎的响声',
+            dialogue: '乙：「慢一点。」甲：「你闭嘴。」',
+            end_mark: '甲的动作稳了下来',
+        },
+        {
+            name: '从背后',
+            scene: '灯快烧到头，屋里越来越暗',
+            state: '甲的后背全是汗，头发贴在颈上；乙的手从他腰侧移到大腿',
+            progress: '乙把甲翻过去，从背后压上来，一手扣着他的腰、一手撑在草垫上，动作一下比一下深；甲的脸埋在臂弯里，声音被撞得断断续续',
+            dialogue: '甲：「……快一点。」乙：「刚才不是让我闭嘴？」',
+            end_mark: '甲先到了，整个人软下去',
+        },
+        {
+            name: '灯灭之后',
+            scene: '灯灭了，只剩窗缝里一点月光',
+            state: '两个人并排躺着，身上黏，谁都没动',
+            progress: '乙最后几下也停了，伏在甲背上喘；过了很久才退出来，侧躺到他旁边，把外衫拉过来盖在两个人身上',
+            dialogue: '甲：「明天还见吗？」乙：「见。」',
+            end_mark: '天光从窗缝里透进来',
+        },
+    ];
+
+    /**
+     * 按段数取示例段落（2026-11-15）。
+     * 段数是事件参数，示例必须跟着变——固定取前 N 段会让 3 段时以「换他主动」收尾，语义不通。
+     * 3 段取「起/转/合」，4 段取前四段，5 段全取。
+     */
+    function pickPhases(arr, n) {
+        const len = arr.length;
+        if (n <= 0) return arr.slice();
+        if (n === 3 && len >= 4) return [arr[0], arr[2], arr[3]];
+        return arr.slice(0, Math.min(n, len));
+    }
+
+    /**
+     * 按目标行数裁/扩一张 YAML 列表（2026-11-15，需求 §8 硬约束）。
+     *
+     * 骨架里那张表是逐行字符串，`  threats:` 之后是若干以 `    - ` 开头的条目块
+     * （每条目可带 `      key: value` 子行）。这里按目标行数重排：
+     *   · 目标少于现有 → 只留前 N 块
+     *   · 目标多于现有 → 循环复用已有块（模型据此知道要写满 N 行）
+     * 第一行的序号（wave: 1 / id: 1）会重编，避免出现两个 wave: 1。
+     */
+    function resizeYamlTable(lines, field, target) {
+        // 2026-11-16：target 允许为 0——「威胁波次=无」这类档位要的是一张空表。
+        // 原来的 `!target` 把 0 和「没传」混为一谈，选了「无」照样留着 3 行威胁，参数等于失效。
+        if (target == null || !Array.isArray(lines)) return lines;
+        const head = lines.indexOf('  ' + field + ':');
+        if (head < 0) return lines;
+        let i = head + 1;
+        const blocks = [];
+        while (i < lines.length && /^    - /.test(lines[i])) {
+            const start = i;
+            i++;
+            while (i < lines.length && /^      /.test(lines[i])) i++;
+            blocks.push(lines.slice(start, i));
+        }
+        if (!blocks.length) return lines;
+        if (target <= 0) {
+            // 空表不写 `[]`：模型看到空数组容易当成「漏填」，写一句明确的「无」更稳。
+            return lines.slice(0, head + 1)
+                .concat(['      # 本项按参数取「无」，这一块没有条目；' + field + ' 保持为空'],
+                    lines.slice(i));
+        }
+        const out = [];
+        for (let k = 0; k < target; k++) {
+            const blk = blocks[Math.min(k, blocks.length - 1)].slice();
+            // 重编号：'    - wave: 1' → '    - wave: N' / '    - id: 1' → id: N
+            blk[0] = blk[0].replace(/^(\s*- [a-z_]+:\s*)(\d+)/, (m, p) => p + (k + 1));
+            out.push(...blk);
+        }
+        return lines.slice(0, head + 1).concat(out, lines.slice(i));
+    }
+
+    /**
      * 拼一套 NSFW 骨架。
      * withConsent=false 时整块同意与边界不进骨架，配套的规则与字段也一并不写，
      * 避免「骨架里没这块、rules 里还要求它」这种自相矛盾。
@@ -1252,18 +1431,21 @@
     function buildNsfwSkeleton(args) {
         const n = nsfwPhaseCount(args);
         const consent = nsfwConsentOn(args);
+        const lvl = nsfwLevelText(args);
 
         const phases = [];
-        const stageNames = ['起', '承', '转', '合', '余'];
-        for (let i = 1; i <= n; i++) {
-            const tag = stageNames[i - 1] || ('第' + i + '段');
+        // 2026-11-15：示例按段数取（3 段取起/转/合），不再固定截前 N 段
+        const mainPicked = pickPhases(NSFW_MAIN_PHASES, n);
+        for (let i = 0; i < mainPicked.length; i++) {
+            const p = mainPicked[i];
             phases.push(
-                '    - stage: ' + i,
-                '      name: ' + tag + '——这一段的名字，三五个字',
-                '      progress: 关系推进到哪一步。这里写的是程度，不是动作清单',
-                '      scene: 在哪、什么时候、什么环境',
-                '      state: 双方各自的状态——情绪、顾虑、还有没有话说',
-                '      end_mark: 什么标志说明这一段结束了，可以进下一段',
+                '    - stage: ' + (i + 1),
+                '      name: ' + p.name,
+                '      progress: ' + p.progress,
+                '      scene: ' + p.scene,
+                '      state: ' + p.state,
+                '      dialogue: ' + p.dialogue,
+                '      end_mark: ' + p.end_mark,
             );
         }
 
@@ -1287,6 +1469,11 @@
             'forbidden:',
             '  - 不得跳过阶段直接进入下一阶段',
             '  - 不得让任何一方无故改变主意',
+            '  - 不得用「一夜过去」「后来的事不必细说」「此处省略」这类收束跳过场景',
+            '  - 不得用省略号、留白或镜头切换替代动作与对话',
+            '  - 不得在场景中途直接跳到次日清晨',
+            '  - 每段必须写出实质推进，不能只写氛围、心理与事后的后果',
+            '  - 对话写出口的原话，不写转述',
             'structure:',
             '  participants:',
             '    - name: 甲的名字',
@@ -1322,14 +1509,17 @@
         // ---- 第二条示例：说明另一档段数怎么写 ----
         const altN = (n === 5) ? 3 : (n + 1);
         const altPhases = [];
-        for (let i = 1; i <= altN; i++) {
+        const altPicked = pickPhases(NSFW_ALT_PHASES, altN);
+        for (let i = 0; i < altPicked.length; i++) {
+            const p = altPicked[i];
             altPhases.push(
-                '    - stage: ' + i,
-                '      name: 第' + i + '段',
-                '      progress: 关系推进到哪一步',
-                '      scene: 在哪、什么环境',
-                '      state: 双方各自的状态',
-                '      end_mark: 这一段的结束标志',
+                '    - stage: ' + (i + 1),
+                '      name: ' + p.name,
+                '      progress: ' + p.progress,
+                '      scene: ' + p.scene,
+                '      state: ' + p.state,
+                '      dialogue: ' + p.dialogue,
+                '      end_mark: ' + p.end_mark,
             );
         }
         const alt = [
@@ -1351,6 +1541,11 @@
             '  threat_source: 酒意、旧事、以及「明天还要见面」这件事',
             'forbidden:',
             '  - 不得让酒成为唯一理由',
+            '  - 不得用「一夜过去」「后来的事不必细说」「此处省略」这类收束跳过场景',
+            '  - 不得用省略号、留白或镜头切换替代动作与对话',
+            '  - 不得在场景中途直接跳到次日清晨',
+            '  - 每段必须写出实质推进，不能只写氛围、心理与事后的后果',
+            '  - 对话写出口的原话，不写转述',
             'structure:',
             '  participants:',
             '    - name: 甲',
@@ -1382,7 +1577,9 @@
             altTitle: '【段数怎么写】上面第一条是 ' + n + ' 段。这一段数由事件参数决定，',
             altTitle2: '下面这条是 ' + altN + ' 段的写法，只给看结构差别，实际按你选的段数写：',
             altDiff: '两条示例的差别：第一条 ' + n + ' 段，第二条 ' + altN + ' 段；其余字段完全相同。',
-            altHow: '段数按事件参数来，不要自己加减。每段都要有 progress 与 end_mark，缺一段推进就不成立。',
+            altHow: '段数按事件参数来，不要自己加减。每段都要有 progress 与 end_mark，缺一段推进就不成立。'
+                + '本次露骨程度「' + String((args && args.nsfw_explicit) || '直白') + '」，'
+                + 'progress 写到这一层为止：' + lvl.progress + '。',
             altNote: '（NSFW 的进度来源是 phases——这类型的推进单位就是「走到第几段」。'
                 + (consent ? '同意与边界已开启，必须写 consent 三子项。' : '这次关掉了同意与边界，不必写 consent。') + '）',
         };
@@ -1952,7 +2149,11 @@
             label: '列表',
             // min/max 是建议条目数，只用于提示词与规格说明，不参与校验（2026-11-07 危晓裁定）。
             // 手写一个 3 节点的精简案件不该被判错，那只是没按建议量级来。
-            attrs: ['when', 'not_when', 'min', 'max', 'refable', 'item'],
+            // min/max 是建议条目数，只用于提示词与规格说明，不参与校验（2026-11-07 危晓裁定）。
+            // 手写一个 3 节点的精简案件不该被判错，那只是没按建议量级来。
+            // 2026-11-16：mayBeEmpty 表示「参数可以把这张表定成空的」，
+            // 此时空是按要求来的，必需性检查不再报缺失（威胁波次取「无」、雇工数量取「一个人守」）。
+            attrs: ['when', 'not_when', 'min', 'max', 'refable', 'item', 'mayBeEmpty'],
             isEmpty: v => !Array.isArray(v) || !v.length,
         },
         map: {
@@ -2013,8 +2214,11 @@
             }
             // 用了该 kind 不认识的属性 → 多半是笔误或抄错形态
             // note 是所有形态通用的说明文字（写给人看），不算某个 kind 的专属属性
+            // required（2026-11-15）：只在「列表条目」与「map 子键」两处有语义——
+            // 表示该子键必须有。以前只允许写在 map.sub 上，列表条目写了会被自检判成
+            // 「不认识属性」；第零步给 NSFW 每段的 dialogue 加必填时就撞上这条。
             for (const key of Object.keys(meta)) {
-                if (key === 'kind' || key === 'optional' || key === 'note') continue;
+                if (key === 'kind' || key === 'optional' || key === 'note' || key === 'required') continue;
                 if (!def.attrs.includes(key)) {
                     problems.push(`${where} 的 kind「${k}」不认识属性「${key}」`);
                 }
@@ -2401,6 +2605,8 @@
                 },
                 threats: {
                     kind: 'list', min: 1, refable: true,
+                    // 2026-11-16：威胁波次参数取「无」时这张表就是空的，空是按要求来的
+                    mayBeEmpty: true,
                     item: {
                         wave: { kind: 'int', seq: true },
                         kind: { kind: 'text', note: '这一波是什么威胁：寒冷、野兽、追兵、塌方' },
@@ -2713,9 +2919,13 @@
                     item: {
                         stage: { kind: 'int', seq: true },
                         name: { kind: 'text', note: '这一段的名字' },
-                        progress: { kind: 'text', note: '关系推进到哪一步——是程度，不是动作清单' },
+                        progress: { kind: 'text', note: '这一段的推进，写清谁做了什么、身体上到了哪一步' },
                         scene: { kind: 'text', note: '在哪、什么时候、什么环境' },
-                        state: { kind: 'text', note: '双方各自的状态' },
+                        state: { kind: 'text', note: '情绪、身体反应、出声、还有没有话说' },
+                        // 2026-11-15（需求-事件参数按类型归属 第零步）：dialogue 必填。
+                        // 对白是成人向内容的关键载体，原骨架里没有任何字段要求写它，
+                        // 模型一段戏可能从头到尾没有一句台词。
+                        dialogue: { kind: 'text', required: true, note: '这一段的对白或声音——一到两句，写出口的原话，不写转述' },
                         end_mark: { kind: 'text', note: '什么标志说明这一段结束了' },
                     },
                 },
@@ -2750,9 +2960,11 @@
                 'parties 至少两方，每方都要有 line（底线），没有底线就写不出「什么时候停」',
                 'phases 三到五段，段数由事件参数决定，不要自己加减',
                 '每段都要有 progress 与 end_mark，缺一段推进就不成立',
+                '每段都要有 dialogue，写出口的原话，不写转述；只有氛围没有对白算不合格',
                 'pacing.stop 不能空——不写什么时候停，内容就没有可读性',
                 '同意与边界开启时 consent 三个子项都要写；关掉时整块不出现',
                 '不得跳过阶段直接进入下一阶段；不得让任何一方无故改变主意',
+                '不得用「一夜过去」「不必细说」「此处省略」这类收束跳过场景，不得用省略号或镜头切换替代动作与对话',
             ],
         },
 
@@ -2803,7 +3015,7 @@
                 },
             },
             rules: [
-                'search_grid.id 从 1 连续编号，至少三片，少于三片就没有搜索可言',
+                'search_grid.id 从 1 连续编号；片数按本次「搜索盘面」参数，参数给了几片就写几片（参数为「1–2 片」时就写 2 片，整片一次搜完）',
                 'alert 写成 0 到 3 的整数，exposure 写成 0 到 10 的整数，不得用「较高」「危险」这类程度词',
                 'alert 与 exposure 要能被推动——搜过一片、惊动一次，这两个数就该变',
                 'intercept 至少一条，每条都要有时间窗；没有时间窗的拦截点等于没有',
@@ -2866,7 +3078,7 @@
                 },
             },
             rules: [
-                'rescue_window.id 从 1 连续编号，至少两个窗口；只有一个窗口就没有取舍',
+                'rescue_window.id 从 1 连续编号；窗口数按本次「救援窗口数」参数来（参数为「1 个」时就只有一个时机，取舍落在「错过就没了」上）',
                 '每个窗口的 tool 要写具体——没有工具就进不去，这正是取舍的来源',
                 'secondary 至少一条，且要写清触发条件',
                 'toll 随阶段更新，不得一上来就写最终数字；结局确定后才写定数',
@@ -2924,7 +3136,7 @@
                 },
             },
             rules: [
-                'stages.id 从 1 连续编号，至少两个环节；只有一个环节就不叫程序',
+                'stages.id 从 1 连续编号；环节数按本次「程序环节数」参数来（参数为「1 环」时就是一次表决定生死，重点写这一步的角力）',
                 '每个环节的 what 要写「怎么算过」，不能只写环节名',
                 'seats 三个子项都要写，total 是门槛，votes 是当下的数',
                 'legitimacy.defect 不能一律写「无瑕疵」——程序若真无瑕疵，这类型就失去张力',
@@ -2983,6 +3195,8 @@
                 staffing: {
                     kind: 'list', min: 1,
                     note: '手里的人',
+                    // 2026-11-16：雇工数量取「一个人守」时这张表就是空的
+                    mayBeEmpty: true,
                     item: {
                         post: { kind: 'text', note: '什么岗位' },
                         skill: { kind: 'text', note: '会什么、不会什么' },
@@ -3000,6 +3214,7 @@
                 '不得让经营稳赚不赔；不得出现 cashflow 之外的资金来源',
             ],
         },
+
     };
 
 
@@ -3439,7 +3654,7 @@
         },
         '追捕搜索': {
             target: '四子项都要写，尤其是停留点——那是唯一能追上的窗口',
-            search_grid: '每片给编 id（从 1 连续），至少三片。searched 记当下搜过没有，追踪器按它勾选',
+            search_grid: '每片给编 id（从 1 连续），片数按「搜索盘面」参数。searched 记当下搜过没有，追踪器按它勾选',
             alert: '写整数 0 到 3，不要写「较高」「危险」这类程度词',
             exposure: '写整数 0 到 10。它与 alert 是两回事：一个是对面的警觉，一个是你自己的暴露',
             intercept: '每条拦截点都要写时间窗，没有时间窗等于截不住',
@@ -3447,13 +3662,13 @@
         '灾难事故': {
             trigger: '三子项都要写。前兆这一项不能写「毫无征兆」，给过机会才算灾难',
             spread: '写波及范围与速度。速度用可感的参照，不要求纯数字',
-            rescue_window: '每个窗口给编 id（从 1 连续），至少两个。窗口之间要互斥，能同时救就没有取舍',
+            rescue_window: '每个窗口给编 id（从 1 连续），数量按本次「救援窗口数」参数。窗口之间要互斥，能同时救就没有取舍',
             secondary: '次生灾害要写触发条件，不能凭空冒出来',
             toll: '随阶段更新，不要一上来就写最终数字',
         },
         '政治程序': {
             seats: '三个子项都写。total 是门槛，votes 是当下的数',
-            stages: '程序环节，给编 id（从 1 连续），至少两个。每个都要写「怎么算过」',
+            stages: '程序环节，给编 id（从 1 连续），数量按本次「程序环节数」参数。每个都要写「怎么算过」',
             legitimacy: '程序瑕疵不要一律写「无瑕疵」——真无瑕疵这类型就没有张力了',
             lobbying: '每个可争取对象都要写代价，没有代价的拉拢等于作弊',
             outcome: '只能写「通过」「否决」「搁置」「交易」四者之一',
